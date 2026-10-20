@@ -3,12 +3,20 @@
 // then they are only exercised by tests. Remove this allow when wiring lands.
 #![allow(dead_code, unused_macros)]
 
+#[macro_use]
+mod logging;
+mod app;
 mod config_file;
 mod engines;
 mod fsutil;
+mod icon;
 mod jobs;
 mod probe;
-#[macro_use]
-mod logging;
+mod tray;
 
-fn main() {}
+fn main() {
+    if let Err(e) = app::run() {
+        log_error!("치명적 오류: {e}");
+        std::process::exit(1);
+    }
+}
