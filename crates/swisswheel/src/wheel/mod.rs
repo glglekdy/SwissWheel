@@ -1,5 +1,6 @@
 //! The wheel popup: window management and Direct2D rendering.
 
+mod glyph;
 mod render;
 mod window;
 

@@ -16,10 +16,11 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::WinRT::Composition::{ICompositorDesktopInterop, ICompositorInterop};
-use windows::core::{HSTRING, Interface, PCWSTR, Result, w};
+use windows::core::{BOOL, HSTRING, Interface, PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
 use super::WheelView;
+use super::glyph::glyph;
 use super::window::HOVER_GROW;
 
 const OPEN_SCALE_FROM: f32 = 0.92; // wheel scales from 92% to 100% while opening
@@ -147,6 +148,8 @@ pub struct Renderer {
     backdrop_clip: CompositionEllipseGeometry,
     _content: SpriteVisual,
     dwrite: IDWriteFactory,
+    /// Family of the system icon font (see `glyph`).
+    icon_font: PCWSTR,
     /// Round line joins: stroking a tile with its own fill rounds its corners.
     round: ID2D1StrokeStyle1,
     size: u32,
@@ -229,6 +232,7 @@ impl Renderer {
             children.InsertAtTop(&content)?;
 
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let icon_font = icon_font(&dwrite);
             let round = factory.CreateStrokeStyle(
                 &D2D1_STROKE_STYLE_PROPERTIES1 {
                     startCap: D2D1_CAP_STYLE_ROUND,
@@ -253,6 +257,7 @@ impl Renderer {
                 backdrop_clip,
                 _content: content,
                 dwrite,
+                icon_font,
                 round,
                 size,
             })
@@ -318,8 +323,16 @@ impl Renderer {
                 None,
             );
 
-            let label_size = if n > RING_CAPACITY { 11.0 } else { 13.0 } * scale;
-            let label_format = self.text_format(label_size, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+            // Icon above, small label below; two rings make for shorter tiles.
+            let (icon_size, label_size, icon_dy, label_dy) = if n > RING_CAPACITY {
+                (16.0, 9.0, -6.0, 9.0)
+            } else {
+                (22.0, 10.5, -7.0, 13.0)
+            };
+            let icon_format =
+                self.font_format(self.icon_font, icon_size * scale, DWRITE_FONT_WEIGHT_NORMAL)?;
+            let label_format =
+                self.text_format(label_size * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
             let shadow = brush(&colors.shadow)?;
             for (i, op) in view.items.iter().enumerate() {
                 let s = sector(n, i, scale);
@@ -342,19 +355,28 @@ impl Renderer {
 
                 let mid = (s.start_deg + s.end_deg) / 2.0;
                 let (x, y) = polar(c, (inner + outer) / 2.0, mid);
-                let text = if hovered {
+                let text = brush(if hovered {
                     &colors.accent_text
                 } else {
                     &colors.text
-                };
+                })?;
+                self.draw_text(
+                    glyph(op).encode_utf8(&mut [0; 4]),
+                    &icon_format,
+                    x,
+                    y + icon_dy * scale,
+                    (icon_size + 8.0) * scale,
+                    (icon_size + 8.0) * scale,
+                    &text,
+                );
                 self.draw_text(
                     op.label(),
                     &label_format,
                     x,
-                    y,
+                    y + label_dy * scale,
                     76.0 * scale,
-                    22.0 * scale,
-                    &brush(text)?,
+                    (label_size + 6.0) * scale,
+                    &text,
                 );
             }
 
@@ -457,10 +479,19 @@ impl Renderer {
     }
 
     fn text_format(&self, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
+        // Hangul falls back to the system's Korean UI font automatically.
+        self.font_format(w!("Segoe UI Variable Text"), size, weight)
+    }
+
+    fn font_format(
+        &self,
+        family: PCWSTR,
+        size: f32,
+        weight: DWRITE_FONT_WEIGHT,
+    ) -> Result<IDWriteTextFormat> {
         unsafe {
-            // Hangul falls back to the system's Korean UI font automatically.
             let format = self.dwrite.CreateTextFormat(
-                w!("Segoe UI Variable Text"),
+                family,
                 None,
                 weight,
                 DWRITE_FONT_STYLE_NORMAL,
@@ -610,6 +641,25 @@ impl Tile {
             }
         }
         (y0, y1)
+    }
+}
+
+/// Segoe Fluent Icons ships with Windows 11; Windows 10 has the older Segoe
+/// MDL2 Assets, which has the same code points for the icons we use.
+fn icon_font(dwrite: &IDWriteFactory) -> PCWSTR {
+    let fluent = w!("Segoe Fluent Icons");
+    let mut fonts = None;
+    let (mut index, mut exists) = (0, BOOL::default());
+    let found = unsafe {
+        dwrite.GetSystemFontCollection(&mut fonts, false).is_ok()
+            && fonts.is_some_and(|f| {
+                f.FindFamilyName(fluent, &mut index, &mut exists).is_ok() && exists.as_bool()
+            })
+    };
+    if found {
+        fluent
+    } else {
+        w!("Segoe MDL2 Assets")
     }
 }
 
