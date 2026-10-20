@@ -2,6 +2,7 @@
 
 pub mod catalog;
 pub mod config;
+pub mod drag;
 pub mod format;
 pub mod geometry;
 pub mod naming;
