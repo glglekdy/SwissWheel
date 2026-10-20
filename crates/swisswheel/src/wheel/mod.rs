@@ -10,8 +10,6 @@ pub use window::WheelWindow;
 
 /// Everything the renderer needs for one frame.
 pub struct WheelView<'a> {
-    /// Files not known yet (before DragEnter).
-    pub loading: bool,
     /// Shown in the center circle.
     pub title: &'a str,
     pub items: &'a [Operation],

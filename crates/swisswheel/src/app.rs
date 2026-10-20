@@ -286,9 +286,10 @@ impl AppState {
         }
         self.session = Some(WheelSession::new());
         self.dragged.clear();
-        self.opened_at = Instant::now();
         self.wheel.place_at(cursor);
-        self.render();
+        // Invisible until DragEnter proves this is a file drag (no flash on a
+        // title-bar drag); the open animation starts in on_drag_enter.
+        self.wheel.clear();
         self.wheel.show();
         unsafe {
             SetTimer(
@@ -297,7 +298,6 @@ impl AppState {
                 ENTER_TIMEOUT.as_millis() as u32,
                 None,
             );
-            SetTimer(Some(self.hwnd), TIMER_ANIMATION, 16, None);
             // A zero-pixel move makes the OLE drag loop hit-test right away, so
             // DragEnter arrives without the user moving the mouse (spike S2).
             let input = INPUT {
@@ -328,15 +328,13 @@ impl AppState {
         let Some(session) = &self.session else {
             return;
         };
-        let title = match session.wheel() {
-            Some(kind) => kind.label(),
-            None if session.is_loading() => "…",
-            None => "—",
-        };
+        if session.is_loading() {
+            return; // stays transparent until the files are known
+        }
+        let title = session.wheel().map_or("—", |kind| kind.label());
         let progress =
             (self.opened_at.elapsed().as_secs_f32() / OPEN_ANIMATION.as_secs_f32()).min(1.0);
         let view = WheelView {
-            loading: session.is_loading(),
             title,
             items: session.items(),
             hovered: session.hovered(),
@@ -461,6 +459,8 @@ pub fn on_drag_enter(paths: Vec<PathBuf>, x: i32, y: i32) -> DROPEFFECT {
         session.hover(dx, dy, scale);
         if first_enter {
             s.dragged = paths;
+            s.opened_at = Instant::now(); // the wheel becomes visible now
+            unsafe { SetTimer(Some(s.hwnd), TIMER_ANIMATION, 16, None) };
         }
         s.render();
         Some(s.effect())

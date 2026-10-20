@@ -119,7 +119,7 @@ Cargo 워크스페이스 하나에 두 크레이트:
 ### 4.2 드래그 감지 흐름
 1. `WH_MOUSE_LL`이 왼쪽 버튼 down 위치를 기록. 버튼이 눌린 채로 시스템 드래그 임계값(`SM_CXDRAG/SM_CYDRAG`) 이상 움직이면 `drag_candidate = true`. 버튼 up 시 false.
 2. `WH_KEYBOARD_LL`에서 `drag_candidate && open_key down` 이면 키를 삼키고(1 반환) UI 스레드에 `OpenWheel(cursor_pos)` 게시.
-3. UI 스레드가 휠 창을 커서 중심에 표시(빈 껍데기 + 로딩 상태)하고, `SendInput`으로 0픽셀 상대 이동을 주입해 OLE 드래그 루프가 즉시 히트 테스트하게 한다.
+3. UI 스레드가 휠 창을 커서 중심에 **완전히 투명한 상태로** 표시하고(창 영역은 히트 테스트되므로 드롭 타깃으로 동작), `SendInput`으로 0픽셀 상대 이동을 주입해 OLE 드래그 루프가 즉시 히트 테스트하게 한다. 휠 그리기와 열림 애니메이션은 4단계의 `DragEnter`에서 시작한다 — 파일 드래그가 아니면 화면에 아무것도 보이지 않는다 (수동 확인에서 제목 표시줄 드래그 시 휠이 잠깐 깜빡이던 문제).
 4. `IDropTarget::DragEnter`에서 `CF_HDROP` 파일 목록을 받아 catalog로 항목 계산 → 휠 채움.
 5. 휠 표시 후 300ms 안에 `DragEnter`가 오지 않으면(파일 드래그가 아님 — 창 이동, 텍스트 선택 등) 휠을 닫는다. 이렇게 닫힌 뒤에는 `open_key`를 떼거나 왼쪽 버튼을 놓을 때까지 다시 열지 않고, 그동안의 `open_key` 입력은 삼키지 않고 원래 앱으로 통과시킨다 (스파이크 S6: 키 반복으로 약 330ms마다 다시 열리던 문제).
 6. 휠이 열린 동안 `cycle_key`/`cancel_key`/`open_key`는 훅에서 삼키고 UI 스레드로 전달.

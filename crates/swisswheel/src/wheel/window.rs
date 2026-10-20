@@ -140,7 +140,19 @@ impl WheelWindow {
         self.visible = false;
     }
 
+    /// Shows nothing while the window waits for DragEnter, so a drag that turns
+    /// out not to carry files never flashes the wheel. Also wipes the frame
+    /// left over from the previous open.
+    pub fn clear(&mut self) {
+        self.with_renderer(Renderer::clear);
+    }
+
     pub fn render(&mut self, view: &WheelView) {
+        let scale = self.scale;
+        self.with_renderer(|r| r.draw(view, scale));
+    }
+
+    fn with_renderer(&mut self, f: impl FnOnce(&mut Renderer) -> windows::core::Result<()>) {
         let size = self.size as u32;
         if self.renderer.as_ref().is_some_and(|r| r.size() != size) {
             self.renderer = None;
@@ -155,7 +167,7 @@ impl WheelWindow {
             }
         }
         if let Some(r) = &mut self.renderer
-            && let Err(e) = r.draw(view, self.scale)
+            && let Err(e) = f(r)
         {
             // Device lost or similar: rebuild on the next frame.
             log_error!("휠 그리기 실패: {e}");

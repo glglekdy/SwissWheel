@@ -162,6 +162,22 @@ impl Renderer {
         self.size
     }
 
+    /// Presents a fully transparent frame (the window stays hit-testable).
+    pub fn clear(&mut self) -> Result<()> {
+        unsafe {
+            self.ctx.BeginDraw();
+            self.ctx.Clear(Some(&D2D1_COLOR_F {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            }));
+            self.ctx.EndDraw(None, None)?;
+            self.swap.Present(1, DXGI_PRESENT(0)).ok()?;
+            self.dcomp.Commit()
+        }
+    }
+
     pub fn draw(&mut self, view: &WheelView, scale: f32) -> Result<()> {
         let eased = 1.0 - (1.0 - view.progress.clamp(0.0, 1.0)).powi(3);
         let grow = OPEN_SCALE_FROM + (1.0 - OPEN_SCALE_FROM) * eased;
@@ -181,13 +197,6 @@ impl Renderer {
 
             let bg = brush(&colors.background)?;
             ctx.FillEllipse(&ellipse(c, OUTER_RADIUS * scale * grow), &bg);
-            if view.loading {
-                // Placeholder ring while the dragged files are still unknown.
-                ctx.FillEllipse(
-                    &ellipse(c, (OUTER_RADIUS - 4.0) * scale * grow),
-                    &brush(&colors.sector)?,
-                );
-            }
 
             let label_size = if n > RING_CAPACITY { 11.0 } else { 13.0 } * scale;
             let label_format = self.text_format(label_size, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
