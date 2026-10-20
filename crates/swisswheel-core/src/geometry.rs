@@ -89,12 +89,16 @@ pub fn sector(item_count: usize, index: usize, scale: f32) -> Sector {
 }
 
 /// `dx, dy`: offset from the wheel center in physical pixels, y pointing down.
+/// Fails safe: an invalid `scale` or a NaN offset yields `Cancel`.
 pub fn hit_test(item_count: usize, dx: f32, dy: f32, scale: f32) -> Hit {
+    if !(scale.is_finite() && scale > 0.0) {
+        return Hit::Cancel;
+    }
     let r = dx.hypot(dy) / scale;
     if r > OUTER_RADIUS {
         return Hit::Outside;
     }
-    if r < CANCEL_RADIUS || item_count == 0 {
+    if r.is_nan() || r < CANCEL_RADIUS || item_count == 0 {
         return Hit::Cancel;
     }
     let (inner, outer) = rings(item_count);
@@ -197,6 +201,15 @@ mod tests {
             (t.inner_radius, t.outer_radius, t.start_deg, t.end_deg),
             (208.0, 320.0, 90.0, 270.0)
         );
+    }
+
+    #[test]
+    fn degenerate_inputs_fall_back_to_cancel() {
+        // A failed DPI query yields scale 0; a drop on the center must not run an operation.
+        assert_eq!(hit_test(4, 0.0, 0.0, 0.0), Hit::Cancel);
+        assert_eq!(hit_test(4, 0.0, -100.0, -1.0), Hit::Cancel);
+        assert_eq!(hit_test(4, 0.0, -100.0, f32::NAN), Hit::Cancel);
+        assert_eq!(hit_test(4, f32::NAN, -100.0, S), Hit::Cancel);
     }
 
     #[test]
