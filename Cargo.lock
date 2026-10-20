@@ -1071,6 +1071,7 @@ dependencies = [
  "webp",
  "windows",
  "windows-core",
+ "windows-numerics",
 ]
 
 [[package]]
