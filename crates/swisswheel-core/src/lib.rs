@@ -6,3 +6,4 @@ pub mod drag;
 pub mod format;
 pub mod geometry;
 pub mod naming;
+pub mod session;
