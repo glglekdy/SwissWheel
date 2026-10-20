@@ -4,6 +4,7 @@
 #![allow(dead_code, unused_macros)]
 
 mod config_file;
+mod engines;
 mod fsutil;
 mod probe;
 #[macro_use]
