@@ -1,3 +1,4 @@
 /target
 spike/**/target
 .superpowers/
+spike/**/Cargo.lock
