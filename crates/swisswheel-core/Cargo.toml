@@ -1,0 +1,8 @@
+[package]
+name = "swisswheel-core"
+description = "OS-independent logic for SwissWheel: formats, wheel catalog, geometry, naming, config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]

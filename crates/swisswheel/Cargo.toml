@@ -1,0 +1,9 @@
+[package]
+name = "swisswheel"
+description = "Drag a file, press Space, drop it on a format: offline file converter for Windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+swisswheel-core = { path = "../swisswheel-core" }
