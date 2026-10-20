@@ -7,3 +7,4 @@ pub mod format;
 pub mod geometry;
 pub mod naming;
 pub mod session;
+pub mod summary;
