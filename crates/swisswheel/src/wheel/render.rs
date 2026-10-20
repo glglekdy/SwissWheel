@@ -1,19 +1,22 @@
-//! Draws the wheel with Direct2D into a DirectComposition swap chain, which
-//! gives the window per-pixel transparency without layered-window blits.
+//! Draws the wheel. A Windows.UI.Composition visual tree gives the window
+//! per-pixel transparency: at the bottom a host-backdrop (acrylic blur) disc,
+//! on top a Direct2D swap chain with the tint, sectors, and labels.
 
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::geometry::{CANCEL_RADIUS, OUTER_RADIUS, RING_CAPACITY, sector};
+use windows::UI::Composition::Desktop::DesktopWindowTarget;
+use windows::UI::Composition::{CompositionEllipseGeometry, Compositor, SpriteVisual};
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::Direct3D::*;
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::DirectComposition::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
-use windows::core::{HSTRING, Interface, Result, w};
+use windows::Win32::System::WinRT::Composition::{ICompositorDesktopInterop, ICompositorInterop};
+use windows::core::{HSTRING, Interface, PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
 use super::WheelView;
@@ -21,12 +24,28 @@ use super::window::HOVER_GROW;
 
 const OPEN_SCALE_FROM: f32 = 0.92; // wheel scales from 92% to 100% while opening
 
+/// Gap between neighboring tiles and the rounding of their corners (DIPs).
+const TILE_GAP: f32 = 4.0;
+const TILE_CORNER: f32 = 6.0;
+/// The hub (center circle) sits this far inside the cancel radius.
+const HUB_INSET: f32 = 6.0;
+
 struct Palette {
-    background: D2D1_COLOR_F,
-    sector: D2D1_COLOR_F,
-    sector_alt: D2D1_COLOR_F,
+    /// Glass: a light translucent tint over the blur. Solid: an opaque disc.
+    disc: D2D1_COLOR_F,
+    /// 1 px highlight just inside the disc edge, faint line just outside it.
+    rim: D2D1_COLOR_F,
+    outline: D2D1_COLOR_F,
+    /// Tiles shade from top to bottom and cast a 1 px drop shadow.
+    tile_top: D2D1_COLOR_F,
+    tile_bottom: D2D1_COLOR_F,
+    shadow: D2D1_COLOR_F,
+    hub: D2D1_COLOR_F,
+    hub_ring: D2D1_COLOR_F,
     text: D2D1_COLOR_F,
-    accent: D2D1_COLOR_F,
+    subtext: D2D1_COLOR_F,
+    accent_top: D2D1_COLOR_F,
+    accent_bottom: D2D1_COLOR_F,
     accent_text: D2D1_COLOR_F,
 }
 
@@ -40,46 +59,80 @@ fn rgb(hex: u32, alpha: f32) -> D2D1_COLOR_F {
     }
 }
 
-fn palette(light: bool, alpha: f32) -> Palette {
-    let accent = rgb(0xE03A3E, alpha);
+/// `alpha` fades everything in during the open animation.
+fn palette(light: bool, glass: bool, alpha: f32) -> Palette {
+    let a = |v: f32| v * alpha;
+    let accent_top = rgb(0xEA4A4E, alpha);
+    let accent_bottom = rgb(0xD2343A, alpha);
     let accent_text = rgb(0xFFFFFF, alpha);
     if light {
         Palette {
-            background: rgb(0xFFFFFF, 0.97 * alpha),
-            sector: rgb(0xF4F4F4, alpha),
-            sector_alt: rgb(0xEAEAEA, alpha),
-            text: rgb(0x1F1F1F, alpha),
-            accent,
+            disc: if glass {
+                rgb(0xECECEF, a(0.62))
+            } else {
+                rgb(0xE6E6EA, alpha)
+            },
+            rim: rgb(0xFFFFFF, a(0.90)),
+            outline: rgb(0x000000, a(0.10)),
+            tile_top: rgb(0xFFFFFF, a(0.96)),
+            tile_bottom: rgb(0xEFEFF2, a(0.96)),
+            shadow: rgb(0x000000, a(0.10)),
+            hub: rgb(0xFFFFFF, alpha),
+            hub_ring: rgb(0xD6D6DB, alpha),
+            text: rgb(0x2B2B2E, alpha),
+            subtext: rgb(0x7A7A80, alpha),
+            accent_top,
+            accent_bottom,
             accent_text,
         }
     } else {
         Palette {
-            background: rgb(0x1E1E1E, 0.97 * alpha),
-            sector: rgb(0x2C2C2C, alpha),
-            sector_alt: rgb(0x343434, alpha),
-            text: rgb(0xF2F2F2, alpha),
-            accent,
+            disc: if glass {
+                rgb(0x2A2A2E, a(0.58))
+            } else {
+                rgb(0x242428, alpha)
+            },
+            rim: rgb(0xFFFFFF, a(0.14)),
+            outline: rgb(0x000000, a(0.35)),
+            tile_top: rgb(0x4A4A50, a(0.92)),
+            tile_bottom: rgb(0x3C3C42, a(0.92)),
+            shadow: rgb(0x000000, a(0.35)),
+            hub: rgb(0x3E3E44, alpha),
+            hub_ring: rgb(0x55555C, alpha),
+            text: rgb(0xF0F0F2, alpha),
+            subtext: rgb(0xA8A8AE, alpha),
+            accent_top,
+            accent_bottom,
             accent_text,
         }
     }
 }
 
-/// `AppsUseLightTheme` from the user's personalization settings (default light).
-fn light_theme() -> bool {
-    let mut value = 1u32;
+/// A DWORD under the user's personalization settings; `default` if unset.
+fn personalize_flag(name: PCWSTR, default: bool) -> bool {
+    let mut value = u32::from(default);
     let mut size = size_of::<u32>() as u32;
     let status = unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-            w!("AppsUseLightTheme"),
+            name,
             RRF_RT_REG_DWORD,
             None,
             Some(std::ptr::from_mut(&mut value).cast()),
             Some(&mut size),
         )
     };
-    status.is_err() || value != 0
+    if status.is_err() { default } else { value != 0 }
+}
+
+fn light_theme() -> bool {
+    personalize_flag(w!("AppsUseLightTheme"), true)
+}
+
+/// Settings → Personalization → Colors → Transparency effects.
+fn transparency_enabled() -> bool {
+    personalize_flag(w!("EnableTransparency"), true)
 }
 
 pub struct Renderer {
@@ -87,10 +140,15 @@ pub struct Renderer {
     factory: ID2D1Factory1,
     ctx: ID2D1DeviceContext,
     swap: IDXGISwapChain1,
-    dcomp: IDCompositionDevice,
-    _target: IDCompositionTarget,
-    _visual: IDCompositionVisual,
+    _compositor: Compositor,
+    _target: DesktopWindowTarget,
+    /// Acrylic blur of whatever is behind the window, clipped to `backdrop_clip`.
+    backdrop: SpriteVisual,
+    backdrop_clip: CompositionEllipseGeometry,
+    _content: SpriteVisual,
     dwrite: IDWriteFactory,
+    /// Round line joins: stroking a tile with its own fill rounds its corners.
+    round: ID2D1StrokeStyle1,
     size: u32,
 }
 
@@ -136,23 +194,66 @@ impl Renderer {
             let bitmap = ctx.CreateBitmapFromDxgiSurface(&surface, Some(&props))?;
             ctx.SetTarget(&bitmap);
 
-            let dcomp: IDCompositionDevice = DCompositionCreateDevice(&dxgi_device)?;
-            let target = dcomp.CreateTargetForHwnd(hwnd, true)?;
-            let visual = dcomp.CreateVisual()?;
-            visual.SetContent(&swap)?;
-            target.SetRoot(&visual)?;
-            dcomp.Commit()?;
+            // Needs a DispatcherQueue on this thread (created in app::run);
+            // the compositor commits on its own as that queue is pumped.
+            let compositor = Compositor::new()?;
+            let target = compositor
+                .cast::<ICompositorDesktopInterop>()?
+                .CreateDesktopWindowTarget(hwnd, true)?;
+            let full = Vector2 {
+                X: size as f32,
+                Y: size as f32,
+            };
+            let root = compositor.CreateContainerVisual()?;
+            root.SetSize(full)?;
+            target.SetRoot(&root)?;
+
+            let backdrop = compositor.CreateSpriteVisual()?;
+            backdrop.SetSize(full)?;
+            backdrop.SetBrush(&compositor.CreateHostBackdropBrush()?)?;
+            let backdrop_clip = compositor.CreateEllipseGeometry()?;
+            let c = size as f32 / 2.0;
+            backdrop_clip.SetCenter(Vector2 { X: c, Y: c })?;
+            backdrop.SetClip(&compositor.CreateGeometricClipWithGeometry(&backdrop_clip)?)?;
+            backdrop.SetIsVisible(false)?;
+
+            let surface = compositor
+                .cast::<ICompositorInterop>()?
+                .CreateCompositionSurfaceForSwapChain(&swap)?;
+            let content = compositor.CreateSpriteVisual()?;
+            content.SetSize(full)?;
+            content.SetBrush(&compositor.CreateSurfaceBrushWithSurface(&surface)?)?;
+
+            let children = root.Children()?;
+            children.InsertAtBottom(&backdrop)?;
+            children.InsertAtTop(&content)?;
 
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+            let round = factory.CreateStrokeStyle(
+                &D2D1_STROKE_STYLE_PROPERTIES1 {
+                    startCap: D2D1_CAP_STYLE_ROUND,
+                    endCap: D2D1_CAP_STYLE_ROUND,
+                    dashCap: D2D1_CAP_STYLE_ROUND,
+                    lineJoin: D2D1_LINE_JOIN_ROUND,
+                    miterLimit: 10.0,
+                    dashStyle: D2D1_DASH_STYLE_SOLID,
+                    dashOffset: 0.0,
+                    transformType: D2D1_STROKE_TRANSFORM_TYPE_NORMAL,
+                },
+                None,
+            )?;
             Ok(Renderer {
                 _device: device,
                 factory,
                 ctx,
                 swap,
-                dcomp,
+                _compositor: compositor,
                 _target: target,
-                _visual: visual,
+                backdrop,
+                backdrop_clip,
+                _content: content,
                 dwrite,
+                round,
                 size,
             })
         }
@@ -174,16 +275,23 @@ impl Renderer {
             }));
             self.ctx.EndDraw(None, None)?;
             self.swap.Present(1, DXGI_PRESENT(0)).ok()?;
-            self.dcomp.Commit()
         }
+        self.backdrop.SetIsVisible(false)
     }
 
-    pub fn draw(&mut self, view: &WheelView, scale: f32) -> Result<()> {
+    pub fn draw(&mut self, view: &WheelView, scale: f32, glass_supported: bool) -> Result<()> {
         let eased = 1.0 - (1.0 - view.progress.clamp(0.0, 1.0)).powi(3);
         let grow = OPEN_SCALE_FROM + (1.0 - OPEN_SCALE_FROM) * eased;
-        let colors = palette(light_theme(), eased);
+        // With transparency effects off the host backdrop draws nothing useful,
+        // so fall back to an opaque disc.
+        let glass = glass_supported && transparency_enabled();
+        let colors = palette(light_theme(), glass, eased);
         let c = self.size as f32 / 2.0;
         let n = view.items.len();
+        let disc = OUTER_RADIUS * scale * grow;
+        self.backdrop.SetIsVisible(glass)?;
+        self.backdrop.SetOpacity(eased)?;
+        self.backdrop_clip.SetRadius(Vector2 { X: disc, Y: disc })?;
         unsafe {
             let ctx = &self.ctx;
             ctx.BeginDraw();
@@ -195,27 +303,42 @@ impl Renderer {
             }));
             let brush = |color: &D2D1_COLOR_F| ctx.CreateSolidColorBrush(color, None);
 
-            let bg = brush(&colors.background)?;
-            ctx.FillEllipse(&ellipse(c, OUTER_RADIUS * scale * grow), &bg);
+            // Base disc with a light edge inside and a faint line outside.
+            ctx.FillEllipse(&ellipse(c, disc), &brush(&colors.disc)?);
+            ctx.DrawEllipse(
+                &ellipse(c, disc + 0.5 * scale),
+                &brush(&colors.outline)?,
+                scale,
+                None,
+            );
+            ctx.DrawEllipse(
+                &ellipse(c, disc - 0.5 * scale),
+                &brush(&colors.rim)?,
+                scale,
+                None,
+            );
 
             let label_size = if n > RING_CAPACITY { 11.0 } else { 13.0 } * scale;
             let label_format = self.text_format(label_size, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+            let shadow = brush(&colors.shadow)?;
             for (i, op) in view.items.iter().enumerate() {
                 let s = sector(n, i, scale);
                 let hovered = view.hovered == Hit::Item(i);
                 let inner = s.inner_radius * grow;
                 let outer =
                     (s.outer_radius + if hovered { HOVER_GROW * scale } else { 0.0 }) * grow;
-                let path = self.annular_sector(c, inner, outer, s.start_deg, s.end_deg)?;
-                let fill = if hovered {
-                    &colors.accent
-                } else if i % 2 == 0 {
-                    &colors.sector
+                let tile = Tile::new(inner, outer, s.start_deg, s.end_deg, scale);
+
+                // Drop shadow: the same tile, 1 px lower.
+                self.fill_tile(&self.tile_path(c, c + 1.2 * scale, &tile)?, &tile, &shadow)?;
+                let (top, bottom) = if hovered {
+                    (&colors.accent_top, &colors.accent_bottom)
                 } else {
-                    &colors.sector_alt
+                    (&colors.tile_top, &colors.tile_bottom)
                 };
-                ctx.FillGeometry(&path, &brush(fill)?, None);
-                ctx.DrawGeometry(&path, &bg, 2.0 * scale, None); // gap between sectors
+                let (y0, y1) = tile.vertical_extent(c);
+                let fill = self.vertical_gradient(c, y0, y1, top, bottom)?;
+                self.fill_tile(&self.tile_path(c, c, &tile)?, &tile, &fill)?;
 
                 let mid = (s.start_deg + s.end_deg) / 2.0;
                 let (x, y) = polar(c, (inner + outer) / 2.0, mid);
@@ -224,26 +347,113 @@ impl Renderer {
                 } else {
                     &colors.text
                 };
-                self.draw_text(op.label(), &label_format, x, y, 76.0 * scale, &brush(text)?);
+                self.draw_text(
+                    op.label(),
+                    &label_format,
+                    x,
+                    y,
+                    76.0 * scale,
+                    22.0 * scale,
+                    &brush(text)?,
+                );
             }
 
-            let accent = brush(&colors.accent)?;
-            ctx.FillEllipse(&ellipse(c, (CANCEL_RADIUS - 2.0) * scale * grow), &accent);
-            let title_format = self.text_format(13.0 * scale, DWRITE_FONT_WEIGHT_BOLD)?;
-            self.draw_text(
-                view.title,
-                &title_format,
-                c,
-                c,
-                84.0 * scale,
-                &brush(&colors.accent_text)?,
+            // Hub: a raised circle with what is being dragged and the wheel's name.
+            let hub = (CANCEL_RADIUS - HUB_INSET) * scale * grow;
+            ctx.FillEllipse(&ellipse_at(c, c + 1.2 * scale, hub), &shadow);
+            ctx.FillEllipse(&ellipse(c, hub), &brush(&colors.hub)?);
+            ctx.DrawEllipse(
+                &ellipse(c, hub - 0.5 * scale),
+                &brush(&colors.hub_ring)?,
+                scale,
+                None,
             );
+            let detail_format = self.text_format(13.0 * scale, DWRITE_FONT_WEIGHT_BOLD)?;
+            let title_format = self.text_format(10.5 * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+            let width = 2.0 * hub - 8.0 * scale;
+            if view.detail.is_empty() {
+                self.draw_text(
+                    view.title,
+                    &detail_format,
+                    c,
+                    c,
+                    width,
+                    22.0 * scale,
+                    &brush(&colors.text)?,
+                );
+            } else {
+                self.draw_text(
+                    view.detail,
+                    &detail_format,
+                    c,
+                    c - 6.0 * scale,
+                    width,
+                    20.0 * scale,
+                    &brush(&colors.text)?,
+                );
+                self.draw_text(
+                    view.title,
+                    &title_format,
+                    c,
+                    c + 11.0 * scale,
+                    width,
+                    16.0 * scale,
+                    &brush(&colors.subtext)?,
+                );
+            }
 
             ctx.EndDraw(None, None)?;
             self.swap.Present(1, DXGI_PRESENT(0)).ok()?;
-            self.dcomp.Commit()?;
         }
         Ok(())
+    }
+
+    /// Fills a tile path and strokes it with the same brush using round joins;
+    /// the stroke's half-width is exactly the inset `Tile` left for it, so the
+    /// result is the tile with rounded corners.
+    fn fill_tile(&self, path: &ID2D1PathGeometry1, tile: &Tile, brush: &ID2D1Brush) -> Result<()> {
+        unsafe {
+            self.ctx.FillGeometry(path, brush, None);
+            if tile.corner > 0.0 {
+                self.ctx
+                    .DrawGeometry(path, brush, 2.0 * tile.corner, &self.round);
+            }
+        }
+        Ok(())
+    }
+
+    fn vertical_gradient(
+        &self,
+        x: f32,
+        y0: f32,
+        y1: f32,
+        top: &D2D1_COLOR_F,
+        bottom: &D2D1_COLOR_F,
+    ) -> Result<ID2D1Brush> {
+        unsafe {
+            let stops = [
+                D2D1_GRADIENT_STOP {
+                    position: 0.0,
+                    color: *top,
+                },
+                D2D1_GRADIENT_STOP {
+                    position: 1.0,
+                    color: *bottom,
+                },
+            ];
+            // The device context's own overload takes color spaces; use the
+            // classic render-target one.
+            let rt: &ID2D1RenderTarget = &self.ctx;
+            let collection =
+                rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)?;
+            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
+                startPoint: point((x, y0)),
+                endPoint: point((x, y1)),
+            };
+            self.ctx
+                .CreateLinearGradientBrush(&props, None, &collection)?
+                .cast()
+        }
     }
 
     fn text_format(&self, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
@@ -265,6 +475,8 @@ impl Renderer {
         }
     }
 
+    /// Draws `text` centered on (`x`, `y`) in a `width` × `height` box.
+    #[allow(clippy::too_many_arguments)]
     fn draw_text(
         &self,
         text: &str,
@@ -272,15 +484,15 @@ impl Renderer {
         x: f32,
         y: f32,
         width: f32,
+        height: f32,
         brush: &ID2D1SolidColorBrush,
     ) {
         let wide = HSTRING::from(text);
-        let half_h = 14.0 * (width / 76.0);
         let rect = D2D_RECT_F {
             left: x - width / 2.0,
-            top: y - half_h,
+            top: y - height / 2.0,
             right: x + width / 2.0,
-            bottom: y + half_h,
+            bottom: y + height / 2.0,
         };
         unsafe {
             self.ctx.DrawText(
@@ -294,44 +506,130 @@ impl Renderer {
         }
     }
 
-    /// A ring segment between two radii and two angles (0° = 12 o'clock, clockwise).
-    fn annular_sector(
-        &self,
-        c: f32,
-        inner: f32,
-        outer: f32,
-        start: f32,
-        end: f32,
-    ) -> Result<ID2D1PathGeometry1> {
+    /// The tile's core shape centered at (`cx`, `cy`); see `fill_tile`.
+    fn tile_path(&self, cx: f32, cy: f32, tile: &Tile) -> Result<ID2D1PathGeometry1> {
         unsafe {
             let path = self.factory.CreatePathGeometry()?;
             let sink = path.Open()?;
-            sink.BeginFigure(point(polar(c, outer, start)), D2D1_FIGURE_BEGIN_FILLED);
-            arc_to(&sink, c, outer, start, end, D2D1_SWEEP_DIRECTION_CLOCKWISE);
-            sink.AddLine(point(polar(c, inner, end)));
-            arc_to(
-                &sink,
-                c,
-                inner,
-                end,
-                start,
-                D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
-            );
-            sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            if tile.full_ring {
+                // A single item: a whole ring, drawn as two circles (alternate fill).
+                sink.SetFillMode(D2D1_FILL_MODE_ALTERNATE);
+                for r in [tile.outer, tile.inner] {
+                    sink.BeginFigure(point(polar_at(cx, cy, r, 0.0)), D2D1_FIGURE_BEGIN_FILLED);
+                    arc_to(&sink, cx, cy, r, 0.0, 360.0, D2D1_SWEEP_DIRECTION_CLOCKWISE);
+                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                }
+            } else {
+                let (os, oe) = tile.edge_angles(tile.outer);
+                let (is, ie) = tile.edge_angles(tile.inner);
+                sink.BeginFigure(
+                    point(polar_at(cx, cy, tile.outer, os)),
+                    D2D1_FIGURE_BEGIN_FILLED,
+                );
+                arc_to(
+                    &sink,
+                    cx,
+                    cy,
+                    tile.outer,
+                    os,
+                    oe,
+                    D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                );
+                sink.AddLine(point(polar_at(cx, cy, tile.inner, ie)));
+                arc_to(
+                    &sink,
+                    cx,
+                    cy,
+                    tile.inner,
+                    ie,
+                    is,
+                    D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+                );
+                sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+            }
             sink.Close()?;
             Ok(path)
         }
     }
 }
 
-/// Arcs from `from` to `to` degrees, split so no piece exceeds 180° (a full
-/// circle has identical end points, which a single arc can't express).
-fn arc_to(sink: &ID2D1GeometrySink, c: f32, r: f32, from: f32, to: f32, dir: D2D1_SWEEP_DIRECTION) {
+/// One sector drawn as a separate rounded tile. The core shape is the sector
+/// shrunk by `TILE_GAP / 2 + corner` on every side; stroking it with round
+/// joins at half-width `corner` grows it back to a `TILE_GAP / 2` margin with
+/// rounded corners.
+struct Tile {
+    inner: f32,
+    outer: f32,
+    start: f32,
+    end: f32,
+    /// Distance between the core's straight edges and the sector's edges.
+    offset: f32,
+    corner: f32,
+    full_ring: bool,
+}
+
+impl Tile {
+    fn new(inner: f32, outer: f32, start: f32, end: f32, scale: f32) -> Tile {
+        let half_gap = TILE_GAP / 2.0 * scale;
+        // Thin tiles (two rings, high item counts) get smaller corners.
+        let corner = (TILE_CORNER * scale).min(((outer - inner) / 2.0 - half_gap - 0.5).max(0.0));
+        let offset = half_gap + corner;
+        Tile {
+            inner: inner + offset,
+            outer: outer - offset,
+            start,
+            end,
+            offset,
+            corner,
+            full_ring: end - start >= 359.9,
+        }
+    }
+
+    /// The core's start and end angles at radius `r`, pulled in so the straight
+    /// edges stay `offset` from the sector's edges (more degrees near the hub).
+    fn edge_angles(&self, r: f32) -> (f32, f32) {
+        let inset = (self.offset / r.max(1.0)).min(0.99).asin().to_degrees();
+        let (s, e) = (self.start + inset, self.end - inset);
+        if s < e {
+            (s, e)
+        } else {
+            let mid = (self.start + self.end) / 2.0; // too narrow: collapse to a point
+            (mid, mid)
+        }
+    }
+
+    /// Top and bottom y of the finished tile, for its gradient.
+    fn vertical_extent(&self, c: f32) -> (f32, f32) {
+        let (mut y0, mut y1) = (f32::MAX, f32::MIN);
+        for k in 0..=8 {
+            let deg = self.start + (self.end - self.start) * k as f32 / 8.0;
+            for r in [self.outer + self.corner, self.inner - self.corner] {
+                let y = polar(c, r, deg).1;
+                y0 = y0.min(y);
+                y1 = y1.max(y);
+            }
+        }
+        (y0, y1)
+    }
+}
+
+/// Arcs from `from` to `to` degrees around (`cx`, `cy`), split so no piece
+/// exceeds 180° (a full circle has identical end points, which a single arc
+/// can't express).
+fn arc_to(
+    sink: &ID2D1GeometrySink,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    from: f32,
+    to: f32,
+    dir: D2D1_SWEEP_DIRECTION,
+) {
     let pieces = ((to - from).abs() / 180.0).ceil().max(1.0) as usize;
     for k in 1..=pieces {
         let angle = from + (to - from) * k as f32 / pieces as f32;
         let segment = D2D1_ARC_SEGMENT {
-            point: point(polar(c, r, angle)),
+            point: point(polar_at(cx, cy, r, angle)),
             size: D2D_SIZE_F {
                 width: r,
                 height: r,
@@ -344,9 +642,14 @@ fn arc_to(sink: &ID2D1GeometrySink, c: f32, r: f32, from: f32, to: f32, dir: D2D
     }
 }
 
-fn polar(c: f32, r: f32, deg: f32) -> (f32, f32) {
+/// The point at radius `r` and `deg` degrees (0° = 12 o'clock, clockwise).
+fn polar_at(cx: f32, cy: f32, r: f32, deg: f32) -> (f32, f32) {
     let rad = deg.to_radians();
-    (c + r * rad.sin(), c - r * rad.cos())
+    (cx + r * rad.sin(), cy - r * rad.cos())
+}
+
+fn polar(c: f32, r: f32, deg: f32) -> (f32, f32) {
+    polar_at(c, c, r, deg)
 }
 
 /// Direct2D points are `windows_numerics::Vector2` in windows 0.61.
@@ -354,12 +657,16 @@ fn point((x, y): (f32, f32)) -> Vector2 {
     Vector2 { X: x, Y: y }
 }
 
-fn ellipse(c: f32, r: f32) -> D2D1_ELLIPSE {
+fn ellipse_at(cx: f32, cy: f32, r: f32) -> D2D1_ELLIPSE {
     D2D1_ELLIPSE {
-        point: point((c, c)),
+        point: point((cx, cy)),
         radiusX: r,
         radiusY: r,
     }
+}
+
+fn ellipse(c: f32, r: f32) -> D2D1_ELLIPSE {
+    ellipse_at(c, c, r)
 }
 
 fn create_d3d_device() -> Result<ID3D11Device> {

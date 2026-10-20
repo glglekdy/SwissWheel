@@ -4,6 +4,7 @@ use std::time::{Duration, Instant};
 
 use swisswheel_core::geometry::{OUTER_RADIUS, Rect, clamp_center};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
     CreateEllipticRgn, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
     SetWindowRgn,
@@ -11,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::w;
+use windows::core::{BOOL, w};
 
 use super::WheelView;
 use super::render::Renderer;
@@ -21,6 +22,8 @@ pub(super) const HOVER_GROW: f32 = 6.0;
 
 pub struct WheelWindow {
     hwnd: HWND,
+    /// The OS accepted `DWMWA_USE_HOSTBACKDROPBRUSH` (Windows 11 and later).
+    glass_supported: bool,
     renderer: Option<Renderer>,
     scale: f32,
     center: POINT,
@@ -57,8 +60,22 @@ impl WheelWindow {
                 Some(instance.into()),
                 None,
             )?;
+            // A classic Win32 window must opt in before Windows.UI.Composition
+            // host-backdrop brushes (the glass blur) draw anything (Windows 11+).
+            let enable = BOOL::from(true);
+            let glass_supported = DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_USE_HOSTBACKDROPBRUSH,
+                std::ptr::from_ref(&enable).cast(),
+                size_of::<BOOL>() as u32,
+            )
+            .is_ok();
+            if !glass_supported {
+                log_info!("이 Windows 버전은 유리 효과를 지원하지 않아 불투명 휠을 사용합니다");
+            }
             Ok(WheelWindow {
                 hwnd,
+                glass_supported,
                 renderer: None,
                 scale: 1.0,
                 center: POINT::default(),
@@ -151,7 +168,8 @@ impl WheelWindow {
 
     pub fn render(&mut self, view: &WheelView) {
         let scale = self.scale;
-        self.with_renderer(|r| r.draw(view, scale));
+        let glass = self.glass_supported;
+        self.with_renderer(|r| r.draw(view, scale, glass));
     }
 
     fn with_renderer(&mut self, f: impl FnOnce(&mut Renderer) -> windows::core::Result<()>) {

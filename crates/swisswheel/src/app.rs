@@ -11,7 +11,8 @@ use swisswheel_core::catalog::Operation;
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::session::WheelSession;
-use swisswheel_core::summary::job_summary;
+use swisswheel_core::summary::{job_summary, selection_label};
+use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
 };
@@ -21,6 +22,9 @@ use windows::Win32::System::Ole::{
     RevokeDragDrop,
 };
 use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::WinRT::{
+    CreateDispatcherQueueController, DQTAT_COM_NONE, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
+};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -60,11 +64,14 @@ pub(crate) struct AppState {
     hooks: Hooks,
     wheel: WheelWindow,
     _drop_target: IDropTarget,
+    _dispatcher: DispatcherQueueController,
     runner: Option<Runner>,
     reports: Arc<Mutex<VecDeque<JobReport>>>,
     /// The open wheel, if any, and the files dragged onto it.
     session: Option<WheelSession>,
     dragged: Vec<PathBuf>,
+    /// Center label for the open wheel ("2.4 MB"); see `selection_summary`.
+    selection: String,
     opened_at: Instant,
     active_jobs: usize,
     /// First output of the last finished job, opened when its balloon is clicked.
@@ -93,6 +100,16 @@ pub fn run() -> Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         OleInitialize(None)?;
     }
+    // Windows.UI.Composition (the wheel's glass backdrop) needs a DispatcherQueue
+    // on this thread; it runs off our ordinary message loop. OLE already set up
+    // the apartment, hence DQTAT_COM_NONE.
+    let dispatcher = unsafe {
+        CreateDispatcherQueueController(DispatcherQueueOptions {
+            dwSize: size_of::<DispatcherQueueOptions>() as u32,
+            threadType: DQTYPE_THREAD_CURRENT,
+            apartmentType: DQTAT_COM_NONE,
+        })?
+    };
 
     let (config_dir, log_dir) = config_file::app_dirs();
     if let Err(e) = crate::logging::init(&log_dir) {
@@ -151,10 +168,12 @@ pub fn run() -> Result<()> {
         hooks,
         wheel,
         _drop_target: drop_target,
+        _dispatcher: dispatcher,
         runner: Some(runner),
         reports,
         session: None,
         dragged: Vec::new(),
+        selection: String::new(),
         opened_at: Instant::now(),
         active_jobs: 0,
         last_output: None,
@@ -341,6 +360,7 @@ impl AppState {
             (self.opened_at.elapsed().as_secs_f32() / OPEN_ANIMATION.as_secs_f32()).min(1.0);
         let view = WheelView {
             title,
+            detail: &self.selection,
             items: session.items(),
             hovered: session.hovered(),
             progress,
@@ -449,6 +469,22 @@ impl AppState {
     }
 }
 
+/// Center label for the dragged paths, e.g. "2.4 MB" or "3개 · 7.1 MB".
+fn selection_summary(paths: &[PathBuf]) -> String {
+    let (mut files, mut folders, mut bytes) = (0, 0, 0);
+    for path in paths {
+        match std::fs::metadata(path) {
+            Ok(m) if m.is_dir() => folders += 1,
+            Ok(m) => {
+                files += 1;
+                bytes += m.len();
+            }
+            Err(_) => files += 1, // still counted; its size just isn't known
+        }
+    }
+    selection_label(files, folders, bytes)
+}
+
 // Drop target callbacks (called on the UI thread by OLE).
 
 pub fn on_drag_enter(paths: Vec<PathBuf>, x: i32, y: i32) -> DROPEFFECT {
@@ -463,6 +499,7 @@ pub fn on_drag_enter(paths: Vec<PathBuf>, x: i32, y: i32) -> DROPEFFECT {
         }
         session.hover(dx, dy, scale);
         if first_enter {
+            s.selection = selection_summary(&paths);
             s.dragged = paths;
             s.opened_at = Instant::now(); // the wheel becomes visible now
             unsafe { SetTimer(Some(s.hwnd), TIMER_ANIMATION, 16, None) };
