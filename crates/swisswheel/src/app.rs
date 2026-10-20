@@ -108,7 +108,7 @@ pub fn run() -> Result<()> {
         tray.warn("설정 파일 오류", &format!("{w}\n기본 설정으로 실행합니다"));
     }
     let hooks = hook::install(hwnd, KeyBindings::from(&config))?;
-    let wheel = WheelWindow::new()?;
+    let wheel = WheelWindow::new(hwnd)?;
     let drop_target: IDropTarget = DropTarget.into();
     unsafe { RegisterDragDrop(wheel.hwnd(), &drop_target)? };
 
@@ -226,17 +226,22 @@ unsafe extern "system" fn wnd_proc(
             let _ = DestroyWindow(hwnd);
         },
         WM_CLOSE => unsafe {
+            log_info!("종료 요청 (WM_CLOSE)");
             let _ = DestroyWindow(hwnd);
         },
         WM_DESTROY => {
+            log_info!("종료 중: 상태 정리 시작");
             if let Some(mut state) = STATE.take() {
                 unsafe {
                     let _ = RevokeDragDrop(state.wheel.hwnd());
                 }
+                log_info!("종료 중: 작업 대기");
                 if let Some(runner) = state.runner.take() {
                     runner.shutdown(); // finish queued files before exiting
                 }
+                log_info!("종료 중: 리소스 해제");
             } // dropping the state removes the tray icon and the hooks
+            log_info!("종료 중: 메시지 루프 종료 요청");
             unsafe { PostQuitMessage(0) };
         }
         _ => {

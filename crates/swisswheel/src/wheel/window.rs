@@ -30,7 +30,9 @@ pub struct WheelWindow {
 }
 
 impl WheelWindow {
-    pub fn new() -> windows::core::Result<WheelWindow> {
+    /// `owner` is the app's host window: the wheel is destroyed with it and
+    /// forwards WM_CLOSE to it (see `wnd_proc`).
+    pub fn new(owner: HWND) -> windows::core::Result<WheelWindow> {
         unsafe {
             let instance = GetModuleHandleW(None)?;
             let class = w!("SwissWheelWheel");
@@ -50,7 +52,7 @@ impl WheelWindow {
                 0,
                 1,
                 1,
-                None,
+                Some(owner), // for a WS_POPUP this sets the owner, not a parent
                 None,
                 Some(instance.into()),
                 None,
@@ -192,6 +194,17 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        WM_CLOSE => {
+            // taskkill sends WM_CLOSE to the first top-level window it finds,
+            // which may be this one. Destroying only the wheel would leave the
+            // app running without it, so hand the request to the host window.
+            if let Ok(owner) = unsafe { GetWindow(hwnd, GW_OWNER) } {
+                unsafe {
+                    let _ = PostMessageW(Some(owner), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+            LRESULT(0)
+        }
         _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
 }
