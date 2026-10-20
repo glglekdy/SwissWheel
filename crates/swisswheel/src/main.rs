@@ -6,6 +6,7 @@
 mod config_file;
 mod engines;
 mod fsutil;
+mod jobs;
 mod probe;
 #[macro_use]
 mod logging;
