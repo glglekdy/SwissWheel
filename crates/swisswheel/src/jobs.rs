@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 
 use swisswheel_core::catalog::Operation;
@@ -38,7 +38,8 @@ pub struct JobReport {
 type OnDone = Box<dyn Fn(JobReport) + Send + Sync>;
 
 struct Shared {
-    quality: Quality,
+    /// Read once per file, so a file never mixes old and new settings.
+    quality: RwLock<Quality>,
     reservations: Reservations,
     on_done: OnDone,
     /// Found once at startup; media files fail with `MissingFfmpeg` without it.
@@ -111,7 +112,7 @@ impl Runner {
             log_info!("FFmpeg를 찾지 못했습니다: 영상·오디오 작업은 실패로 처리됩니다");
         }
         let shared = Arc::new(Shared {
-            quality,
+            quality: RwLock::new(quality),
             reservations: Reservations::default(),
             on_done,
             tools,
@@ -136,6 +137,20 @@ impl Runner {
             workers,
             shared,
         }
+    }
+
+    /// New quality settings from the settings panel. Files already being
+    /// converted keep the values they started with.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used once the menu is wired into the app")
+    )]
+    pub fn set_quality(&self, quality: Quality) {
+        *self
+            .shared
+            .quality
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = quality;
     }
 
     pub fn submit(&self, job: Job) {
@@ -277,6 +292,11 @@ enum Engine<'a> {
 /// place without replacing anything. The temp file never survives a failure.
 fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     let (op, preset, input) = (&work.job.op, work.job.preset, work.input.as_path());
+    let quality = shared
+        .quality
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
     let name = file_name(input);
     let fail = |e: EngineError| {
         log_error!("{name}: {e}");
@@ -294,7 +314,7 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
             .tools
             .as_ref()
             .ok_or_else(|| fail(EngineError::MissingFfmpeg))?;
-        let plan = ffmpeg::prepare(tools, op, preset, input, &shared.quality).map_err(fail)?;
+        let plan = ffmpeg::prepare(tools, op, preset, input, &quality).map_err(fail)?;
         let extension = plan.output.extension();
         (Engine::Media(tools, plan), extension)
     } else {
@@ -307,7 +327,7 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
         .reserve(input, extension, suffix.as_deref());
     let temp = temp_path(&target);
     let result = match &engine {
-        Engine::Image => engines::image::run(op, preset, input, &temp, &shared.quality),
+        Engine::Image => engines::image::run(op, preset, input, &temp, &quality),
         Engine::Media(tools, plan) => {
             let progress =
                 |p: f32| work.job.files.lock().unwrap()[work.index] = FileState::Running(p);
@@ -383,6 +403,58 @@ mod tests {
             preset: None,
             inputs,
         }
+    }
+
+    /// Converts the same noisy PNG to JPG twice: at quality `first`, then at
+    /// `second` after `set_quality`. Returns the two output sizes.
+    fn convert_twice_with_quality(first: u8, second: u8) -> (u64, u64) {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("noise.png");
+        let mut seed = 0x2545_F491u32;
+        image::RgbImage::from_fn(256, 256, |_, _| {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let [r, g, b, _] = seed.to_le_bytes();
+            image::Rgb([r, g, b])
+        })
+        .save(&input)
+        .unwrap();
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let runner = Runner::new(
+            1,
+            1,
+            Quality {
+                jpg: first,
+                ..Quality::default()
+            },
+            Box::new(move |r| tx.lock().unwrap().send(r).unwrap()),
+        );
+        let size = || {
+            runner.submit(job(Operation::Convert(Format::Jpg), vec![input.clone()]));
+            let output = rx.recv().unwrap().outputs.remove(0);
+            let len = std::fs::metadata(&output).unwrap().len();
+            std::fs::remove_file(output).unwrap();
+            len
+        };
+        let big = size();
+        runner.set_quality(Quality {
+            jpg: second,
+            ..Quality::default()
+        });
+        let small = size();
+        runner.shutdown();
+        (big, small)
+    }
+
+    #[test]
+    fn set_quality_applies_to_the_next_job() {
+        let (big, small) = convert_twice_with_quality(100, 50);
+        assert!(
+            small < big,
+            "quality 50 ({small} B) should be smaller than 100 ({big} B)"
+        );
     }
 
     #[test]
