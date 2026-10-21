@@ -5,7 +5,7 @@ pub mod swap;
 #[cfg(test)]
 mod test_server;
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -201,6 +201,7 @@ pub fn spawn(hwnd: isize, msg: u32, slot: Arc<Mutex<Option<Outcome>>>) -> Handle
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use std::path::PathBuf;
     use std::sync::atomic::Ordering;
     use test_server::{Reply, TestServer};
 
