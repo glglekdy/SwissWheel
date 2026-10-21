@@ -160,7 +160,7 @@ fn process(op: &Operation, input: &Path, shared: &Shared) -> Result<PathBuf, Str
 
     let mut target = shared.reservations.reserve(input, extension, suffix);
     let temp = temp_path(&target);
-    if let Err(e) = engines::image::run(op, input, &temp, &shared.quality) {
+    if let Err(e) = engines::image::run(op, None, input, &temp, &shared.quality) {
         let _ = std::fs::remove_file(&temp);
         shared.reservations.release(&target);
         return Err(e.user_message(&name));

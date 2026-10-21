@@ -14,12 +14,18 @@ use ::image::{
 use swisswheel_core::catalog::{Operation, Tool};
 use swisswheel_core::config::Quality;
 use swisswheel_core::format::{Format, MediaKind};
+use swisswheel_core::options::{Level, Preset};
 
 use super::EngineError;
 
 const ICO_SIZES: [u32; 6] = [256, 128, 64, 48, 32, 16];
 const COMPRESS_JPG_QUALITY: u8 = 75;
 const COMPRESS_WEBP_QUALITY: u8 = 70;
+/// The "높게" and "작게" quality options (spec 2.5); "보통" is the config value.
+const HIGH_JPG_QUALITY: u8 = 95;
+const HIGH_WEBP_QUALITY: u8 = 92;
+const SMALL_JPG_QUALITY: u8 = 75;
+const SMALL_WEBP_QUALITY: u8 = 70;
 
 /// Image in, image out. Anything touching video (animated GIF → MP4,
 /// MKV → GIF) belongs to FFmpeg.
@@ -44,8 +50,11 @@ pub fn output_format(op: &Operation, input: Format) -> Format {
 
 /// Reads `input`, applies `op`, and writes the result to `output` (a temp path,
 /// so the format is always explicit, never guessed from its extension).
+/// `preset` is the option chosen in the side panel (spec 2.5); `None`, or a
+/// preset that doesn't apply to `op`, means the defaults.
 pub fn run(
     op: &Operation,
+    preset: Option<Preset>,
     input: &Path,
     output: &Path,
     quality: &Quality,
@@ -59,14 +68,23 @@ pub fn run(
     }
     let img = decode(input)?;
     match op {
-        Operation::Convert(target) => encode(&img, *target, quality.jpg, quality.webp, output),
+        Operation::Convert(target) => {
+            let (jpg, webp) = match preset {
+                Some(Preset::Quality(Level::High)) => (HIGH_JPG_QUALITY, HIGH_WEBP_QUALITY),
+                Some(Preset::Quality(Level::Small)) => (SMALL_JPG_QUALITY, SMALL_WEBP_QUALITY),
+                _ => (quality.jpg, quality.webp),
+            };
+            encode(&img, *target, jpg, webp, output)
+        }
         Operation::Tool(Tool::Shrink) => {
-            let half = img.resize_exact(
-                (img.width() / 2).max(1),
-                (img.height() / 2).max(1),
-                FilterType::Lanczos3,
-            );
-            encode(&half, input_format, quality.jpg, quality.webp, output)
+            let percent = match preset {
+                Some(Preset::Scale(p)) => u32::from(p),
+                _ => 50,
+            };
+            let side = |v: u32| (v * percent / 100).max(1);
+            let small =
+                img.resize_exact(side(img.width()), side(img.height()), FilterType::Lanczos3);
+            encode(&small, input_format, quality.jpg, quality.webp, output)
         }
         Operation::Tool(Tool::CompressImage) => match input_format {
             Format::Png => compress_png(&img, output),
@@ -232,7 +250,14 @@ pub(crate) mod tests {
             Format::Ico,
         ] {
             let out = dir.path().join(format!("out.{}.tmp", target.extension()));
-            run(&Operation::Convert(target), &src, &out, &Quality::default()).unwrap();
+            run(
+                &Operation::Convert(target),
+                None,
+                &src,
+                &out,
+                &Quality::default(),
+            )
+            .unwrap();
             let fmt = ::image::ImageReader::open(&out)
                 .unwrap()
                 .with_guessed_format()
@@ -250,6 +275,7 @@ pub(crate) mod tests {
         let out = dir.path().join("t.jpg.tmp");
         run(
             &Operation::Convert(Format::Jpg),
+            None,
             &src,
             &out,
             &Quality::default(),
@@ -267,6 +293,7 @@ pub(crate) mod tests {
         let out = dir.path().join("wide.ico.tmp");
         run(
             &Operation::Convert(Format::Ico),
+            None,
             &src,
             &out,
             &Quality::default(),
@@ -298,6 +325,7 @@ pub(crate) mod tests {
         let half = dir.path().join("half.tmp");
         run(
             &Operation::Tool(Tool::Shrink),
+            None,
             &src,
             &half,
             &Quality::default(),
@@ -307,6 +335,7 @@ pub(crate) mod tests {
         let small = dir.path().join("small.tmp");
         run(
             &Operation::Tool(Tool::CompressImage),
+            None,
             &src,
             &small,
             &Quality::default(),
@@ -357,6 +386,7 @@ pub(crate) mod tests {
         let out = dir.path().join("shot.png.tmp");
         run(
             &Operation::Convert(Format::Png),
+            None,
             &src,
             &out,
             &Quality::default(),
@@ -371,6 +401,7 @@ pub(crate) mod tests {
         let half = dir.path().join("half.png.tmp");
         run(
             &Operation::Tool(Tool::Shrink),
+            None,
             &png,
             &half,
             &Quality::default(),
@@ -401,6 +432,7 @@ pub(crate) mod tests {
         let out = dir.path().join("photo.jpg.tmp");
         run(
             &Operation::Convert(Format::Jpg),
+            None,
             &src,
             &out,
             &Quality::default(),
@@ -420,12 +452,69 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn shrink_uses_the_chosen_scale() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("wide.png");
+        rgba_png(&src, 400, 200, 255);
+        for (preset, size) in [
+            (Some(Preset::Scale(25)), (100, 50)),
+            (Some(Preset::Scale(75)), (300, 150)),
+            (None, (200, 100)),
+        ] {
+            let out = dir.path().join("out.png.tmp");
+            run(
+                &Operation::Tool(Tool::Shrink),
+                preset,
+                &src,
+                &out,
+                &Quality::default(),
+            )
+            .unwrap();
+            assert_eq!(open(&out).dimensions(), size, "{preset:?}");
+        }
+    }
+
+    #[test]
+    fn quality_levels_order_file_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = 999u32;
+        let pixels = ::image::RgbImage::from_fn(320, 240, |x, y| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let noise = (seed >> 24) as u8 / 8;
+            ::image::Rgb([(x / 2) as u8 + noise, (y / 2) as u8 + noise, 80 + noise])
+        });
+        let src = dir.path().join("photo.png");
+        pixels.save(&src).unwrap();
+        for target in [Format::Jpg, Format::Webp] {
+            let size = |level| {
+                let out = dir.path().join(format!("{level:?}.tmp"));
+                run(
+                    &Operation::Convert(target),
+                    Some(Preset::Quality(level)),
+                    &src,
+                    &out,
+                    &Quality::default(),
+                )
+                .unwrap();
+                std::fs::metadata(&out).unwrap().len()
+            };
+            let (high, normal, small) =
+                (size(Level::High), size(Level::Normal), size(Level::Small));
+            assert!(
+                high > normal && normal > small,
+                "{target:?}: {high} / {normal} / {small}"
+            );
+        }
+    }
+
+    #[test]
     fn unreadable_input_is_read_error() {
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("broken.png");
         std::fs::write(&src, b"not an image").unwrap();
         let err = run(
             &Operation::Convert(Format::Jpg),
+            None,
             &src,
             &dir.path().join("o.tmp"),
             &Quality::default(),
