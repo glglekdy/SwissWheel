@@ -56,10 +56,13 @@ mod tests {
         write("INFO", "첫 줄");
         write("ERROR", "둘째 줄");
         let text = std::fs::read_to_string(dir.path().join("swisswheel.log")).unwrap();
+        // Other tests run in parallel and log through the same global file,
+        // so their lines may land in between; only the order of ours counts.
         let lines: Vec<_> = text.lines().collect();
-        assert!(lines[lines.len() - 2].ends_with("INFO 첫 줄"), "{lines:?}");
+        let first = lines.iter().position(|l| l.ends_with("INFO 첫 줄"));
+        let second = lines.iter().position(|l| l.ends_with("ERROR 둘째 줄"));
         assert!(
-            lines[lines.len() - 1].ends_with("ERROR 둘째 줄"),
+            matches!((first, second), (Some(a), Some(b)) if a < b),
             "{lines:?}"
         );
     }
