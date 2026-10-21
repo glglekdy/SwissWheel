@@ -78,7 +78,7 @@
 | 9 | 트레이 링 | `progress.tray_ring` | 켬 / 끔 |
 
 - 키 세 개는 서로 겹칠 수 없다. ← / →로 고를 때 다른 두 키가 쓰는 값은 건너뛴다.
-- 파일에 직접 써 둔 값이 패널의 단계 밖이면(예: `quality.jpg = 42`, `mp3_kbps = 200`) 그대로 표시하고, ← / →를 누르면 가장 가까운 단계로 맞춘 뒤 한 칸 이동한다. 단계는 패널 편의를 위한 것이고 `config.rs`의 검증 범위(1~100, 32~320)는 그대로다.
+- 파일에 직접 써 둔 값이 패널의 단계 밖이면(예: `quality.jpg = 42`, `mp3_kbps = 200`) 그대로 표시하고, ← / →를 누르면 그 방향의 가장 가까운 단계로 간다(42에서 → 50, ← 그대로; 200에서 → 256, ← 192). 단계는 패널 편의를 위한 것이고 `config.rs`의 검증 범위(1~100, 32~320)는 그대로다.
 - 끝값에서 더 누르면 멈춘다 (순환하지 않음).
 
 ### 2.5 자동으로 닫히는 경우
@@ -100,7 +100,7 @@
   - 새 상태 `Menu`(열림/닫힘). `Wheel`과 동시에 열리지 않는다.
   - 드래그 중이 아니고 `desktop`이며 메뉴가 닫혀 있을 때 `open_key` → `DragCommand::OpenMenu`.
   - 메뉴가 열려 있으면 ←→↑↓ Enter Esc `open_key`를 삼키고 `DragCommand::MenuKey(MenuKey)`로 보낸다. 다른 키는 통과한다. 키 반복은 첫 입력만 명령으로 만든다(화살표는 반복 허용, `open_key`·Enter·Esc는 반복 무시).
-  - 메뉴가 열려 있을 때 드래그 시작(`Button::Dragging` 전이) → `DragCommand::CloseMenu`.
+  - 메뉴가 열려 있을 때 왼쪽 버튼 누름 → `DragCommand::MenuPointerDown { x, y }` (앱이 바·패널 바깥이면 닫음). 드래그 시작(`Button::Dragging` 전이) → 트래커가 스스로 메뉴를 닫힘으로 두고 `DragCommand::CloseMenu`.
   - 앱이 알리는 `DragEvent::MenuClosed`로 상태를 닫힘으로 되돌린다.
   - 키 떼기 삼킴은 기존 `swallowed` 규칙을 그대로 따른다.
 - `menu.rs` (신규) — 메뉴 세션 상태 머신
@@ -113,7 +113,7 @@
 - `geometry.rs` 또는 신규 `bar_geometry.rs` — 바·패널 배치(DIP)와 히트 테스트. 입력은 작업 영역과 배율, 출력은 타일/행/◀▶ 사각형.
 
 ### 3.2 `swisswheel` (앱)
-- `surface.rs` (신규) — `wheel/render.rs`에서 Composition 아크릴 배경, D3D/D2D 스왑체인 생성, `Palette`, 테마 판정, 텍스트 포맷·아이콘 폰트 헬퍼를 꺼낸 공용 단위. 휠과 바가 같이 쓴다. 휠의 그리는 결과는 바뀌지 않는다.
+- `surface.rs` (신규) — `progress.rs`의 `Surface`(D3D/D2D 스왑체인 + Composition 아크릴 배경을 둥근 사각형으로 잘라 보여줌)를 꺼내 유리 영역을 여러 개 둘 수 있게 일반화한 공용 단위. 진행 카드와 메뉴 바가 같이 쓴다. 휠의 `Renderer`는 그대로 두고, `Palette`·테마 판정·아이콘 폰트는 `wheel::render`의 것을 가져다 쓴다.
 - `menubar/` (신규) — `window.rs`(팝업 창, 배치, 표시/숨김, 마우스 메시지 → `MenuHit`), `render.rs`(바와 패널 그리기), `mod.rs`(`MenuView`).
 - `hook.rs` — `KeyDown` 시 바탕화면 판정: `GetForegroundWindow`가 `Progman` 또는 `WorkerW`이고 그 아래 `SHELLDLL_DefView`가 있으며, `GetGUIThreadInfo`의 포커스 창이 `Edit` 클래스가 아님. 메뉴가 열려 있을 때 바·패널 바깥의 왼쪽 버튼 누름 → 앱에 닫기 알림.
 - `config_file.rs` — `save(dir, &Config)` 추가. 기존 파일을 `toml_edit`으로 읽어 바뀐 키만 고쳐 쓴다(주석·순서·모르는 키 보존). 파일이 없으면 새로 만든다.
