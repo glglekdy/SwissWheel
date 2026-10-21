@@ -4,7 +4,7 @@ Offline file converter for Windows. Drag a file in Explorer, press **Space**, an
 
 ## Usage
 
-1. Run `swisswheel.exe`. A red-and-white wheel icon appears in the notification area.
+1. Run `swisswheel.exe`. The SwissWheel logo appears in the notification area (white on a dark taskbar, black on a light one; it may sit under the ^ overflow).
 2. Start dragging one or more files in Explorer or on the desktop.
 3. While dragging, press **Space**. Drop on an item to run it; drop on the center to cancel.
 4. The result is saved next to the original (`photo.png` → `photo.jpg`). Originals are never modified or overwritten; name clashes get a number (`photo (1).jpg`).

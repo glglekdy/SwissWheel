@@ -11,6 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::icon;
+use crate::wheel::render::taskbar_light_theme;
 
 /// Callback message for tray events (`NOTIFYICON_VERSION_4` layout).
 pub const WM_APP_TRAY: u32 = WM_APP + 10;
@@ -19,21 +20,23 @@ const ICON_ID: u32 = 1;
 pub struct Tray {
     hwnd: HWND,
     idle: HICON,
-    busy_icon: HICON,
+    /// The taskbar is light: the logo is drawn black instead of white.
+    light: bool,
     busy: bool,
     tooltip: String,
     icon_size: i32,
-    /// The busy icon with a progress ring, at a 5% step (0..=20).
+    /// The logo with a progress ring, at a 5% step (0..=20).
     ring: Option<(u8, HICON)>,
 }
 
 impl Tray {
     pub fn new(hwnd: HWND) -> windows::core::Result<Tray> {
         let size = unsafe { GetSystemMetrics(SM_CXSMICON) };
+        let light = taskbar_light_theme();
         let tray = Tray {
             hwnd,
-            idle: icon::make(false, size)?,
-            busy_icon: icon::make(true, size)?,
+            idle: icon::make(light, size)?,
+            light,
             busy: false,
             tooltip: "SwissWheel".into(),
             icon_size: size,
@@ -53,27 +56,51 @@ impl Tray {
         }
     }
 
-    /// `ring` is the overall progress to draw around the busy icon, or `None`
-    /// for the plain one. The icon is rebuilt only when it moves a 5% step.
+    /// `ring` is the overall progress to draw around the logo, or `None` for
+    /// the plain one. The icon is rebuilt only when it moves a 5% step.
     pub fn set_busy(&mut self, busy: bool, tooltip: &str, ring: Option<f32>) {
         self.busy = busy;
         self.tooltip = tooltip.to_string();
         let step = ring.map(|p| (p.clamp(0.0, 1.0) * 20.0).round() as u8);
         if step != self.ring.map(|(s, _)| s) {
-            if let Some((_, old)) = self.ring.take() {
-                unsafe {
-                    let _ = DestroyIcon(old);
-                }
-            }
-            if let Some(step) = step {
-                match icon::make_progress(f32::from(step) / 20.0, self.icon_size) {
-                    Ok(hicon) => self.ring = Some((step, hicon)),
-                    Err(e) => log_error!("진행 아이콘을 만들 수 없습니다: {e}"),
-                }
-            }
+            self.set_ring(step);
         }
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data());
+        }
+    }
+
+    /// Redraws the icon in the taskbar's current color if the Windows theme
+    /// changed (white logo on a dark taskbar, black on a light one).
+    pub fn refresh_theme(&mut self) {
+        let light = taskbar_light_theme();
+        if light == self.light {
+            return;
+        }
+        self.light = light;
+        match icon::make(light, self.icon_size) {
+            Ok(idle) => unsafe {
+                let _ = DestroyIcon(std::mem::replace(&mut self.idle, idle));
+            },
+            Err(e) => log_error!("트레이 아이콘을 만들 수 없습니다: {e}"),
+        }
+        self.set_ring(self.ring.map(|(s, _)| s));
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data());
+        }
+    }
+
+    fn set_ring(&mut self, step: Option<u8>) {
+        if let Some((_, old)) = self.ring.take() {
+            unsafe {
+                let _ = DestroyIcon(old);
+            }
+        }
+        if let Some(step) = step {
+            match icon::make_progress(f32::from(step) / 20.0, self.light, self.icon_size) {
+                Ok(hicon) => self.ring = Some((step, hicon)),
+                Err(e) => log_error!("진행 아이콘을 만들 수 없습니다: {e}"),
+            }
         }
     }
 
@@ -104,9 +131,8 @@ impl Tray {
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
             uCallbackMessage: WM_APP_TRAY,
             hIcon: match (self.busy, self.ring) {
-                (false, _) => self.idle,
                 (true, Some((_, ring))) => ring,
-                (true, None) => self.busy_icon,
+                _ => self.idle,
             },
             ..Default::default()
         };
@@ -120,7 +146,6 @@ impl Drop for Tray {
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.data());
             let _ = DestroyIcon(self.idle);
-            let _ = DestroyIcon(self.busy_icon);
             if let Some((_, ring)) = self.ring {
                 let _ = DestroyIcon(ring);
             }

@@ -340,6 +340,9 @@ unsafe extern "system" fn wnd_proc(
             if wparam.0 == SPI_SETWORKAREA.0 as usize {
                 with_state(AppState::close_menu);
             }
+            // "ImmersiveColorSet" when the Windows mode changes; the tray
+            // checks the registry itself, so any change is enough.
+            with_state(|s| s.tray.refresh_theme());
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
         WM_APP_TRAY => on_tray(hwnd, wparam, lparam),

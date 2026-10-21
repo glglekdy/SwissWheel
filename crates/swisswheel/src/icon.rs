@@ -1,65 +1,113 @@
-//! The tray icon, drawn in code: a small red-and-white wheel, optionally
-//! ringed by job progress. No image assets.
+//! The tray icon: the SwissWheel logo (`assets/logo.png`) in the taskbar's
+//! color, white on a dark taskbar and black on a light one, optionally
+//! ringed by job progress.
 
+use std::sync::OnceLock;
+
+use image::imageops::{self, FilterType};
+use image::{GrayImage, Luma};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateBitmap, CreateDIBSection, DIB_RGB_COLORS,
     DeleteObject,
 };
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 
-const RED: [u8; 3] = [0xE0, 0x3A, 0x3E];
-const WHITE: [u8; 3] = [0xFF, 0xFF, 0xFF];
-const DARK: [u8; 3] = [0x2B, 0x2B, 0x2B];
+const LOGO_PNG: &[u8] = include_bytes!("../../../assets/logo.png");
 /// The filled part of the progress ring.
 const RING: [u8; 3] = [0x34, 0xC7, 0x59];
+/// The unfilled part of the ring: the logo's color, this opaque.
+const TRACK_ALPHA: f32 = 0.35;
 const SAMPLES: u32 = 4; // per axis, for anti-aliasing
 
-/// Premultiplied BGRA pixels, top-down, `size * size` entries.
-pub fn pixels(busy: bool, size: u32) -> Vec<[u8; 4]> {
-    rasterize(size, |x, y| wheel(busy, size as f32, x, y))
+/// The logo's coverage, cropped to its visible part and centered in a square.
+fn logo() -> &'static GrayImage {
+    static LOGO: OnceLock<GrayImage> = OnceLock::new();
+    LOGO.get_or_init(|| {
+        let rgba = image::load_from_memory(LOGO_PNG)
+            .expect("assets/logo.png decodes")
+            .to_rgba8();
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        for (x, y, p) in rgba.enumerate_pixels() {
+            if p[3] > 0 {
+                (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x), y1.max(y));
+            }
+        }
+        let (w, h) = (x1 + 1 - x0, y1 + 1 - y0);
+        let side = w.max(h);
+        let (dx, dy) = ((side - w) / 2, (side - h) / 2);
+        GrayImage::from_fn(side, side, |x, y| {
+            let inside = x >= dx && y >= dy && x - dx < w && y - dy < h;
+            Luma([if inside {
+                rgba.get_pixel(x0 + x - dx, y0 + y - dy)[3]
+            } else {
+                0
+            }])
+        })
+    })
 }
 
-/// The busy icon with its outer band turned into a ring that fills
-/// clockwise from 12 o'clock as `fraction` goes from 0 to 1.
-pub fn progress_pixels(fraction: f32, size: u32) -> Vec<[u8; 4]> {
+/// The logo's coverage at `size` × `size`.
+fn coverage(size: u32) -> GrayImage {
+    imageops::resize(logo(), size, size, FilterType::Lanczos3)
+}
+
+/// The logo's color on a light (`true`) or dark taskbar.
+fn logo_color(light: bool) -> [u8; 3] {
+    if light { [0, 0, 0] } else { [0xFF, 0xFF, 0xFF] }
+}
+
+/// Premultiplied BGRA pixels, top-down, `size * size` entries.
+pub fn pixels(light: bool, size: u32) -> Vec<[u8; 4]> {
+    let color = logo_color(light);
+    coverage(size)
+        .pixels()
+        .map(|&Luma([a])| premultiply(color, a))
+        .collect()
+}
+
+/// The logo, shrunk to fit inside a ring that fills clockwise from 12
+/// o'clock as `fraction` goes from 0 to 1.
+pub fn progress_pixels(fraction: f32, light: bool, size: u32) -> Vec<[u8; 4]> {
     let s = size as f32;
+    let color = logo_color(light);
     let outer = s / 2.0 - 0.5;
     let band = (s * 0.16).max(2.0);
     let filled = fraction.clamp(0.0, 1.0) * 360.0;
-    rasterize(size, |x, y| {
+    let track = [color[0], color[1], color[2], (TRACK_ALPHA * 255.0) as u8];
+    let mut out = rasterize(size, |x, y| {
         let r = x.hypot(y);
-        if r <= outer && r >= outer - band {
-            let deg = x.atan2(-y).to_degrees().rem_euclid(360.0);
-            Some(if deg < filled { RING } else { DARK })
-        } else {
-            wheel(true, s, x, y)
+        if r > outer || r < outer - band {
+            return None;
         }
-    })
-}
-
-/// The wheel's color at (`x`, `y`) from the center, `None` outside it.
-fn wheel(busy: bool, s: f32, x: f32, y: f32) -> Option<[u8; 3]> {
-    let (outer, hub) = (s / 2.0 - 0.5, s * 0.17);
-    let r = x.hypot(y);
-    Some(if r > outer {
-        return None;
-    } else if r < hub {
-        if busy { DARK } else { WHITE }
-    } else if r < hub + 0.9 || r > outer - 1.0 {
-        RED // rim and hub outline keep the shape readable at 16 px
-    } else {
         let deg = x.atan2(-y).to_degrees().rem_euclid(360.0);
-        if ((deg / 60.0) as u32).is_multiple_of(2) {
-            RED
+        Some(if deg < filled {
+            [RING[0], RING[1], RING[2], 255]
         } else {
-            WHITE
+            track
+        })
+    });
+    // The logo inside the ring, with a gap between them.
+    let gap = (s * 0.06).max(1.0);
+    let inner = ((s - 2.0 * (band + gap)).floor() as u32).max(1);
+    let offset = (size - inner) / 2;
+    for (x, y, &Luma([a])) in coverage(inner).enumerate_pixels() {
+        if a > 0 {
+            let i = ((y + offset) * size + x + offset) as usize;
+            out[i] = premultiply(color, a);
         }
-    })
+    }
+    out
 }
 
-/// Samples `shape` (offsets from the center, `None` = transparent) into
-/// anti-aliased premultiplied BGRA.
-fn rasterize(size: u32, shape: impl Fn(f32, f32) -> Option<[u8; 3]>) -> Vec<[u8; 4]> {
+/// Straight RGB at alpha `a` → premultiplied BGRA.
+fn premultiply(rgb: [u8; 3], a: u8) -> [u8; 4] {
+    let m = |c: u8| ((u16::from(c) * u16::from(a) + 127) / 255) as u8;
+    [m(rgb[2]), m(rgb[1]), m(rgb[0]), a]
+}
+
+/// Samples `shape` (offsets from the center → straight RGBA, `None` =
+/// transparent) into anti-aliased premultiplied BGRA.
+fn rasterize(size: u32, shape: impl Fn(f32, f32) -> Option<[u8; 4]>) -> Vec<[u8; 4]> {
     let c = size as f32 / 2.0;
     let mut out = Vec::with_capacity((size * size) as usize);
     for py in 0..size {
@@ -69,39 +117,33 @@ fn rasterize(size: u32, shape: impl Fn(f32, f32) -> Option<[u8; 3]>) -> Vec<[u8;
                 for sx in 0..SAMPLES {
                     let x = px as f32 + (sx as f32 + 0.5) / SAMPLES as f32 - c;
                     let y = py as f32 + (sy as f32 + 0.5) / SAMPLES as f32 - c;
-                    let Some(color) = shape(x, y) else {
+                    let Some([r, g, b, a]) = shape(x, y) else {
                         continue;
                     };
-                    for (a, v) in acc.iter_mut().zip([color[2], color[1], color[0], 255]) {
-                        *a += f32::from(v);
+                    let a = f32::from(a) / 255.0;
+                    for (acc, v) in acc.iter_mut().zip([b, g, r]) {
+                        *acc += f32::from(v) * a;
                     }
+                    acc[3] += a * 255.0;
                 }
             }
             let n = (SAMPLES * SAMPLES) as f32;
-            let alpha = acc[3] / n / 255.0;
-            // acc holds straight colors summed over covered samples only, so dividing
-            // by the full sample count yields premultiplied values directly.
-            out.push([
-                (acc[0] / n) as u8,
-                (acc[1] / n) as u8,
-                (acc[2] / n) as u8,
-                (alpha * 255.0) as u8,
-            ]);
+            out.push(acc.map(|v| (v / n).round() as u8));
         }
     }
     out
 }
 
-/// Creates an HICON the caller must free with `DestroyIcon`.
-pub fn make(busy: bool, size: i32) -> windows::core::Result<HICON> {
+/// The logo icon; free it with `DestroyIcon`.
+pub fn make(light: bool, size: i32) -> windows::core::Result<HICON> {
     let size = size.max(16);
-    from_pixels(&pixels(busy, size as u32), size)
+    from_pixels(&pixels(light, size as u32), size)
 }
 
-/// The busy icon with a progress ring; free it with `DestroyIcon`.
-pub fn make_progress(fraction: f32, size: i32) -> windows::core::Result<HICON> {
+/// The logo with a progress ring; free it with `DestroyIcon`.
+pub fn make_progress(fraction: f32, light: bool, size: i32) -> windows::core::Result<HICON> {
     let size = size.max(16);
-    from_pixels(&progress_pixels(fraction, size as u32), size)
+    from_pixels(&progress_pixels(fraction, light, size as u32), size)
 }
 
 fn from_pixels(px: &[[u8; 4]], size: i32) -> windows::core::Result<HICON> {
@@ -133,41 +175,75 @@ fn from_pixels(px: &[[u8; 4]], size: i32) -> windows::core::Result<HICON> {
         icon
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn opaque(px: &[[u8; 4]]) -> Vec<[u8; 4]> {
+        px.iter().copied().filter(|p| p[3] == 255).collect()
+    }
+
     #[test]
-    fn icon_is_round_with_opaque_wheel() {
+    fn logo_takes_the_taskbar_color() {
+        let dark = pixels(false, 32);
+        let light = pixels(true, 32);
+        assert!(opaque(&dark).len() > 100);
+        assert!(opaque(&dark).iter().all(|p| p[..3] == [255, 255, 255]));
+        assert!(opaque(&light).iter().all(|p| p[..3] == [0, 0, 0]));
+        assert_eq!(opaque(&dark).len(), opaque(&light).len());
+    }
+
+    #[test]
+    fn corners_and_hub_are_transparent() {
         let size = 32;
         let px = pixels(false, size);
-        let at = |x: u32, y: u32| px[(y * size + x) as usize];
-        assert_eq!(at(0, 0)[3], 0); // corner outside the circle
-        assert_eq!(at(16, 2)[3], 255); // rim
-        assert_eq!(at(16, 16), [255, 255, 255, 255]); // white hub
-        assert_eq!(
-            pixels(true, size)[(16 * size + 16) as usize][..3],
-            [0x2B, 0x2B, 0x2B]
-        ); // busy hub
+        assert_eq!(px[0][3], 0);
+        assert_eq!(px[(16 * size + 16) as usize][3], 0); // the wheel's open center
+    }
+
+    #[test]
+    fn every_tray_size_shows_the_logo() {
+        for size in [16, 20, 24, 32, 40, 48, 64] {
+            let px = pixels(false, size);
+            assert_eq!(px.len(), (size * size) as usize);
+            assert!(px.iter().any(|p| p[3] == 255), "{size}px");
+        }
     }
 
     #[test]
     fn progress_ring_fills_clockwise_from_the_top() {
         let size = 32;
-        let px = progress_pixels(0.25, size);
+        let px = progress_pixels(0.25, false, size);
         // A pixel well inside the ring band, `deg` clockwise from 12 o'clock.
         let at = |px: &[[u8; 4]], deg: f32| {
             let rad = deg.to_radians();
-            let x = (16.0 + 13.0 * rad.sin()) as u32;
-            let y = (16.0 - 13.0 * rad.cos()) as u32;
+            let x = (16.0 + 14.0 * rad.sin()) as u32;
+            let y = (16.0 - 14.0 * rad.cos()) as u32;
             px[(y * size + x) as usize]
         };
         let green = [RING[2], RING[1], RING[0], 255];
-        let track = [DARK[2], DARK[1], DARK[0], 255];
         assert_eq!(at(&px, 45.0), green);
-        assert_eq!(at(&px, 135.0), track);
-        assert_eq!(at(&progress_pixels(0.0, size), 45.0), track);
-        assert_eq!(at(&progress_pixels(1.0, size), 300.0), green);
-        assert_eq!(px[(16 * size + 16) as usize][..3], DARK[..]); // hub as when busy
+        let track = at(&px, 135.0);
+        assert_ne!(track, green);
+        assert!((40..160).contains(&track[3]), "{track:?}"); // see-through
+        assert_eq!(at(&progress_pixels(0.0, false, size), 45.0), track);
+        assert_eq!(at(&progress_pixels(1.0, false, size), 300.0), green);
+        assert_eq!(px[(16 * size + 16) as usize][3], 0); // the logo's open center
+        assert!(!opaque(&px).iter().all(|p| *p == green)); // the logo is inside
+    }
+
+    #[test]
+    fn exe_icon_has_every_size() {
+        let ico = include_bytes!("../../../assets/swisswheel.ico");
+        assert_eq!(ico[..4], [0, 0, 1, 0]); // reserved, type = icon
+        let count = usize::from(u16::from_le_bytes([ico[4], ico[5]]));
+        let sizes: Vec<u32> = (0..count)
+            .map(|i| match ico[6 + i * 16] {
+                0 => 256,
+                w => u32::from(w),
+            })
+            .collect();
+        assert_eq!(sizes, [16, 20, 24, 32, 40, 48, 64, 256]);
     }
 }

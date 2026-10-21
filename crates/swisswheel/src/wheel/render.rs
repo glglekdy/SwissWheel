@@ -139,6 +139,12 @@ pub(crate) fn light_theme() -> bool {
     personalize_flag(w!("AppsUseLightTheme"), true)
 }
 
+/// The taskbar and tray are light ("Windows mode" in Settings → Colors),
+/// which is set apart from the apps' mode.
+pub(crate) fn taskbar_light_theme() -> bool {
+    personalize_flag(w!("SystemUsesLightTheme"), false)
+}
+
 /// Settings → Personalization → Colors → Transparency effects.
 pub(crate) fn transparency_enabled() -> bool {
     personalize_flag(w!("EnableTransparency"), true)
