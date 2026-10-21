@@ -95,6 +95,8 @@ pub struct DragTracker {
     /// Indexed by virtual-key code: down and not yet up. A key-down for a
     /// held key is an auto-repeat (low-level hooks have no repeat flag).
     held: [bool; 256],
+    /// Indexed by virtual-key code: the menu swallowed this key's press.
+    menu_press: [bool; 256],
     menu: bool,
     /// Off when the menu window couldn't be created: the open key passes.
     menu_enabled: bool,
@@ -110,6 +112,7 @@ impl DragTracker {
             wheel: Wheel::Closed,
             swallowed: [false; 256],
             held: [false; 256],
+            menu_press: [false; 256],
             menu: false,
             menu_enabled: true,
         }
@@ -194,6 +197,7 @@ impl DragTracker {
             DragEvent::DesktopKeyDown(vk) => self.on_key_down(vk, true),
             DragEvent::KeyUp(vk) => {
                 self.set_held(vk, false);
+                self.set_menu_press(vk, false);
                 if vk == self.keys.open && self.wheel == Wheel::Suppressed {
                     self.wheel = Wheel::Closed;
                 }
@@ -210,12 +214,31 @@ impl DragTracker {
     fn on_key_down(&mut self, vk: u16, desktop: bool) -> Decision {
         let repeat = self.is_held(vk);
         self.set_held(vk, true);
+        if repeat && self.is_menu_press(vk) {
+            // A key the menu took stays the menu's until released, even if the
+            // menu closed meanwhile: its repeats and its release are swallowed
+            // too, so no app sees a release without its press.
+            let command = match self.menu_key(vk).filter(|_| self.menu) {
+                Some(key @ (MenuKey::Left | MenuKey::Right | MenuKey::Up | MenuKey::Down)) => {
+                    Some(DragCommand::MenuKey(key))
+                }
+                _ => None,
+            };
+            return Decision {
+                swallow: true,
+                command,
+            };
+        }
+        if repeat && self.menu && !self.is_swallowed(vk) {
+            // Held since before the menu opened: the app has its press, so it
+            // gets the repeats and the release as well.
+            return Decision {
+                swallow: false,
+                command: None,
+            };
+        }
         let (swallow, command) = if self.menu {
             match self.menu_key(vk) {
-                Some(key @ (MenuKey::Left | MenuKey::Right | MenuKey::Up | MenuKey::Down)) => {
-                    (true, Some(DragCommand::MenuKey(key)))
-                }
-                Some(_) if repeat => (true, None),
                 Some(key) => (true, Some(DragCommand::MenuKey(key))),
                 None => (false, None),
             }
@@ -227,6 +250,7 @@ impl DragTracker {
             } else if desktop
                 && vk == self.keys.open
                 && !repeat
+                && !self.modifier_held()
                 && self.menu_enabled
                 && self.wheel == Wheel::Closed
                 && self.button != Button::Dragging
@@ -237,8 +261,30 @@ impl DragTracker {
                 (false, None)
             }
         };
+        if swallow && self.menu {
+            self.set_menu_press(vk, true);
+        }
         self.set_swallowed(vk, swallow);
         Decision { swallow, command }
+    }
+
+    /// Ctrl, Alt, Shift, or Win is down: the open key is part of a shortcut
+    /// (Win+Space switches the input language), not a request for the menu.
+    fn modifier_held(&self) -> bool {
+        const MODIFIERS: [u16; 11] = [
+            0x10, 0x11, 0x12, 0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C,
+        ];
+        MODIFIERS.iter().any(|&vk| self.is_held(vk))
+    }
+
+    fn is_menu_press(&self, vk: u16) -> bool {
+        self.menu_press.get(vk as usize).copied().unwrap_or(false)
+    }
+
+    fn set_menu_press(&mut self, vk: u16, value: bool) {
+        if let Some(slot) = self.menu_press.get_mut(vk as usize) {
+            *slot = value;
+        }
     }
 
     /// What a key means to the open menu, if anything.
@@ -515,13 +561,52 @@ mod tests {
         t.on_event(DragEvent::DesktopKeyDown(SPACE));
         assert_eq!(t.on_event(DragEvent::DesktopKeyDown(SPACE)), swallow_only());
         t.on_event(DragEvent::MenuClosed);
-        // Still held: the repeats don't reopen it.
-        assert_eq!(t.on_event(DragEvent::DesktopKeyDown(SPACE)).command, None);
-        t.on_event(DragEvent::KeyUp(SPACE));
+        // Still held: the repeats don't reopen it, and they stay swallowed
+        // like the press they repeat, so the desktop never sees half a key.
+        assert_eq!(t.on_event(DragEvent::DesktopKeyDown(SPACE)), swallow_only());
+        assert_eq!(t.on_event(DragEvent::KeyUp(SPACE)), swallow_only());
         assert_eq!(
             t.on_event(DragEvent::DesktopKeyDown(SPACE)).command,
             Some(DragCommand::OpenMenu)
         );
+    }
+
+    #[test]
+    fn menu_key_released_after_close_stays_swallowed() {
+        let mut t = menu_open();
+        t.on_event(DragEvent::KeyDown(ESC));
+        t.on_event(DragEvent::MenuClosed);
+        assert_eq!(t.on_event(DragEvent::KeyDown(ESC)), swallow_only()); // repeat
+        assert_eq!(t.on_event(DragEvent::KeyUp(ESC)), swallow_only());
+    }
+
+    #[test]
+    fn key_held_before_menu_opened_keeps_passing() {
+        let mut t = tracker();
+        assert_eq!(t.on_event(DragEvent::KeyDown(RIGHT)), pass());
+        t.on_event(DragEvent::DesktopKeyDown(SPACE));
+        assert_eq!(t.on_event(DragEvent::KeyDown(RIGHT)), pass()); // its repeat
+        assert_eq!(t.on_event(DragEvent::KeyUp(RIGHT)), pass());
+        assert_eq!(
+            t.on_event(DragEvent::KeyDown(RIGHT)).command,
+            Some(DragCommand::MenuKey(MenuKey::Right))
+        );
+    }
+
+    #[test]
+    fn open_key_with_a_modifier_is_not_for_the_menu() {
+        for modifier in [0xA2u16, 0xA4, 0xA0, 0x5B, 0x5C] {
+            // LCtrl, LAlt, LShift, LWin, RWin: Win+Space switches input language
+            let mut t = tracker();
+            t.on_event(DragEvent::DesktopKeyDown(modifier));
+            assert_eq!(t.on_event(DragEvent::DesktopKeyDown(SPACE)), pass());
+            t.on_event(DragEvent::KeyUp(SPACE));
+            t.on_event(DragEvent::KeyUp(modifier));
+            assert_eq!(
+                t.on_event(DragEvent::DesktopKeyDown(SPACE)).command,
+                Some(DragCommand::OpenMenu)
+            );
+        }
     }
 
     #[test]
