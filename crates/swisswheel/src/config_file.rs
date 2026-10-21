@@ -1,8 +1,10 @@
-//! Reading `%APPDATA%\SwissWheel\config.toml`, creating it with defaults if missing.
+//! Reading `%APPDATA%\SwissWheel\config.toml`, creating it with defaults if
+//! missing, and saving edits from the settings panel.
 
 use std::path::{Path, PathBuf};
 
 use swisswheel_core::config::{self, Config};
+use toml_edit::{DocumentMut, Item, Table, Value};
 
 /// (`%APPDATA%\SwissWheel`, `%LOCALAPPDATA%\SwissWheel\logs`)
 pub fn app_dirs() -> (PathBuf, PathBuf) {
@@ -36,6 +38,77 @@ pub fn load(dir: &Path) -> (Config, Option<String>) {
             Config::default(),
             Some(format!("설정 파일을 읽을 수 없습니다: {e}")),
         ),
+    }
+}
+
+/// Writes `config` into `dir/config.toml`, changing only the values that
+/// differ: comments, key order, and keys this version doesn't know survive.
+/// A file that isn't TOML is left alone (`InvalidData`).
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used once the menu is wired into the app")
+)]
+pub fn save(dir: &Path, config: &Config) -> std::io::Result<()> {
+    let path = dir.join("config.toml");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) => return Err(e),
+    };
+    let invalid = |e: &dyn std::fmt::Display| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+    };
+    let mut doc: DocumentMut = text.parse().map_err(|e| invalid(&e))?;
+    let new = toml_edit::ser::to_document(config).map_err(|e| invalid(&e))?;
+    merge(doc.as_table_mut(), new.as_table());
+    std::fs::create_dir_all(dir)?;
+    // Write beside it and swap, so a failed write never leaves half a file.
+    let temp = dir.join("config.toml.tmp");
+    std::fs::write(&temp, doc.to_string())?;
+    std::fs::rename(&temp, &path)
+}
+
+/// Copies `src` into `dst` key by key, keeping each existing value's
+/// surrounding comments and whitespace.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used once the menu is wired into the app")
+)]
+fn merge(dst: &mut Table, src: &Table) {
+    for (key, item) in src.iter() {
+        if let Some(src_table) = as_table(item) {
+            match dst.get_mut(key) {
+                Some(Item::Table(dst_table)) => merge(dst_table, &src_table),
+                _ => {
+                    dst.insert(key, Item::Table(src_table));
+                }
+            }
+            continue;
+        }
+        match (dst.get_mut(key), item) {
+            (Some(Item::Value(old)), Item::Value(new)) => {
+                let decor = old.decor().clone();
+                *old = new.clone();
+                *old.decor_mut() = decor;
+            }
+            _ => {
+                dst.insert(key, item.clone());
+            }
+        }
+    }
+}
+
+/// The serializer may write nested structs as inline tables; the file keeps
+/// them as `[section]` tables.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "used once the menu is wired into the app")
+)]
+fn as_table(item: &Item) -> Option<Table> {
+    match item {
+        Item::Table(t) => Some(t.clone()),
+        Item::Value(Value::InlineTable(t)) => Some(t.clone().into_table()),
+        _ => None,
     }
 }
 
@@ -73,5 +146,50 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.toml"), "open_key = \"CapsLock\"\n").unwrap();
         assert_eq!(load(dir.path()).0.open_key, Key::CapsLock);
+    }
+
+    #[test]
+    fn save_keeps_comments_order_and_unknown_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            "# my keys\nopen_key = \"Space\" # hold me\nfuture = 1\n\n[quality]\n# sharp\njpg = 42\n",
+        )
+        .unwrap();
+        let mut c = load(dir.path()).0;
+        c.open_key = Key::CapsLock;
+        c.quality.webp = 70;
+        save(dir.path(), &c).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            text.starts_with("# my keys\nopen_key = \"CapsLock\" # hold me\nfuture = 1\n"),
+            "{text}"
+        );
+        assert!(text.contains("# sharp\njpg = 42"), "{text}");
+        assert!(text.contains("webp = 70"), "{text}");
+        assert_eq!(swisswheel_core::config::parse(&text).unwrap(), c);
+    }
+
+    #[test]
+    fn save_creates_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("SwissWheel");
+        let c = Config {
+            start_with_windows: true,
+            ..Config::default()
+        };
+        save(&sub, &c).unwrap();
+        assert_eq!(load(&sub).0, c);
+    }
+
+    #[test]
+    fn save_refuses_unreadable_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "this is not toml").unwrap();
+        let err = save(dir.path(), &Config::default()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is not toml");
     }
 }
