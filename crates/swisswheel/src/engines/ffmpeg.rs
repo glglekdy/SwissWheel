@@ -6,7 +6,6 @@ use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::time::Duration;
@@ -16,11 +15,12 @@ use swisswheel_core::config::Quality;
 use swisswheel_core::format::Format;
 use swisswheel_core::media::{self, MediaInfo, MediaPlan, PlanError, Progress};
 use swisswheel_core::options::Preset;
-use windows::Win32::Foundation::HANDLE;
+use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
-    JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
-    SetInformationJobObject,
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectBasicAccountingInformation, JobObjectExtendedLimitInformation,
+    QueryInformationJobObject, SetInformationJobObject, TerminateJobObject,
 };
 use windows::Win32::System::Threading::CREATE_NO_WINDOW;
 
@@ -119,7 +119,7 @@ pub fn run(
         match result {
             Ok(()) => return Ok(()),
             Err(e) => {
-                let _ = std::fs::remove_file(output);
+                remove_output(output);
                 if matches!(e, EngineError::Cancelled) {
                     return Err(e);
                 }
@@ -151,7 +151,11 @@ fn run_once(
         .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()
         .map_err(|e| EngineError::Failed(format!("ffmpeg: {e}")))?;
-    kill_with_app(&child);
+    // Dropped (closing the job, which kills what is left) on every way out.
+    let job = RunJob::new();
+    if let Some(job) = &job {
+        job.assign(&child);
+    }
 
     let (tx, rx) = mpsc::channel();
     let stdout = child.stdout.take().expect("piped");
@@ -178,7 +182,14 @@ fn run_once(
     let mut last = 0.0f32;
     let status = loop {
         if cancel.load(Ordering::SeqCst) {
-            let _ = child.kill();
+            // The whole job, so FFmpeg dies even behind a launcher (Chocolatey
+            // shims, .cmd wrappers) and the pipes close for the readers below.
+            match &job {
+                Some(job) => job.terminate(),
+                None => {
+                    let _ = child.kill();
+                }
+            }
             let _ = child.wait();
             let _ = reader.join();
             let _ = errors.join();
@@ -216,32 +227,84 @@ fn run_once(
     }
 }
 
+/// Deletes a failed attempt's output and waits (up to two seconds) until it
+/// is really gone: right after FFmpeg is killed, a handle to the file can
+/// still be open for a moment (the process winding down, or an antivirus
+/// scan), and the file stays visible until it closes.
+fn remove_output(output: &Path) {
+    for _ in 0..40 {
+        if !output.exists() {
+            return;
+        }
+        let _ = std::fs::remove_file(output);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    log_error!("임시 파일을 지우지 못했습니다: {}", output.display());
+}
+
 fn wait(child: &mut Child) -> Result<std::process::ExitStatus, EngineError> {
     child.wait().map_err(|e| EngineError::Failed(e.to_string()))
 }
 
-/// Puts FFmpeg in a job object that dies with the app, so a crash or a kill
-/// of SwissWheel never leaves it running. The moment between spawning and
-/// assigning is accepted.
-fn kill_with_app(child: &Child) {
-    static JOB: OnceLock<Option<isize>> = OnceLock::new();
-    let job = JOB.get_or_init(|| unsafe {
-        let job = CreateJobObjectW(None, None).ok()?;
-        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        SetInformationJobObject(
-            job,
-            JobObjectExtendedLimitInformation,
-            std::ptr::from_ref(&limits).cast(),
-            size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
-        )
-        .ok()?;
-        // Kept open for the life of the process: closing it is what kills FFmpeg.
-        Some(job.0 as isize)
-    });
-    if let Some(job) = *job {
+/// One FFmpeg run and everything it was started through, in a job object:
+/// `terminate` stops all of it at once, and closing the handle (on drop, or
+/// when the app dies) kills whatever is still running. The moment between
+/// spawning and assigning is accepted; a launcher takes far longer than that
+/// to start FFmpeg.
+struct RunJob(HANDLE);
+
+impl RunJob {
+    fn new() -> Option<RunJob> {
         unsafe {
-            let _ = AssignProcessToJobObject(HANDLE(job as *mut _), HANDLE(child.as_raw_handle()));
+            let job = RunJob(CreateJobObjectW(None, None).ok()?);
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            SetInformationJobObject(
+                job.0,
+                JobObjectExtendedLimitInformation,
+                std::ptr::from_ref(&limits).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+            .ok()?;
+            Some(job)
+        }
+    }
+
+    fn assign(&self, child: &Child) {
+        unsafe {
+            let _ = AssignProcessToJobObject(self.0, HANDLE(child.as_raw_handle()));
+        }
+    }
+
+    /// Kills every process in the job and waits (up to two seconds) until they
+    /// are gone: termination is asynchronous, and FFmpeg must have let go of
+    /// its output before the caller deletes it.
+    fn terminate(&self) {
+        unsafe {
+            let _ = TerminateJobObject(self.0, 1);
+            for _ in 0..200 {
+                let mut info = JOBOBJECT_BASIC_ACCOUNTING_INFORMATION::default();
+                let done = QueryInformationJobObject(
+                    Some(self.0),
+                    JobObjectBasicAccountingInformation,
+                    std::ptr::from_mut(&mut info).cast(),
+                    size_of::<JOBOBJECT_BASIC_ACCOUNTING_INFORMATION>() as u32,
+                    None,
+                )
+                .map_or(true, |()| info.ActiveProcesses == 0);
+                if done {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+    }
+}
+
+impl Drop for RunJob {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
         }
     }
 }
@@ -649,6 +712,64 @@ pub(crate) mod tests {
         let err = run(&tools, &plan, &long, &out, &|_| {}, &cancel).unwrap_err();
         assert!(matches!(err, EngineError::Cancelled), "{err:?}");
         assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!out.exists());
+    }
+
+    #[test]
+    fn cancel_reaches_ffmpeg_behind_a_launcher() {
+        // Package managers (Chocolatey) put a launcher on PATH that starts the
+        // real FFmpeg as its child. Killing only the launcher leaves FFmpeg
+        // encoding and holding the pipes, so quitting would wait for it.
+        let dir = tempfile::tempdir().unwrap();
+        let long = make(
+            dir.path(),
+            "long.mp4",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=60:size=320x240:rate=10",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+            ],
+        );
+        let real = tools();
+        let launcher = dir.path().join("ffmpeg.cmd");
+        // -re reads the input in real time, so FFmpeg is still busy when cancelled.
+        std::fs::write(
+            &launcher,
+            format!("@\"{}\" -re %*\r\n", real.ffmpeg.display()),
+        )
+        .unwrap();
+        let tools = Tools {
+            ffmpeg: launcher,
+            ffprobe: real.ffprobe,
+        };
+        let plan = prepare(
+            &tools,
+            &Operation::Convert(Format::Webm),
+            None,
+            &long,
+            &Quality::default(),
+        )
+        .unwrap();
+        let cancel = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&cancel);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            flag.store(true, Ordering::SeqCst);
+        });
+        let out = dir.path().join("long.webm.swisswheel-tmp");
+        let started = Instant::now();
+        let err = run(&tools, &plan, &long, &out, &|_| {}, &cancel).unwrap_err();
+        assert!(matches!(err, EngineError::Cancelled), "{err:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "took {:?}",
+            started.elapsed()
+        );
         assert!(!out.exists());
     }
 
