@@ -260,7 +260,7 @@ unsafe extern "system" fn wnd_proc(
 ) -> LRESULT {
     match msg {
         WM_APP_DRAG => {
-            if let Some(command) = hook::command_from_code(wparam.0) {
+            if let Some(command) = hook::decode(wparam, lparam) {
                 with_state(|s| s.on_drag_command(command));
             }
         }
@@ -322,6 +322,11 @@ impl AppState {
                 }
             }
             DragCommand::Cancel => self.close_wheel(),
+            // The desktop menu is wired up in a later step.
+            DragCommand::OpenMenu
+            | DragCommand::MenuKey(_)
+            | DragCommand::MenuPointerDown { .. }
+            | DragCommand::CloseMenu => hook::notify(DragEvent::MenuClosed),
             DragCommand::ButtonReleasedWhileOpen => unsafe {
                 // WM_LBUTTONUP reaches the hook before OLE delivers Drop; wait for it.
                 SetTimer(
