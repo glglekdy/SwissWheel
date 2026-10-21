@@ -1,10 +1,8 @@
 //! Conversion engines. Each writes its result to a temp path chosen by the job runner.
 
-#[allow(dead_code)] // TEMP: the job runner starts using it in the media plan's Task 6
 pub mod ffmpeg;
 pub mod image;
 
-#[allow(dead_code)] // TEMP: media variants are built once the runner calls ffmpeg (Task 6)
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error("read failed: {0}")]

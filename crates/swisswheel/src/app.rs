@@ -45,6 +45,8 @@ use crate::wheel::{WheelView, WheelWindow};
 
 const ID_MENU_EXIT: usize = 1;
 const WM_APP_JOB_DONE: u32 = WM_APP + 30;
+/// FFmpeg jobs that run at once (spec 4.4).
+const MEDIA_WORKERS: usize = 2;
 
 const TIMER_ENTER_TIMEOUT: usize = 1;
 const TIMER_MOUSE_UP_CLOSE: usize = 2;
@@ -138,6 +140,7 @@ pub fn run() -> Result<()> {
             .min(4);
         Runner::new(
             workers,
+            MEDIA_WORKERS,
             config.quality.clone(),
             Box::new(move |report| {
                 reports.lock().unwrap().push_back(report);
@@ -463,7 +466,11 @@ impl AppState {
         let Some(runner) = &self.runner else {
             return;
         };
-        runner.submit(Job { op, inputs });
+        runner.submit(Job {
+            op,
+            preset: None,
+            inputs,
+        });
         self.active_jobs += 1;
         self.update_busy();
     }

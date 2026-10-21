@@ -1,7 +1,8 @@
-//! Runs jobs (one operation over the dropped files) on a small worker pool.
+//! Runs jobs (one operation over the dropped files) on two worker pools:
+//! one for in-process image work and a smaller one for FFmpeg (spec 4.4).
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -9,14 +10,19 @@ use std::thread::JoinHandle;
 use swisswheel_core::catalog::Operation;
 use swisswheel_core::config::Quality;
 use swisswheel_core::format::Format;
-use swisswheel_core::naming::temp_path;
+use swisswheel_core::media;
+use swisswheel_core::naming::{suffix_for, temp_path};
+use swisswheel_core::options::Preset;
 
+use crate::engines::ffmpeg::{self, Tools};
 use crate::engines::{self, EngineError};
 use crate::fsutil::{Reservations, finalize};
 
 #[derive(Debug, Clone)]
 pub struct Job {
     pub op: Operation,
+    /// The option chosen in the side panel; `None` means the defaults.
+    pub preset: Option<Preset>,
     pub inputs: Vec<PathBuf>,
 }
 
@@ -35,12 +41,21 @@ struct Shared {
     quality: Quality,
     reservations: Reservations,
     on_done: OnDone,
+    /// Found once at startup; media files fail with `MissingFfmpeg` without it.
+    tools: Option<Tools>,
+    /// Set by `shutdown`: running FFmpeg is killed, queued files are skipped.
+    cancel: AtomicBool,
+    /// Jobs submitted but not yet reported, for `Runner::progress`.
+    active: Mutex<Vec<Arc<JobState>>>,
 }
 
 /// One job's progress; the worker that finishes the last file reports it.
 struct JobState {
     op: Operation,
+    preset: Option<Preset>,
     results: Mutex<Vec<Option<Result<PathBuf, String>>>>,
+    /// Per file, 0..=1.
+    progress: Mutex<Vec<f32>>,
     remaining: AtomicUsize,
 }
 
@@ -51,28 +66,46 @@ struct Work {
 }
 
 pub struct Runner {
-    tx: Sender<Work>,
+    image_tx: Sender<Work>,
+    media_tx: Sender<Work>,
     workers: Vec<JoinHandle<()>>,
     shared: Arc<Shared>,
 }
 
 impl Runner {
-    pub fn new(workers: usize, quality: Quality, on_done: OnDone) -> Runner {
-        let (tx, rx) = mpsc::channel::<Work>();
-        let rx = Arc::new(Mutex::new(rx));
+    pub fn new(
+        image_workers: usize,
+        media_workers: usize,
+        quality: Quality,
+        on_done: OnDone,
+    ) -> Runner {
+        let tools = ffmpeg::locate();
+        if tools.is_none() {
+            log_info!("FFmpeg를 찾지 못했습니다: 영상·오디오 작업은 실패로 처리됩니다");
+        }
         let shared = Arc::new(Shared {
             quality,
             reservations: Reservations::default(),
             on_done,
+            tools,
+            cancel: AtomicBool::new(false),
+            active: Mutex::new(Vec::new()),
         });
-        let workers = (0..workers.max(1))
-            .map(|_| {
+        let mut workers = Vec::new();
+        let mut pool = |count: usize| {
+            let (tx, rx) = mpsc::channel::<Work>();
+            let rx = Arc::new(Mutex::new(rx));
+            for _ in 0..count.max(1) {
                 let (rx, shared) = (Arc::clone(&rx), Arc::clone(&shared));
-                std::thread::spawn(move || worker(&rx, &shared))
-            })
-            .collect();
+                workers.push(std::thread::spawn(move || worker(&rx, &shared)));
+            }
+            tx
+        };
+        let image_tx = pool(image_workers);
+        let media_tx = pool(media_workers);
         Runner {
-            tx,
+            image_tx,
+            media_tx,
             workers,
             shared,
         }
@@ -87,14 +120,24 @@ impl Runner {
             });
             return;
         }
+        let n = job.inputs.len();
         let state = Arc::new(JobState {
             op: job.op,
-            results: Mutex::new(vec![None; job.inputs.len()]),
-            remaining: AtomicUsize::new(job.inputs.len()),
+            preset: job.preset,
+            results: Mutex::new(vec![None; n]),
+            progress: Mutex::new(vec![0.0; n]),
+            remaining: AtomicUsize::new(n),
         });
+        self.shared.active.lock().unwrap().push(Arc::clone(&state));
         for (index, input) in job.inputs.into_iter().enumerate() {
+            let is_media = Format::from_path(&input).is_some_and(|f| media::supports(&job.op, f));
+            let tx = if is_media {
+                &self.media_tx
+            } else {
+                &self.image_tx
+            };
             // Send only fails once every worker has exited, which shutdown() prevents.
-            let _ = self.tx.send(Work {
+            let _ = tx.send(Work {
                 job: Arc::clone(&state),
                 index,
                 input,
@@ -102,9 +145,26 @@ impl Runner {
         }
     }
 
-    /// Finishes queued work, then stops the workers.
+    /// Average progress over every file of the jobs not yet reported, or
+    /// `None` when nothing is running.
+    #[allow(dead_code)] // TEMP: the tray tooltip reads it from the media plan's Task 8
+    pub fn progress(&self) -> Option<f32> {
+        let active = self.shared.active.lock().unwrap();
+        let (mut sum, mut count) = (0.0, 0usize);
+        for job in active.iter() {
+            let progress = job.progress.lock().unwrap();
+            sum += progress.iter().sum::<f32>();
+            count += progress.len();
+        }
+        (count > 0).then(|| sum / count as f32)
+    }
+
+    /// Kills running FFmpeg work, skips queued files, then stops the workers.
+    /// Image files already being converted finish (they take moments).
     pub fn shutdown(self) {
-        drop(self.tx);
+        self.shared.cancel.store(true, Ordering::SeqCst);
+        drop(self.image_tx);
+        drop(self.media_tx);
         for w in self.workers {
             let _ = w.join();
         }
@@ -116,9 +176,19 @@ fn worker(rx: &Mutex<Receiver<Work>>, shared: &Shared) {
         let Ok(work) = rx.lock().unwrap().recv() else {
             return;
         };
-        let result = process(&work.job.op, &work.input, shared);
+        let result = if shared.cancel.load(Ordering::SeqCst) {
+            Err(EngineError::Cancelled.user_message(&file_name(&work.input)))
+        } else {
+            process(&work, shared)
+        };
         work.job.results.lock().unwrap()[work.index] = Some(result);
+        work.job.progress.lock().unwrap()[work.index] = 1.0;
         if work.job.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            shared
+                .active
+                .lock()
+                .unwrap()
+                .retain(|j| !Arc::ptr_eq(j, &work.job));
             (shared.on_done)(report(&work.job));
         }
     }
@@ -140,30 +210,63 @@ fn report(job: &JobState) -> JobReport {
     }
 }
 
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+/// Which engine converts a file, decided before its output name is reserved
+/// (for media the output format depends on what ffprobe finds).
+enum Engine<'a> {
+    Image,
+    Media(&'a Tools, media::MediaPlan),
+}
+
 /// Converts one file: reserve a name, write to a temp file, then move it into
 /// place without replacing anything. The temp file never survives a failure.
-fn process(op: &Operation, input: &Path, shared: &Shared) -> Result<PathBuf, String> {
-    let name = input
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let format = Format::from_path(input)
-        .ok_or_else(|| EngineError::Unsupported(name.clone()).user_message(&name))?;
-    if !engines::image::supports(op, format) {
-        return Err(format!("{name}: 다음 버전에서 지원 예정입니다"));
-    }
-    let extension = engines::image::output_format(op, format).extension();
-    let suffix = match op {
-        Operation::Tool(tool) => tool.suffix(),
-        _ => None,
+fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
+    let (op, preset, input) = (&work.job.op, work.job.preset, work.input.as_path());
+    let name = file_name(input);
+    let fail = |e: EngineError| {
+        log_error!("{name}: {e}");
+        e.user_message(&name)
     };
+    let format =
+        Format::from_path(input).ok_or_else(|| fail(EngineError::Unsupported(name.clone())))?;
+    let (engine, extension) = if engines::image::supports(op, format) {
+        (
+            Engine::Image,
+            engines::image::output_format(op, format).extension(),
+        )
+    } else if media::supports(op, format) {
+        let tools = shared
+            .tools
+            .as_ref()
+            .ok_or_else(|| fail(EngineError::MissingFfmpeg))?;
+        let plan = ffmpeg::prepare(tools, op, preset, input, &shared.quality).map_err(fail)?;
+        let extension = plan.output.extension();
+        (Engine::Media(tools, plan), extension)
+    } else {
+        return Err(fail(EngineError::Unsupported(format!("{op:?} on {name}"))));
+    };
+    let suffix = suffix_for(op, preset);
 
-    let mut target = shared.reservations.reserve(input, extension, suffix);
+    let mut target = shared
+        .reservations
+        .reserve(input, extension, suffix.as_deref());
     let temp = temp_path(&target);
-    if let Err(e) = engines::image::run(op, None, input, &temp, &shared.quality) {
+    let result = match &engine {
+        Engine::Image => engines::image::run(op, preset, input, &temp, &shared.quality),
+        Engine::Media(tools, plan) => {
+            let progress = |p: f32| work.job.progress.lock().unwrap()[work.index] = p;
+            ffmpeg::run(tools, plan, input, &temp, &progress, &shared.cancel)
+        }
+    };
+    if let Err(e) = result {
         let _ = std::fs::remove_file(&temp);
         shared.reservations.release(&target);
-        return Err(e.user_message(&name));
+        return Err(fail(e));
     }
     // Another program may have created our reserved name meanwhile; pick a new one.
     for _ in 0..3 {
@@ -174,41 +277,61 @@ fn process(op: &Operation, input: &Path, shared: &Shared) -> Result<PathBuf, Str
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
                 shared.reservations.release(&target);
-                target = shared.reservations.reserve(input, extension, suffix);
+                target = shared
+                    .reservations
+                    .reserve(input, extension, suffix.as_deref());
             }
             Err(_) => break,
         }
     }
     let _ = std::fs::remove_file(&temp);
     shared.reservations.release(&target);
-    Err(EngineError::Write(target.display().to_string()).user_message(&name))
+    Err(fail(EngineError::Write(target.display().to_string())))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engines::ffmpeg::tests::{CLIP, make, pattern};
     use crate::engines::image::tests::rgba_png;
     use std::sync::Mutex;
     use std::sync::mpsc;
+    use std::time::{Duration, Instant};
     use swisswheel_core::catalog::{Operation, Tool};
     use swisswheel_core::config::Quality;
     use swisswheel_core::format::Format;
+    use swisswheel_core::options::Preset;
 
-    /// Submits `jobs` to a 2-worker runner and collects one report per job.
-    fn run_jobs(jobs: Vec<Job>) -> Vec<JobReport> {
+    /// A 2+2-worker runner whose reports arrive on the returned channel.
+    fn runner() -> (Runner, mpsc::Receiver<JobReport>) {
         let (tx, rx) = mpsc::channel();
         let tx = Mutex::new(tx);
         let runner = Runner::new(
             2,
+            2,
             Quality::default(),
             Box::new(move |r| tx.lock().unwrap().send(r).unwrap()),
         );
+        (runner, rx)
+    }
+
+    /// Submits `jobs` and collects one report per job.
+    fn run_jobs(jobs: Vec<Job>) -> Vec<JobReport> {
+        let (runner, rx) = runner();
         let n = jobs.len();
         for job in jobs {
             runner.submit(job);
         }
+        let reports = rx.iter().take(n).collect();
         runner.shutdown();
-        rx.iter().take(n).collect()
+        reports
+    }
+
+    fn job(op: Operation, inputs: Vec<PathBuf>) -> Job {
+        Job {
+            op,
+            preset: None,
+            inputs,
+        }
     }
 
     #[test]
@@ -217,10 +340,7 @@ mod tests {
         let (a, b) = (dir.path().join("a.png"), dir.path().join("b.png"));
         rgba_png(&a, 10, 10, 255);
         rgba_png(&b, 10, 10, 255);
-        let reports = run_jobs(vec![Job {
-            op: Operation::Convert(Format::Jpg),
-            inputs: vec![a, b],
-        }]);
+        let reports = run_jobs(vec![job(Operation::Convert(Format::Jpg), vec![a, b])]);
         assert_eq!(reports.len(), 1);
         assert_eq!(
             reports[0].outputs,
@@ -234,11 +354,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let a = dir.path().join("a.png");
         rgba_png(&a, 600, 600, 255);
-        let job = || Job {
-            op: Operation::Convert(Format::Jpg),
-            inputs: vec![a.clone()],
-        };
-        let mut outs: Vec<_> = run_jobs(vec![job(), job()])
+        let one = || job(Operation::Convert(Format::Jpg), vec![a.clone()]);
+        let mut outs: Vec<_> = run_jobs(vec![one(), one()])
             .into_iter()
             .flat_map(|r| r.outputs)
             .collect();
@@ -256,21 +373,16 @@ mod tests {
         rgba_png(&good, 10, 10, 255);
         let empty = dir.path().join("empty.png");
         std::fs::write(&empty, b"").unwrap();
-        let r = &run_jobs(vec![Job {
-            op: Operation::Convert(Format::Webp),
-            inputs: vec![empty, good],
-        }])[0];
+        let r = &run_jobs(vec![job(
+            Operation::Convert(Format::Webp),
+            vec![empty, good],
+        )])[0];
         assert_eq!(r.outputs, vec![dir.path().join("good.webp")]);
         assert_eq!(
             r.failures,
             vec!["empty.png: 이미지를 읽을 수 없습니다".to_string()]
         );
-        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_name().to_string_lossy().ends_with(".swisswheel-tmp"))
-            .collect();
-        assert!(leftovers.is_empty());
+        assert!(temp_files(dir.path()).is_empty());
     }
 
     #[test]
@@ -280,10 +392,7 @@ mod tests {
         std::fs::create_dir(&sub).unwrap();
         let p = sub.join("할머니 생신.png");
         rgba_png(&p, 10, 10, 255);
-        let r = &run_jobs(vec![Job {
-            op: Operation::Tool(Tool::Shrink),
-            inputs: vec![p],
-        }])[0];
+        let r = &run_jobs(vec![job(Operation::Tool(Tool::Shrink), vec![p])])[0];
         assert_eq!(r.outputs, vec![sub.join("할머니 생신 (50%).png")]);
     }
 
@@ -292,14 +401,103 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let v = dir.path().join("clip.mp4");
         std::fs::write(&v, b"x").unwrap();
-        let r = &run_jobs(vec![Job {
-            op: Operation::Convert(Format::Mp3),
-            inputs: vec![v],
-        }])[0];
+        let r = &run_jobs(vec![job(Operation::Convert(Format::Png), vec![v])])[0];
         assert!(r.outputs.is_empty());
         assert_eq!(
             r.failures,
-            vec!["clip.mp4: 다음 버전에서 지원 예정입니다".to_string()]
+            vec!["clip.mp4: 지원하지 않는 작업입니다".to_string()]
         );
+    }
+
+    #[test]
+    fn media_job_converts_and_reports() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make(dir.path(), "clip.mp4", CLIP);
+        let r = &run_jobs(vec![job(Operation::Convert(Format::Mp3), vec![clip])])[0];
+        assert_eq!(r.outputs, vec![dir.path().join("clip.mp3")]);
+        assert!(r.failures.is_empty(), "{:?}", r.failures);
+    }
+
+    #[test]
+    fn media_output_extension_comes_from_probe() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make(dir.path(), "clip.mp4", CLIP); // AAC audio
+        let r = &run_jobs(vec![job(Operation::Tool(Tool::ExtractAudio), vec![clip])])[0];
+        assert_eq!(r.outputs, vec![dir.path().join("clip.m4a")]);
+    }
+
+    #[test]
+    fn option_suffixes_reach_file_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let png = dir.path().join("a.png");
+        rgba_png(&png, 40, 40, 255);
+        let clip = make(dir.path(), "clip.mp4", CLIP);
+        let reports = run_jobs(vec![
+            Job {
+                op: Operation::Tool(Tool::Shrink),
+                preset: Some(Preset::Scale(25)),
+                inputs: vec![png],
+            },
+            Job {
+                op: Operation::Convert(Format::Mkv),
+                preset: Some(Preset::Resolution(Some(480))),
+                inputs: vec![clip],
+            },
+        ]);
+        let mut outs: Vec<_> = reports.into_iter().flat_map(|r| r.outputs).collect();
+        outs.sort();
+        assert_eq!(
+            outs,
+            vec![
+                dir.path().join("a (25%).png"),
+                dir.path().join("clip (480p).mkv")
+            ]
+        );
+    }
+
+    #[test]
+    fn progress_while_running_and_none_when_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = pattern(dir.path(), "clip.mp4", "320x240", 10);
+        let (runner, rx) = runner();
+        assert_eq!(runner.progress(), None);
+        runner.submit(job(Operation::Convert(Format::Webm), vec![clip]));
+        let mut seen = false;
+        let report = loop {
+            if let Some(p) = runner.progress() {
+                assert!((0.0..=1.0).contains(&p), "{p}");
+                seen = true;
+            }
+            if let Ok(r) = rx.recv_timeout(Duration::from_millis(20)) {
+                break r;
+            }
+        };
+        assert!(seen, "progress was never reported");
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert_eq!(runner.progress(), None);
+        runner.shutdown();
+    }
+
+    #[test]
+    fn shutdown_cancels_running_media() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = pattern(dir.path(), "clip.mp4", "640x480", 30);
+        let (runner, _rx) = runner();
+        runner.submit(job(Operation::Convert(Format::Webm), vec![clip]));
+        std::thread::sleep(Duration::from_millis(500));
+        let started = Instant::now();
+        runner.shutdown();
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!dir.path().join("clip.webm").exists());
+        assert!(temp_files(dir.path()).is_empty());
+    }
+
+    fn temp_files(dir: &Path) -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.to_string_lossy().ends_with(".swisswheel-tmp"))
+            .collect()
     }
 }
