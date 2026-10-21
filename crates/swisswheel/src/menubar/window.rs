@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use swisswheel_core::geometry::Rect;
 use swisswheel_core::menu_geometry::{Box2, MenuLayout, layout, window_origin};
-use swisswheel_core::settings::ITEMS;
+
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
@@ -86,7 +86,7 @@ impl MenuBar {
                 glass_supported,
                 surface: None,
                 scale: 1.0,
-                layout: layout(ITEMS.len(), false, 1.0),
+                layout: layout(false, 1.0),
                 origin: POINT::default(),
                 panel_open: false,
                 visible: false,
@@ -124,7 +124,7 @@ impl MenuBar {
                 right: wa.right,
                 bottom: wa.bottom,
             };
-            self.layout = layout(ITEMS.len(), notice, self.scale);
+            self.layout = layout(notice, self.scale);
             let (x, y) = window_origin(work, &self.layout, self.scale);
             self.origin = POINT { x, y };
             let _ = SetWindowPos(

@@ -324,8 +324,8 @@ tray_ring = false
 
     #[test]
     fn new_keys_parse_and_round_trip() {
-        let c = parse("open_key = \"F5\"\ncycle_key = \"PageUp\"\ncancel_key = \"Pause\"\n")
-            .unwrap();
+        let c =
+            parse("open_key = \"F5\"\ncycle_key = \"PageUp\"\ncancel_key = \"Pause\"\n").unwrap();
         assert_eq!(
             (c.open_key, c.cycle_key, c.cancel_key),
             (Key::F5, Key::PageUp, Key::Pause)

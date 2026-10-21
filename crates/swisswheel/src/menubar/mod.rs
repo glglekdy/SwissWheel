@@ -5,8 +5,8 @@ mod render;
 mod window;
 
 use swisswheel_core::config::Config;
-use swisswheel_core::menu::MenuHit;
-use swisswheel_core::settings::{Dir, ITEMS, SettingItem, step};
+use swisswheel_core::menu::{Focus, MenuHit};
+use swisswheel_core::settings::{Category, Dir, SettingItem, step};
 
 pub use window::MenuBar;
 
@@ -19,11 +19,14 @@ pub struct RowView {
     /// Whether ◀ / ▶ can move the value; dimmed when not.
     pub back: bool,
     pub forward: bool,
+    /// A shortcut row: the value is drawn as a key, without ◀ / ▶.
+    pub keycap: bool,
 }
 
-/// The panel's rows for `config`, top to bottom.
-pub fn rows(config: &Config, failed: Option<SettingItem>) -> Vec<RowView> {
-    ITEMS
+/// The rows of `category`'s tab for `config`, top to bottom.
+pub fn rows(config: &Config, category: Category, failed: Option<SettingItem>) -> Vec<RowView> {
+    category
+        .items()
         .iter()
         .map(|&item| RowView {
             label: item.label(),
@@ -31,6 +34,7 @@ pub fn rows(config: &Config, failed: Option<SettingItem>) -> Vec<RowView> {
             failed: failed == Some(item),
             back: step(config, item, Dir::Back).is_some(),
             forward: step(config, item, Dir::Forward).is_some(),
+            keycap: item.is_key(),
         })
         .collect()
 }
@@ -38,12 +42,18 @@ pub fn rows(config: &Config, failed: Option<SettingItem>) -> Vec<RowView> {
 /// Everything the renderer needs for one frame.
 pub struct MenuView<'a> {
     pub selected: usize,
-    /// The settings panel's rows while it is open.
+    /// The selected tab's rows while the panel is open.
     pub rows: Option<&'a [RowView]>,
-    pub row: Option<usize>,
+    /// Index into `CATEGORIES`.
+    pub category: usize,
+    pub focus: Option<Focus>,
+    /// The focused shortcut row waits for a key.
+    pub capturing: bool,
     pub hovered: MenuHit,
-    /// Shown above the rows when the config file can't be saved to.
+    /// Shown above the tabs when the config file can't be saved to.
     pub notice: Option<&'a str>,
+    /// The line under the rows.
+    pub hint: &'a str,
     /// Bar open animation and panel fade, 0.0 → 1.0.
     pub progress: f32,
     pub panel_progress: f32,

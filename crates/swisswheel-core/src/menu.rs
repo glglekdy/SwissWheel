@@ -384,7 +384,10 @@ mod tests {
     #[test]
     fn enter_opens_panel_on_tabs_of_keys() {
         let m = panel();
-        assert_eq!((m.focus(), m.category()), (Some(Focus::Tabs), Category::Keys));
+        assert_eq!(
+            (m.focus(), m.category()),
+            (Some(Focus::Tabs), Category::Keys)
+        );
         assert_eq!(m.hint(), "←/→ 카테고리 · ↓ 항목");
     }
 
@@ -451,7 +454,10 @@ mod tests {
         assert!(m.capturing());
         assert_eq!(m.hint(), "바꿀 키를 누르세요 · 다른 곳 클릭 시 취소");
         assert_eq!(m.key(MenuKey::Open), MenuAction::None); // the hook sends MenuCapture instead
-        assert_eq!(m.capture(0x74), MenuAction::Bind(SettingItem::OpenKey, 0x74));
+        assert_eq!(
+            m.capture(0x74),
+            MenuAction::Bind(SettingItem::OpenKey, 0x74)
+        );
         assert!(!m.capturing());
         assert_eq!(m.capture(0x74), MenuAction::None);
     }

@@ -275,7 +275,10 @@ mod tests {
         assert_eq!(hit(&l, None, x, y), MenuHit::Tile(1));
         let (x, y) = mid(&l.rows[1].row);
         assert_eq!(hit(&l, None, x, y), MenuHit::Outside); // panel closed
-        assert_eq!(hit(&l, convert(), l.rows[1].row.left + 4.0, y), MenuHit::Row(1));
+        assert_eq!(
+            hit(&l, convert(), l.rows[1].row.left + 4.0, y),
+            MenuHit::Row(1)
+        );
         let (x, y) = mid(&l.rows[1].back);
         assert_eq!(hit(&l, convert(), x, y), MenuHit::Step(1, Dir::Back));
         let (x, y) = mid(&l.rows[1].forward);
@@ -297,7 +300,10 @@ mod tests {
         assert_eq!(hit(&l, keys(), x, y), MenuHit::KeyCap(1));
         let (x, y) = mid(&l.rows[1].back);
         assert_eq!(hit(&l, keys(), x, y), MenuHit::KeyCap(1));
-        assert_eq!(hit(&l, keys(), l.rows[1].row.left + 4.0, y), MenuHit::Row(1));
+        assert_eq!(
+            hit(&l, keys(), l.rows[1].row.left + 4.0, y),
+            MenuHit::Row(1)
+        );
         let (x, y) = mid(&l.hint);
         assert_eq!(hit(&l, convert(), x, y), MenuHit::Panel);
     }
@@ -317,7 +323,10 @@ mod tests {
         let l = layout(false, 1.0);
         let gap_x = (l.tiles[0].right + l.tiles[1].left) / 2.0;
         assert_eq!(hit(&l, None, gap_x, mid(&l.tiles[0]).1), MenuHit::Panel);
-        assert_eq!(hit(&l, None, l.bar.left + 2.0, l.bar.top + 2.0), MenuHit::Panel);
+        assert_eq!(
+            hit(&l, None, l.bar.left + 2.0, l.bar.top + 2.0),
+            MenuHit::Panel
+        );
         assert_eq!(hit(&l, None, 2.0, 2.0), MenuHit::Outside); // above the bar
     }
 

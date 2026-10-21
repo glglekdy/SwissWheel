@@ -66,19 +66,6 @@ impl Category {
     }
 }
 
-/// The panel's rows, top to bottom (spec 2.4).
-pub const ITEMS: [SettingItem; 9] = [
-    SettingItem::OpenKey,
-    SettingItem::CycleKey,
-    SettingItem::CancelKey,
-    SettingItem::StartWithWindows,
-    SettingItem::JpgQuality,
-    SettingItem::WebpQuality,
-    SettingItem::Mp3Bitrate,
-    SettingItem::ProgressWindow,
-    SettingItem::TrayRing,
-];
-
 const MP3_KBPS: [u16; 5] = [128, 160, 192, 256, 320];
 const SHRINK_PERCENTS: [u8; 3] = [25, 50, 75];
 const STRENGTHS: [Strength; 3] = [Strength::Light, Strength::Normal, Strength::Strong];
@@ -231,7 +218,12 @@ pub fn step(c: &Config, item: SettingItem, dir: Dir) -> Option<Config> {
         SettingItem::CompressVideo => {
             // Strengths have no order of their own: compare positions.
             let index = |s: Strength| STRENGTHS.iter().position(|&x| x == s).unwrap_or(1);
-            let i = next_in(0..STRENGTHS.len(), index(c.tools.compress_video), dir, |_| false)?;
+            let i = next_in(
+                0..STRENGTHS.len(),
+                index(c.tools.compress_video),
+                dir,
+                |_| false,
+            )?;
             next.tools.compress_video = STRENGTHS[i];
         }
     }
@@ -326,7 +318,10 @@ mod tests {
         assert_eq!(labels, ["단축키", "도구", "변환", "일반"]);
         assert_eq!(Category::Keys.items(), [OpenKey, CycleKey, CancelKey]);
         assert_eq!(Category::Tools.items(), [ShrinkPercent, CompressVideo]);
-        assert_eq!(Category::Convert.items(), [JpgQuality, WebpQuality, Mp3Bitrate]);
+        assert_eq!(
+            Category::Convert.items(),
+            [JpgQuality, WebpQuality, Mp3Bitrate]
+        );
         assert_eq!(
             Category::General.items(),
             [StartWithWindows, ProgressWindow, TrayRing]

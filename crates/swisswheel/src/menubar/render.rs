@@ -1,8 +1,9 @@
 //! Draws the desktop menu: translucent square tiles (icon above, label below)
 //! on a glass bar, and the settings panel under it.
 
-use swisswheel_core::menu::{MenuHit, TILES, Tile};
-use swisswheel_core::menu_geometry::{Box2, DROP, MenuLayout};
+use swisswheel_core::menu::{Focus, MenuHit, TILES, Tile};
+use swisswheel_core::menu_geometry::{Box2, DROP, MenuLayout, PANEL_PAD};
+use swisswheel_core::settings::CATEGORIES;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
@@ -18,6 +19,9 @@ pub(super) const BAR_CORNER: f32 = 12.0;
 pub(super) const PANEL_CORNER: f32 = 10.0;
 const TILE_CORNER: f32 = 8.0;
 const ROW_CORNER: f32 = 8.0;
+const KEYCAP_CORNER: f32 = 6.0;
+/// The selected tab's underline stops this far from the tab's sides.
+const TAB_UNDERLINE_INSET: f32 = 16.0;
 /// Unselected tiles are see-through, like the reference's grey squares.
 const TILE_ALPHA: f32 = 0.55;
 const TILE_HOVER_ALPHA: f32 = 0.8;
@@ -182,6 +186,17 @@ fn draw_panel(
     let pad = 12.0 * scale;
     unsafe {
         let brush = |color: &D2D1_COLOR_F| ctx.CreateSolidColorBrush(color, None);
+        // A hairline across the panel's inside at `y`.
+        let divider = |y: f32| -> Result<()> {
+            let line = D2D_RECT_F {
+                left: panel.left + PANEL_PAD * scale,
+                top: y - 0.5 * scale,
+                right: panel.right - PANEL_PAD * scale,
+                bottom: y + 0.5 * scale,
+            };
+            ctx.FillRectangle(&line, &brush(&colors.rim)?);
+            Ok(())
+        };
         ctx.FillRoundedRectangle(&rounded(panel, PANEL_CORNER * scale), &brush(&colors.disc)?);
         ctx.DrawRoundedRectangle(
             &rounded(inset(panel, 0.5 * scale), PANEL_CORNER * scale),
@@ -202,10 +217,51 @@ fn draw_panel(
                 &brush(&colors.subtext)?,
             );
         }
+
+        for (i, &category) in CATEGORIES.iter().enumerate() {
+            let r = rect(layout.tabs[i], 0.0);
+            let selected = i == view.category;
+            let focused = selected && view.focus == Some(Focus::Tabs);
+            if focused {
+                let fill = vertical_gradient(
+                    ctx,
+                    r.top,
+                    r.bottom,
+                    &colors.accent_top,
+                    &colors.accent_bottom,
+                )?;
+                ctx.FillRoundedRectangle(&rounded(r, ROW_CORNER * scale), &fill);
+            } else if view.hovered == MenuHit::Tab(i) {
+                let fill = brush(&faded(colors.tile_top, 0.35))?;
+                ctx.FillRoundedRectangle(&rounded(r, ROW_CORNER * scale), &fill);
+            }
+            let text = if focused {
+                colors.accent_text
+            } else if selected {
+                colors.text
+            } else {
+                colors.subtext
+            };
+            draw_text(ctx, category.label(), &value, r, &brush(&text)?);
+            if selected && !focused {
+                let underline = D2D_RECT_F {
+                    left: r.left + TAB_UNDERLINE_INSET * scale,
+                    top: r.bottom - 4.0 * scale,
+                    right: r.right - TAB_UNDERLINE_INSET * scale,
+                    bottom: r.bottom - 2.0 * scale,
+                };
+                ctx.FillRectangle(&underline, &brush(&colors.accent_top)?);
+            }
+        }
+        divider(layout.tabs[0].bottom)?;
+
         for (i, (row, boxes)) in rows.iter().zip(&layout.rows).enumerate() {
             let r = rect(boxes.row, 0.0);
-            let selected = view.row == Some(i);
-            let hovered = matches!(view.hovered, MenuHit::Row(j) | MenuHit::Step(j, _) if j == i);
+            let selected = view.focus == Some(Focus::Row(i));
+            let hovered = matches!(
+                view.hovered,
+                MenuHit::Row(j) | MenuHit::Step(j, _) | MenuHit::KeyCap(j) if j == i
+            );
             if selected {
                 let fill = vertical_gradient(
                     ctx,
@@ -256,6 +312,37 @@ fn draw_panel(
                     })?,
                 );
             }
+            if row.keycap {
+                let cap = inset(rect(boxes.keycap, 0.0), 4.0 * scale);
+                let waiting = selected && view.capturing;
+                // On the selected row's accent fill a rim-colored outline
+                // would vanish, so it takes the row's text color there; a
+                // key being waited for gets a darker inside and a thicker one.
+                let (stroke, width) = match (waiting, selected) {
+                    (true, _) => (text, 2.0 * scale),
+                    (false, true) => (text, scale),
+                    (false, false) => (colors.rim, scale),
+                };
+                if waiting {
+                    ctx.FillRoundedRectangle(
+                        &rounded(cap, KEYCAP_CORNER * scale),
+                        &brush(&faded(colors.disc, 0.6))?,
+                    );
+                }
+                ctx.DrawRoundedRectangle(
+                    &rounded(inset(cap, width / 2.0), KEYCAP_CORNER * scale),
+                    &brush(&stroke)?,
+                    width,
+                    None,
+                );
+                let label = if waiting {
+                    "입력…"
+                } else {
+                    row.value.as_str()
+                };
+                draw_text(ctx, label, &value, cap, &text_brush);
+                continue;
+            }
             let step_brush = |enabled: bool| brush(if enabled { &text } else { &dim });
             draw_text(ctx, GLYPH_BACK, &icons, back, &step_brush(row.back)?);
             draw_text(
@@ -277,6 +364,19 @@ fn draw_panel(
                 &text_brush,
             );
         }
+
+        let hint = rect(layout.hint, 0.0);
+        divider(hint.top)?;
+        draw_text(
+            ctx,
+            view.hint,
+            &small,
+            D2D_RECT_F {
+                left: hint.left + pad,
+                ..hint
+            },
+            &brush(&colors.subtext)?,
+        );
     }
     Ok(())
 }

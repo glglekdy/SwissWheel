@@ -105,6 +105,7 @@ pub fn encode(command: DragCommand) -> (WPARAM, LPARAM) {
             let packed = (x as u16 as u32) | ((y as u16 as u32) << 16);
             return (WPARAM(20), LPARAM(packed as isize));
         }
+        DragCommand::MenuCapture(vk) => return (WPARAM(21), LPARAM(vk as isize)),
     };
     (WPARAM(code), LPARAM(0))
 }
@@ -122,6 +123,7 @@ pub fn decode(wparam: WPARAM, lparam: LPARAM) -> Option<DragCommand> {
             x: (lparam.0 & 0xFFFF) as u16 as i16 as i32,
             y: ((lparam.0 >> 16) & 0xFFFF) as u16 as i16 as i32,
         },
+        21 => DragCommand::MenuCapture(lparam.0 as u16),
         _ => return None,
     })
 }
@@ -178,6 +180,12 @@ pub fn set_keys(keys: KeyBindings) {
 /// Turns the desktop menu off when its window can't be created.
 pub fn set_menu_enabled(enabled: bool) {
     with_tracker(|t| t.set_menu_enabled(enabled));
+}
+
+/// The settings panel waits for a key: the next press comes back as
+/// `MenuCapture` instead of reaching any window.
+pub fn set_capture(on: bool) {
+    with_tracker(|t| t.set_capture(on));
 }
 
 fn with_tracker(f: impl FnOnce(&mut DragTracker)) {
@@ -317,6 +325,8 @@ mod tests {
             DragCommand::MenuKey(MenuKey::Open),
             DragCommand::MenuKey(MenuKey::Escape),
             DragCommand::MenuPointerDown { x: -2500, y: 1400 },
+            DragCommand::MenuCapture(0x74),
+            DragCommand::MenuCapture(0x91),
         ] {
             let (w, l) = encode(c);
             assert_eq!(decode(w, l), Some(c));

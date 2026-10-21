@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use swisswheel_core::catalog::Operation;
-use swisswheel_core::config::Config;
+use swisswheel_core::config::{Config, Key};
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession};
@@ -64,6 +64,9 @@ const TIMER_PROGRESS: usize = 5;
 const TIMER_PANEL: usize = 6;
 /// Runs the desktop menu's open slide and panel fade.
 const TIMER_MENU_ANIMATION: usize = 7;
+/// Gives up waiting for a key on a shortcut row.
+const TIMER_MENU_CAPTURE: usize = 8;
+const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const PANEL_TICK_MS: u32 = 50;
 /// How often the tray tooltip refreshes the progress of running jobs.
 const PROGRESS_INTERVAL_MS: u32 = 500;
@@ -90,6 +93,9 @@ pub(crate) struct AppState {
     menu: Option<MenuSession>,
     menu_opened_at: Instant,
     menu_panel_at: Instant,
+    /// The outcome of the last key binding ("…는 이제 Tab입니다"), shown
+    /// in the hint line until the next menu input.
+    menu_hint: Option<String>,
     /// Foreground watch while the menu is open (it closes when another
     /// window comes forward).
     foreground_hook: Option<HWINEVENTHOOK>,
@@ -235,6 +241,7 @@ pub fn run() -> Result<()> {
         menu: None,
         menu_opened_at: Instant::now(),
         menu_panel_at: Instant::now(),
+        menu_hint: None,
         foreground_hook: None,
         progress_window,
         config_writable: warning.is_none(),
@@ -393,10 +400,19 @@ impl AppState {
             DragCommand::OpenMenu => self.open_menu(),
             DragCommand::MenuKey(key) => match &mut self.menu {
                 Some(menu) => {
+                    self.menu_hint = None;
                     let action = menu.key(key);
                     self.on_menu_action(action);
                 }
                 None => hook::notify(DragEvent::MenuClosed), // out of step: resync
+            },
+            DragCommand::MenuCapture(vk) => match &mut self.menu {
+                Some(menu) => {
+                    self.menu_hint = None;
+                    let action = menu.capture(vk);
+                    self.on_menu_action(action);
+                }
+                None => hook::notify(DragEvent::MenuClosed),
             },
             DragCommand::MenuPointerDown { x, y } => {
                 let inside = self
@@ -450,7 +466,9 @@ impl AppState {
         }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_MENU_ANIMATION);
+            let _ = KillTimer(Some(self.hwnd), TIMER_MENU_CAPTURE);
         }
+        self.menu_hint = None;
         if let Some(bar) = &mut self.menubar {
             bar.hide();
             bar.set_panel(false);
@@ -473,8 +491,13 @@ impl AppState {
         let (Some(menu), Some(bar)) = (&mut self.menu, &self.menubar) else {
             return;
         };
-        let panel_open = menu.row().is_some();
-        let hit = |x, y| menu_geometry::hit(bar.layout(), panel_open, x, y);
+        let shape = menu
+            .focus()
+            .map(|_| menu_geometry::PanelShape::of(menu.category()));
+        let hit = |x, y| menu_geometry::hit(bar.layout(), shape, x, y);
+        if matches!(event, MenuMouse::Click { .. } | MenuMouse::Wheel { .. }) {
+            self.menu_hint = None;
+        }
         let action = match event {
             MenuMouse::Move { x, y } => {
                 if menu.hover(hit(x, y)) {
@@ -515,6 +538,56 @@ impl AppState {
                     .notify(tile.label(), "다음 버전에서 지원 예정입니다");
             }
             MenuAction::Close => self.close_menu(),
+            MenuAction::StartCapture => {
+                self.arm_capture();
+                self.render_menu();
+            }
+            MenuAction::CancelCapture => {
+                self.disarm_capture();
+                self.render_menu();
+            }
+            MenuAction::Bind(item, vk) => {
+                self.disarm_capture();
+                match Key::from_vk(vk) {
+                    None => {
+                        if let Some(menu) = &mut self.menu {
+                            menu.rearm();
+                        }
+                        self.arm_capture();
+                        self.menu_hint = Some("이 키는 쓸 수 없습니다".to_string());
+                    }
+                    Some(key) => {
+                        let bound = settings::bind(&self.config, item, key);
+                        if bound.config != self.config {
+                            self.apply_config(bound.config, item);
+                        }
+                        self.menu_hint = bound.swapped.map(|(other, k)| {
+                            format!("{}는 이제 {}입니다", other.label(), settings::key_label(k))
+                        });
+                    }
+                }
+                self.render_menu();
+            }
+        }
+    }
+
+    /// Has the hook hand over the next key press, for up to `CAPTURE_TIMEOUT`.
+    fn arm_capture(&self) {
+        hook::set_capture(true);
+        unsafe {
+            SetTimer(
+                Some(self.hwnd),
+                TIMER_MENU_CAPTURE,
+                CAPTURE_TIMEOUT.as_millis() as u32,
+                None,
+            )
+        };
+    }
+
+    fn disarm_capture(&self) {
+        hook::set_capture(false);
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_MENU_CAPTURE);
         }
     }
 
@@ -563,7 +636,7 @@ impl AppState {
         let (Some(menu), Some(bar)) = (&self.menu, &mut self.menubar) else {
             return;
         };
-        let panel_open = menu.row().is_some();
+        let panel_open = menu.focus().is_some();
         if panel_open != bar.panel_open() {
             bar.set_panel(panel_open);
             if panel_open {
@@ -571,13 +644,20 @@ impl AppState {
                 unsafe { SetTimer(Some(self.hwnd), TIMER_MENU_ANIMATION, 16, None) };
             }
         }
-        let rows = menubar::rows(&self.config, self.save_failed);
+        let category = menu.category();
+        let rows = menubar::rows(&self.config, category, self.save_failed);
         let view = MenuView {
             selected: menu.tile(),
             rows: panel_open.then_some(rows.as_slice()),
-            row: menu.row(),
+            category: settings::CATEGORIES
+                .iter()
+                .position(|&c| c == category)
+                .unwrap_or(0),
+            focus: menu.focus(),
+            capturing: menu.capturing(),
             hovered: menu.hovered(),
             notice: (!self.config_writable).then_some(CONFIG_NOTICE),
+            hint: self.menu_hint.as_deref().unwrap_or(menu.hint()),
             progress: fraction(self.menu_opened_at, OPEN_ANIMATION),
             panel_progress: fraction(self.menu_panel_at, PANEL_FADE),
         };
@@ -678,8 +758,9 @@ impl AppState {
     }
 
     /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`,
-    /// `progress`, `menu`, or `menu-settings` shows that UI at startup without
-    /// a drag or key press, so the drawing can be checked by eye.
+    /// `progress`, `menu`, `menu-settings`, `menu-tools`, or `menu-capture`
+    /// shows that UI at startup without a drag or key press, so the drawing
+    /// can be checked by eye.
     #[cfg(debug_assertions)]
     fn preview(&mut self, what: &str) {
         use swisswheel_core::catalog::{InputItem, Operation};
@@ -752,32 +833,50 @@ impl AppState {
                 self.progress_window.update(&rows);
                 self.tray.set_busy(true, "SwissWheel · preview", Some(0.4));
             }
-            "menu" | "menu-settings" => {
+            "menu" | "menu-settings" | "menu-tools" | "menu-capture" => {
+                use swisswheel_core::menu::{Focus, MenuHit};
+                use swisswheel_core::settings::{CATEGORIES, Category, SettingItem};
+
                 let Some(bar) = &mut self.menubar else {
                     return;
                 };
-                let settings = what == "menu-settings";
+                let panel = what != "menu";
+                let notice = what == "menu-settings";
                 let mut cursor = POINT::default();
                 unsafe {
                     let _ = GetCursorPos(&mut cursor);
                 }
-                bar.place(cursor, settings);
-                bar.set_panel(settings);
+                bar.place(cursor, notice);
+                bar.set_panel(panel);
                 let config = swisswheel_core::config::Config::default();
-                let rows = crate::menubar::rows(
-                    &config,
-                    settings.then_some(swisswheel_core::settings::SettingItem::WebpQuality),
-                );
+                let (category, focus, hovered, failed) = match what {
+                    "menu-settings" => (
+                        Category::Keys,
+                        Some(Focus::Row(0)),
+                        MenuHit::Row(2),
+                        Some(SettingItem::CycleKey),
+                    ),
+                    "menu-tools" => (Category::Tools, Some(Focus::Tabs), MenuHit::Tab(2), None),
+                    "menu-capture" => (Category::Keys, Some(Focus::Row(1)), MenuHit::Panel, None),
+                    _ => (Category::Keys, None, MenuHit::Tile(2), None),
+                };
+                let rows = crate::menubar::rows(&config, category, failed);
+                let capturing = what == "menu-capture";
+                let hint = match what {
+                    "menu-settings" => "Enter로 키 변경",
+                    "menu-tools" => "←/→ 카테고리 · ↓ 항목",
+                    "menu-capture" => "바꿀 키를 누르세요 · 다른 곳 클릭 시 취소",
+                    _ => "",
+                };
                 let view = crate::menubar::MenuView {
-                    selected: if settings { 0 } else { 1 },
-                    rows: settings.then_some(rows.as_slice()),
-                    row: settings.then_some(3),
-                    hovered: if settings {
-                        swisswheel_core::menu::MenuHit::Row(6)
-                    } else {
-                        swisswheel_core::menu::MenuHit::Tile(2)
-                    },
-                    notice: settings.then_some(CONFIG_NOTICE),
+                    selected: if panel { 0 } else { 1 },
+                    rows: panel.then_some(rows.as_slice()),
+                    category: CATEGORIES.iter().position(|&c| c == category).unwrap_or(0),
+                    focus,
+                    capturing,
+                    hovered,
+                    notice: notice.then_some(CONFIG_NOTICE),
+                    hint,
                     progress: 1.0,
                     panel_progress: 1.0,
                 };
@@ -843,6 +942,12 @@ impl AppState {
                 }
             }
             TIMER_PROGRESS => self.update_busy(),
+            TIMER_MENU_CAPTURE => {
+                self.disarm_capture();
+                if self.menu.as_mut().is_some_and(MenuSession::cancel_capture) {
+                    self.render_menu();
+                }
+            }
             TIMER_MENU_ANIMATION => {
                 self.render_menu();
                 if self.menu.is_none()
