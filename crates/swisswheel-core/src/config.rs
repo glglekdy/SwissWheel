@@ -2,6 +2,10 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::options::Strength;
+
+/// Keys the wheel and menu can be bound to (settings spec 2.3). Letters,
+/// digits, arrows, Enter, and modifiers are left out on purpose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Key {
     Space,
@@ -9,9 +13,57 @@ pub enum Key {
     Escape,
     CapsLock,
     Backquote,
+    F1,
+    F2,
+    F3,
+    F4,
+    F5,
+    F6,
+    F7,
+    F8,
+    F9,
+    F10,
+    F11,
+    F12,
+    Insert,
+    Delete,
+    Home,
+    End,
+    PageUp,
+    PageDown,
+    Pause,
+    ScrollLock,
 }
 
 impl Key {
+    pub const ALL: [Key; 25] = [
+        Key::Space,
+        Key::Tab,
+        Key::Escape,
+        Key::CapsLock,
+        Key::Backquote,
+        Key::F1,
+        Key::F2,
+        Key::F3,
+        Key::F4,
+        Key::F5,
+        Key::F6,
+        Key::F7,
+        Key::F8,
+        Key::F9,
+        Key::F10,
+        Key::F11,
+        Key::F12,
+        Key::Insert,
+        Key::Delete,
+        Key::Home,
+        Key::End,
+        Key::PageUp,
+        Key::PageDown,
+        Key::Pause,
+        Key::ScrollLock,
+    ];
+
     /// Win32 virtual-key code.
     pub fn vk(self) -> u16 {
         match self {
@@ -20,7 +72,32 @@ impl Key {
             Key::Escape => 0x1B,
             Key::CapsLock => 0x14,
             Key::Backquote => 0xC0,
+            Key::F1 => 0x70,
+            Key::F2 => 0x71,
+            Key::F3 => 0x72,
+            Key::F4 => 0x73,
+            Key::F5 => 0x74,
+            Key::F6 => 0x75,
+            Key::F7 => 0x76,
+            Key::F8 => 0x77,
+            Key::F9 => 0x78,
+            Key::F10 => 0x79,
+            Key::F11 => 0x7A,
+            Key::F12 => 0x7B,
+            Key::Insert => 0x2D,
+            Key::Delete => 0x2E,
+            Key::Home => 0x24,
+            Key::End => 0x23,
+            Key::PageUp => 0x21,
+            Key::PageDown => 0x22,
+            Key::Pause => 0x13,
+            Key::ScrollLock => 0x91,
         }
+    }
+
+    /// The bindable key with this virtual-key code, if any.
+    pub fn from_vk(vk: u16) -> Option<Key> {
+        Key::ALL.into_iter().find(|k| k.vk() == vk)
     }
 }
 
@@ -42,8 +119,8 @@ impl Default for Quality {
     }
 }
 
-/// Where running jobs show their progress (spec 2.4). A settings window will
-/// edit these later; for now they live in `config.toml`.
+/// Where running jobs show their progress (spec 2.4). The settings panel
+/// edits these.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ProgressDisplay {
@@ -62,6 +139,24 @@ impl Default for ProgressDisplay {
     }
 }
 
+/// What a drop on a tool's tile (not one of its option rows) uses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Tools {
+    /// Shrink: 25, 50, or 75 percent.
+    pub shrink_percent: u8,
+    pub compress_video: Strength,
+}
+
+impl Default for Tools {
+    fn default() -> Self {
+        Tools {
+            shrink_percent: 50,
+            compress_video: Strength::Normal,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -71,6 +166,7 @@ pub struct Config {
     pub start_with_windows: bool,
     pub quality: Quality,
     pub progress: ProgressDisplay,
+    pub tools: Tools,
 }
 
 impl Default for Config {
@@ -82,6 +178,7 @@ impl Default for Config {
             start_with_windows: false,
             quality: Quality::default(),
             progress: ProgressDisplay::default(),
+            tools: Tools::default(),
         }
     }
 }
@@ -118,6 +215,12 @@ fn validate(c: &Config) -> Result<(), ConfigError> {
     in_range("quality.jpg", c.quality.jpg.into(), 1, 100)?;
     in_range("quality.webp", c.quality.webp.into(), 1, 100)?;
     in_range("quality.mp3_kbps", c.quality.mp3_kbps, 32, 320)?;
+    let shrink = c.tools.shrink_percent;
+    if ![25, 50, 75].contains(&shrink) {
+        return Err(ConfigError::Invalid(format!(
+            "tools.shrink_percent는 25, 50, 75 중 하나여야 합니다 (현재 {shrink})"
+        )));
+    }
     let keys = [
         ("open_key", c.open_key),
         ("cycle_key", c.cycle_key),
@@ -183,7 +286,7 @@ mod tests {
             Err(ConfigError::Parse(_))
         ));
         assert!(matches!(
-            parse("open_key = \"F5\""),
+            parse("open_key = \"F13\""),
             Err(ConfigError::Parse(_))
         ));
         assert!(matches!(
@@ -217,5 +320,52 @@ tray_ring = false
     fn virtual_key_codes() {
         assert_eq!(Key::Space.vk(), 0x20);
         assert_eq!(Key::Backquote.vk(), 0xC0);
+    }
+
+    #[test]
+    fn new_keys_parse_and_round_trip() {
+        let c = parse("open_key = \"F5\"\ncycle_key = \"PageUp\"\ncancel_key = \"Pause\"\n")
+            .unwrap();
+        assert_eq!(
+            (c.open_key, c.cycle_key, c.cancel_key),
+            (Key::F5, Key::PageUp, Key::Pause)
+        );
+        assert_eq!(parse(&toml::to_string_pretty(&c).unwrap()), Ok(c));
+    }
+
+    #[test]
+    fn vk_codes_round_trip() {
+        assert_eq!(Key::ALL.len(), 25);
+        for k in Key::ALL {
+            assert_eq!(Key::from_vk(k.vk()), Some(k));
+        }
+        assert_eq!(Key::F1.vk(), 0x70);
+        assert_eq!(Key::F12.vk(), 0x7B);
+        assert_eq!(Key::ScrollLock.vk(), 0x91);
+        for vk in [0x41, 0x30, 0x25, 0x0D, 0xA0, 0x5B] {
+            assert_eq!(Key::from_vk(vk), None); // A, 0, ←, Enter, Shift, Win
+        }
+    }
+
+    #[test]
+    fn tools_defaults_and_validation() {
+        let c = Config::default();
+        assert_eq!(
+            (c.tools.shrink_percent, c.tools.compress_video),
+            (50, Strength::Normal)
+        );
+        let c = parse("[tools]\nshrink_percent = 25\ncompress_video = \"Strong\"\n").unwrap();
+        assert_eq!(
+            (c.tools.shrink_percent, c.tools.compress_video),
+            (25, Strength::Strong)
+        );
+        assert!(matches!(
+            parse("[tools]\nshrink_percent = 40"),
+            Err(ConfigError::Invalid(_))
+        ));
+        assert!(matches!(
+            parse("[tools]\ncompress_video = \"Max\""),
+            Err(ConfigError::Parse(_))
+        ));
     }
 }

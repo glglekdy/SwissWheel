@@ -19,7 +19,7 @@ pub enum Preset {
     Quality(Level),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum Strength {
     Light,
     Normal,

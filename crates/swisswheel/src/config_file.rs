@@ -205,6 +205,22 @@ mod tests {
     }
 
     #[test]
+    fn save_adds_tools_section_when_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("config.toml"), "open_key = \"Space\"\n").unwrap();
+        let before = Config::default();
+        let mut after = before.clone();
+        after.tools.shrink_percent = 75;
+        save(dir.path(), &before, &after).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("config.toml")).unwrap();
+        assert!(
+            text.contains("[tools]") && text.contains("shrink_percent = 75"),
+            "{text}"
+        );
+        assert!(!text.contains("compress_video"), "{text}");
+    }
+
+    #[test]
     fn save_refuses_unreadable_toml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
