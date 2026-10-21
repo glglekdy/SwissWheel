@@ -7,6 +7,7 @@ pub mod format;
 pub mod geometry;
 pub mod media;
 pub mod menu;
+pub mod menu_geometry;
 pub mod naming;
 pub mod options;
 pub mod session;
