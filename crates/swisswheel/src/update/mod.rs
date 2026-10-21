@@ -140,6 +140,11 @@ pub fn run(
     }
 }
 
+/// This build's version.
+pub fn current() -> Version {
+    Version::parse(env!("CARGO_PKG_VERSION")).expect("crate version is x.y.z")
+}
+
 /// The releases endpoint; debug builds may point it elsewhere with
 /// `SWISSWHEEL_UPDATE_URL` (a local server, while the repository is private).
 pub fn endpoint() -> String {
@@ -181,9 +186,8 @@ pub fn spawn(hwnd: isize, msg: u32, slot: Arc<Mutex<Option<Outcome>>>) -> Handle
     let progress = Arc::new(Progress::default());
     let shared = Arc::clone(&progress);
     std::thread::spawn(move || {
-        let current = Version::parse(env!("CARGO_PKG_VERSION")).expect("crate version");
         let outcome = match std::env::current_exe() {
-            Ok(exe) => run(&endpoint(), current, &exe, &MessageBoxUi, &shared),
+            Ok(exe) => run(&endpoint(), current(), &exe, &MessageBoxUi, &shared),
             Err(e) => {
                 log_error!("업데이트: 실행 파일 위치를 알 수 없습니다: {e}");
                 Outcome::CheckFailed

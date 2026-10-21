@@ -13,6 +13,7 @@ use swisswheel_core::format::Format;
 use swisswheel_core::media;
 use swisswheel_core::naming::{suffix_for, temp_path};
 use swisswheel_core::options::Preset;
+use swisswheel_core::summary::progress_title;
 
 use crate::engines::ffmpeg::{self, Tools};
 use crate::engines::{self, EngineError};
@@ -78,11 +79,11 @@ impl FileState {
     }
 }
 
-/// A file of a job that hasn't finished, for the progress window.
+/// A line of the progress window: an unfinished file, or the update download.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProgressRow {
-    pub file: String,
-    pub op: Operation,
+    /// "긴영상.mp4 → WEBM"; see `progress_title`.
+    pub title: String,
     /// `None` while the file waits for a worker.
     pub fraction: Option<f32>,
 }
@@ -210,8 +211,7 @@ impl Runner {
                     FileState::Done => continue,
                 };
                 rows.push(ProgressRow {
-                    file: name.clone(),
-                    op: job.op,
+                    title: progress_title(name, &job.op),
                     fraction,
                 });
             }
@@ -611,8 +611,9 @@ mod tests {
         let (mut saw_running, mut saw_waiting) = (false, false);
         let report = loop {
             for row in runner.rows() {
-                assert_eq!(row.op, Operation::Convert(Format::Webm));
-                assert!(["a.mp4", "b.mp4", "c.mp4"].contains(&row.file.as_str()));
+                assert!(
+                    ["a.mp4 → WEBM", "b.mp4 → WEBM", "c.mp4 → WEBM"].contains(&row.title.as_str())
+                );
                 match row.fraction {
                     Some(p) => {
                         assert!((0.0..=1.0).contains(&p));
@@ -628,6 +629,21 @@ mod tests {
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert!(saw_running && saw_waiting);
         assert!(runner.rows().is_empty());
+        runner.shutdown();
+    }
+
+    #[test]
+    fn rows_carry_titles() {
+        let dir = tempfile::tempdir().unwrap();
+        let clips: Vec<_> = ["a.mp4", "b.mp4"]
+            .iter()
+            .map(|n| pattern(dir.path(), n, "320x240", 10))
+            .collect();
+        let (runner, rx) = runner();
+        runner.submit(job(Operation::Convert(Format::Webm), clips));
+        let titles: Vec<_> = runner.rows().into_iter().map(|r| r.title).collect();
+        assert_eq!(titles, ["a.mp4 → WEBM", "b.mp4 → WEBM"]);
+        rx.recv().unwrap();
         runner.shutdown();
     }
 

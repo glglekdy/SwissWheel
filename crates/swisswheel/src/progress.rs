@@ -2,7 +2,7 @@
 //! queued file, glass like the wheel, click-through, never focused, and
 //! hidden when nothing runs.
 
-use swisswheel_core::summary::{more_files, progress_title, progress_value};
+use swisswheel_core::summary::{more_files, progress_value};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::DirectWrite::*;
@@ -242,7 +242,7 @@ fn draw_card(
             let line = text_box(top, 20.0 * scale);
             draw_text(
                 ctx,
-                &progress_title(&row.file, &row.op),
+                &row.title,
                 &leading,
                 D2D_RECT_F {
                     right: line.right - 44.0 * scale, // room for "100%"

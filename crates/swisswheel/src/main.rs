@@ -16,7 +16,6 @@ mod probe;
 mod progress;
 mod surface;
 mod tray;
-#[allow(dead_code)] // wired into the app in a later step
 mod update;
 mod wheel;
 

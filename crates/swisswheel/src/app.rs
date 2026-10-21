@@ -4,6 +4,7 @@
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -11,11 +12,12 @@ use swisswheel_core::catalog::Operation;
 use swisswheel_core::config::{Config, Key};
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
 use swisswheel_core::geometry::Hit;
-use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession};
+use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession, Tile};
 use swisswheel_core::menu_geometry;
 use swisswheel_core::session::{Selection, WheelSession};
 use swisswheel_core::settings::{self, Dir, SettingItem};
 use swisswheel_core::summary::{busy_tooltip, job_summary, selection_label};
+use swisswheel_core::update::{self as release, ReadyDecision, TileDecision, Version, text};
 use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -36,22 +38,27 @@ use windows::Win32::UI::HiDpi::{
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_MOUSE, MOUSEEVENTF_MOVE, MOUSEINPUT, SendInput,
 };
-use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
+use windows::Win32::UI::Shell::{NIN_BALLOONUSERCLICK, ShellExecuteW};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{Result, w};
+use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::dnd::DropTarget;
 use crate::hook::{self, Hooks, WM_APP_DRAG, WM_APP_FOREGROUND};
-use crate::jobs::{Job, JobReport, Runner};
+use crate::jobs::{Job, JobReport, ProgressRow, Runner};
 use crate::menubar::{self, MenuBar, MenuMouse, MenuView};
 use crate::probe;
 use crate::progress::ProgressWindow;
 use crate::tray::{Tray, WM_APP_TRAY};
+use crate::update::{self, Outcome, swap};
 use crate::wheel::{PanelView, WheelView, WheelWindow};
 use crate::{autostart, config_file};
 
 const ID_MENU_EXIT: usize = 1;
 const WM_APP_JOB_DONE: u32 = WM_APP + 30;
+/// The update thread finished; its outcome is in `update_slot`.
+const WM_APP_UPDATE: u32 = WM_APP + 31;
+/// How long a freshly updated app waits for the old one to exit.
+const AFTER_UPDATE_WAIT: Duration = Duration::from_secs(15);
 /// FFmpeg jobs that run at once (spec 4.4).
 const MEDIA_WORKERS: usize = 2;
 
@@ -124,6 +131,11 @@ pub(crate) struct AppState {
     panel_item: Option<usize>,
     panel_shown_at: Instant,
     active_jobs: usize,
+    /// The running update check or download, if any.
+    update: Option<update::Handle>,
+    update_slot: Arc<Mutex<Option<Outcome>>>,
+    /// A verified download waiting for the running jobs to finish.
+    pending_swap: Option<Version>,
     /// First output of the last finished job, opened when its balloon is clicked.
     last_output: Option<PathBuf>,
     hooks_installed_at: Instant,
@@ -142,6 +154,10 @@ fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
 }
 
 pub fn run() -> Result<()> {
+    // Started by an update: the old app holds the single-instance mutex
+    // until it exits, so wait for it before taking the mutex.
+    let after_update = release::after_update_pid(std::env::args());
+    let old_exited = after_update.map(|pid| swap::wait_for_exit(pid, AFTER_UPDATE_WAIT));
     let _instance = unsafe { CreateMutexW(None, true, w!("Local\\SwissWheel.SingleInstance"))? };
     // A debug preview may run beside an installed copy: it only draws.
     let previewing = cfg!(debug_assertions) && std::env::var_os("SWISSWHEEL_PREVIEW").is_some();
@@ -172,6 +188,15 @@ pub fn run() -> Result<()> {
 
     let hwnd = create_host_window()?;
     let tray = Tray::new(hwnd)?;
+    if let Some(exited) = old_exited {
+        log_info!("업데이트 뒤 시작 (이전 프로세스 종료: {exited})");
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        swap::cleanup(&exe);
+    }
+    if after_update.is_some() {
+        tray.notify(release::TITLE, &text::updated(update::current()));
+    }
     if let Some(w) = &warning {
         log_error!("설정 파일 오류: {w}");
         tray.warn("설정 파일 오류", &format!("{w}\n기본 설정으로 실행합니다"));
@@ -260,6 +285,9 @@ pub fn run() -> Result<()> {
         panel_item: None,
         panel_shown_at: Instant::now(),
         active_jobs: 0,
+        update: None,
+        update_slot: Arc::new(Mutex::new(None)),
+        pending_swap: None,
         last_output: None,
         hooks_installed_at: Instant::now(),
         taskbar_created,
@@ -327,6 +355,9 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_JOB_DONE => {
             with_state(AppState::on_jobs_done);
+        }
+        WM_APP_UPDATE => {
+            with_state(AppState::on_update_done);
         }
         WM_APP_FOREGROUND => {
             with_state(|s| s.on_foreground(HWND(wparam.0 as *mut _)));
@@ -534,6 +565,10 @@ impl AppState {
                     self.apply_config(new, item);
                 }
                 self.render_menu();
+            }
+            MenuAction::Notice(Tile::Update) => {
+                self.close_menu();
+                self.start_update();
             }
             MenuAction::Notice(tile) => {
                 self.close_menu();
@@ -810,10 +845,11 @@ impl AppState {
                 self.panel_shown_at = ago(1).unwrap_or_else(Instant::now);
                 self.render();
             }
+            // Checks SWISSWHEEL_UPDATE_URL (a local server) as if the tile were pressed.
+            "update" => self.start_update(),
             "progress" => {
                 let row = |file: &str, op, fraction| crate::jobs::ProgressRow {
-                    file: file.into(),
-                    op,
+                    title: swisswheel_core::summary::progress_title(file, &op),
                     fraction,
                 };
                 let rows = [
@@ -1026,23 +1062,109 @@ impl AppState {
                 self.tray.warn(&title, &body);
             }
         }
+        if self.active_jobs == 0
+            && let Some(version) = self.pending_swap.take()
+        {
+            self.apply_swap(version);
+        }
         self.update_busy();
+    }
+
+    fn start_update(&mut self) {
+        match release::on_tile(self.update.is_some(), self.active_jobs) {
+            TileDecision::Refuse(notice) => self.tray.notify(release::TITLE, notice),
+            TileDecision::Start => {
+                self.update = Some(update::spawn(
+                    self.hwnd.0 as isize,
+                    WM_APP_UPDATE,
+                    Arc::clone(&self.update_slot),
+                ));
+                self.update_busy();
+            }
+        }
+    }
+
+    fn on_update_done(&mut self) {
+        self.update = None;
+        let outcome = self.update_slot.lock().unwrap().take();
+        let title = release::TITLE;
+        match outcome {
+            None | Some(Outcome::Declined) => {}
+            Some(Outcome::UpToDate) => self
+                .tray
+                .notify(title, &text::up_to_date(update::current())),
+            Some(Outcome::CheckFailed) => self.tray.warn(title, text::CHECK_FAILED),
+            Some(Outcome::MissingAssets) => self.tray.warn(title, text::NO_ASSETS),
+            Some(Outcome::DownloadFailed) => self.tray.warn(title, text::DOWNLOAD_FAILED),
+            Some(Outcome::Corrupt) => self.tray.warn(title, text::CORRUPT),
+            Some(Outcome::NotWritable { page_url }) => open_page(&page_url),
+            Some(Outcome::Ready { version }) => match release::on_ready(self.active_jobs) {
+                ReadyDecision::SwapNow => self.apply_swap(version),
+                ReadyDecision::WaitForJobs => {
+                    self.pending_swap = Some(version);
+                    self.tray.notify(title, text::WAITING);
+                }
+            },
+        }
+        self.update_busy();
+    }
+
+    /// Puts the verified download in place and starts it; this app then
+    /// closes normally (posted: closing inside `with_state` would re-enter it).
+    fn apply_swap(&mut self, version: Version) {
+        let result =
+            std::env::current_exe().and_then(|exe| swap::swap(&exe, swap::launch_after_update));
+        match result {
+            Ok(()) => {
+                log_info!("업데이트: v{version}으로 교체했습니다. 다시 시작합니다");
+                unsafe {
+                    let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                }
+            }
+            Err(e) => {
+                log_error!("업데이트 교체 실패: {e}");
+                self.tray.warn(release::TITLE, text::SWAP_FAILED);
+            }
+        }
     }
 
     /// Tray tooltip and icon; the progress timer runs only while jobs do.
     fn update_busy(&mut self) {
         let active = self.active_jobs > 0;
-        let progress = self.runner.as_ref().and_then(Runner::progress);
-        let ring = progress.filter(|_| active && self.config.progress.tray_ring);
-        self.tray
-            .set_busy(active, &busy_tooltip(self.active_jobs, progress), ring);
-        let rows = match &self.runner {
+        // The download's row, once the user said yes.
+        let download = self.update.as_ref().and_then(|handle| {
+            let version = (*handle.progress.version.lock().unwrap())?;
+            let fraction = handle.progress.fraction.load(Ordering::Relaxed) as f32 / 10000.0;
+            Some(ProgressRow {
+                title: format!("SwissWheel v{version} · 업데이트"),
+                fraction: Some(fraction),
+            })
+        });
+        let progress = if active {
+            self.runner.as_ref().and_then(Runner::progress)
+        } else {
+            download.as_ref().and_then(|row| row.fraction)
+        };
+        let busy = active || download.is_some();
+        let ring = progress.filter(|_| busy && self.config.progress.tray_ring);
+        let tooltip = match (&download, progress) {
+            (Some(_), Some(p)) if !active => {
+                format!("SwissWheel · 업데이트 받는 중 · {}%", (p * 100.0).round())
+            }
+            _ => busy_tooltip(self.active_jobs, progress),
+        };
+        self.tray.set_busy(busy, &tooltip, ring);
+        let mut rows = match &self.runner {
             Some(runner) if active && self.config.progress.window => runner.rows(),
             _ => Vec::new(),
         };
+        if self.config.progress.window {
+            rows.extend(download);
+        }
         self.progress_window.update(&rows);
         unsafe {
-            if self.active_jobs > 0 {
+            // While an update runs too: the timer notices when its download starts.
+            if busy || self.update.is_some() {
                 SetTimer(Some(self.hwnd), TIMER_PROGRESS, PROGRESS_INTERVAL_MS, None);
             } else {
                 let _ = KillTimer(Some(self.hwnd), TIMER_PROGRESS);
@@ -1218,6 +1340,24 @@ fn show_menu(hwnd: HWND, pt: POINT) {
         let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, None, hwnd, None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
+    }
+}
+
+/// Opens a release page in the browser; only https links.
+fn open_page(url: &str) {
+    if !url.starts_with("https://") {
+        log_error!("업데이트: 다운로드 페이지 주소가 https가 아닙니다: {url}");
+        return;
+    }
+    unsafe {
+        ShellExecuteW(
+            None,
+            w!("open"),
+            &HSTRING::from(url),
+            PCWSTR::null(),
+            PCWSTR::null(),
+            SW_SHOWNORMAL,
+        );
     }
 }
 
