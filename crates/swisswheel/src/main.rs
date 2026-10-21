@@ -13,6 +13,7 @@ mod icon;
 mod jobs;
 mod probe;
 mod progress;
+mod surface;
 mod tray;
 mod wheel;
 
