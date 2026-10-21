@@ -10,7 +10,9 @@ Offline file converter for Windows. Drag a file in Explorer, press **Space**, an
 4. The result is saved next to the original (`photo.png` → `photo.jpg`). Originals are never modified or overwritten; name clashes get a number (`photo (1).jpg`).
 5. A notification reports the result. Click it to open the folder with the result selected.
 
-Quit from the tray icon's right-click menu. Settings live in `%APPDATA%\SwissWheel\config.toml` (keys and quality); logs in `%LOCALAPPDATA%\SwissWheel\logs`.
+Without a drag, click the desktop and press **Space** to open the menu bar at the top of the screen: **설정** (settings), **플러그인** (plugins), **업데이트** (update). Move with **←/→**, open with **Enter**, close with **Esc** or **Space**. In the settings panel, **↑/↓** picks a setting and **←/→** changes it (or click ◀ ▶, or scroll); changes apply at once and are saved, no restart needed.
+
+Quit from the tray icon's right-click menu. Settings can be changed in the menu's settings panel or in `%APPDATA%\SwissWheel\config.toml` (comments you add there are kept when the panel saves); logs in `%LOCALAPPDATA%\SwissWheel\logs`.
 
 ## What works now (v0.1 in progress)
 
@@ -20,11 +22,12 @@ Quit from the tray icon's right-click menu. Settings live in `%APPDATA%\SwissWhe
 - Audio conversion between MP3, M4A, WAV, FLAC, OGG, and Opus (WMA and AIFF as input)
 - Video tools: compress (H.264), extract audio (copied when possible), mute
 - Options: some items take options (GIF frame rate and size, video resolution, compression strength, shrink ratio, JPG/WebP quality). Rest on such an item for a moment and a panel opens beside the wheel; drop on one of its rows, or on the item itself for the default.
-- Progress: while jobs run, a small card above the tray lists each file with a progress bar, and a ring around the tray icon fills up. Either can be turned off in `config.toml` (`[progress] window`, `tray_ring`). Quitting cancels running video work and cleans up.
+- Progress: while jobs run, a small card above the tray lists each file with a progress bar, and a ring around the tray icon fills up. Either can be turned off in the settings panel or `config.toml` (`[progress] window`, `tray_ring`). Quitting cancels running video work and cleans up.
+- Desktop menu and settings panel: wheel keys, start with Windows, JPG/WebP quality, MP3 bitrate, and the progress displays, all applied live.
 
 Video and audio need FFmpeg: put `ffmpeg.exe` and `ffprobe.exe` in an `ffmpeg` folder next to `swisswheel.exe`, or have them on `PATH` (the installer will include them from the next version).
 
-Shown in the wheel but not yet implemented (dropping on them says "다음 버전에서 지원 예정입니다"): the actions wheel (share, copy, cut, copy path, terminal).
+Shown but not yet implemented (they say "다음 버전에서 지원 예정입니다"): the actions wheel (share, copy, cut, copy path, terminal), and the menu's plugin and update tiles.
 
 ## Known limitations
 
