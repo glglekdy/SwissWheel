@@ -185,7 +185,10 @@ impl MenuBar {
         TRACKING.set(false);
     }
 
-    pub fn render(&mut self, view: &MenuView) {
+    /// Draws a frame. `false` when there is nothing to draw with (the GPU
+    /// surface can't be created): the window would show nothing, so the
+    /// caller turns the menu off.
+    pub fn render(&mut self, view: &MenuView) -> bool {
         let size = (self.layout.width as u32, self.layout.height as u32);
         if self.surface.as_ref().is_some_and(|s| s.size() != size) {
             self.surface = None;
@@ -195,7 +198,7 @@ impl MenuBar {
                 Ok(s) => self.surface = Some(s),
                 Err(e) => {
                     log_error!("메뉴 렌더러를 만들 수 없습니다: {e}");
-                    return;
+                    return false;
                 }
             }
         }
@@ -212,6 +215,7 @@ impl MenuBar {
             log_error!("메뉴 그리기 실패: {e}");
             self.surface = None;
         }
+        true
     }
 
     /// Frees GPU resources when the menu has been unused for `idle`.

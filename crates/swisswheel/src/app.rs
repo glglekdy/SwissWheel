@@ -581,7 +581,12 @@ impl AppState {
             progress: fraction(self.menu_opened_at, OPEN_ANIMATION),
             panel_progress: fraction(self.menu_panel_at, PANEL_FADE),
         };
-        bar.render(&view);
+        if !bar.render(&view) {
+            // An invisible menu would still take the arrows and Enter.
+            log_error!("메뉴를 그릴 수 없어 바탕화면 메뉴를 끕니다");
+            self.close_menu();
+            hook::set_menu_enabled(false);
+        }
     }
 
     fn open_wheel(&mut self) {
