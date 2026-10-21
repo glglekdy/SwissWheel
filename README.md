@@ -15,9 +15,16 @@ Quit from the tray icon's right-click menu. Settings live in `%APPDATA%\SwissWhe
 ## What works now (v0.1 in progress)
 
 - Image conversion between JPG, PNG, WebP, BMP, TIFF, GIF, and ICO (multi-size, aspect kept)
-- Image tools: 50% downscale, compress (JPG/WebP re-encode, lossless PNG optimization)
+- Image tools: shrink (25/50/75%), compress (JPG/WebP re-encode, lossless PNG optimization)
+- Video conversion between MP4, MKV, WebM, MOV, and AVI, plus video → GIF and video → MP3; animated GIF → MP4/WebM. Compatible streams are copied instead of re-encoded, so MP4 ↔ MKV is near-instant.
+- Audio conversion between MP3, M4A, WAV, FLAC, OGG, and Opus (WMA and AIFF as input)
+- Video tools: compress (H.264), extract audio (copied when possible), mute
+- Options: some items take options (GIF frame rate and size, video resolution, compression strength, shrink ratio, JPG/WebP quality). Drop on the item for the default; the option panel beside the wheel is coming in the next commit.
+- The tray tooltip shows running jobs and their progress. Quitting cancels running video work and cleans up.
 
-Shown in the wheel but not yet implemented (dropping on them says "다음 버전에서 지원 예정입니다"): video and audio conversion and tools (FFmpeg), and the actions wheel (share, copy, cut, copy path, terminal).
+Video and audio need FFmpeg: put `ffmpeg.exe` and `ffprobe.exe` in an `ffmpeg` folder next to `swisswheel.exe`, or have them on `PATH` (the installer will include them from the next version).
+
+Shown in the wheel but not yet implemented (dropping on them says "다음 버전에서 지원 예정입니다"): the actions wheel (share, copy, cut, copy path, terminal).
 
 ## Known limitations
 
@@ -27,7 +34,7 @@ Shown in the wheel but not yet implemented (dropping on them says "다음 버전
 
 ## Build
 
-Requires Rust (stable, MSVC toolchain) and Visual Studio Build Tools with the C++ workload.
+Requires Rust (stable, MSVC toolchain) and Visual Studio Build Tools with the C++ workload. The tests also need FFmpeg (`ffmpeg.exe`, `ffprobe.exe`) on `PATH`; they make their own sample clips with it.
 
 ```
 cargo build --release -p swisswheel

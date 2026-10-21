@@ -147,7 +147,6 @@ impl Runner {
 
     /// Average progress over every file of the jobs not yet reported, or
     /// `None` when nothing is running.
-    #[allow(dead_code)] // TEMP: the tray tooltip reads it from the media plan's Task 8
     pub fn progress(&self) -> Option<f32> {
         let active = self.shared.active.lock().unwrap();
         let (mut sum, mut count) = (0.0, 0usize);

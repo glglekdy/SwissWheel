@@ -10,8 +10,8 @@ use std::time::{Duration, Instant};
 use swisswheel_core::catalog::Operation;
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
 use swisswheel_core::geometry::Hit;
-use swisswheel_core::session::WheelSession;
-use swisswheel_core::summary::{job_summary, selection_label};
+use swisswheel_core::session::{Selection, WheelSession};
+use swisswheel_core::summary::{busy_tooltip, job_summary, selection_label};
 use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -52,6 +52,9 @@ const TIMER_ENTER_TIMEOUT: usize = 1;
 const TIMER_MOUSE_UP_CLOSE: usize = 2;
 const TIMER_ANIMATION: usize = 3;
 const TIMER_MAINTENANCE: usize = 4;
+const TIMER_PROGRESS: usize = 5;
+/// How often the tray tooltip refreshes the progress of running jobs.
+const PROGRESS_INTERVAL_MS: u32 = 500;
 
 const ENTER_TIMEOUT: Duration = Duration::from_millis(300);
 const MOUSE_UP_CLOSE_DELAY: Duration = Duration::from_millis(200);
@@ -392,6 +395,7 @@ impl AppState {
                     }
                 }
             }
+            TIMER_PROGRESS => self.update_busy(),
             TIMER_MAINTENANCE => {
                 self.wheel.release_if_idle(RENDERER_IDLE);
                 if !self.wheel.is_visible() && self.hooks_installed_at.elapsed() >= HOOK_REINSTALL {
@@ -444,18 +448,24 @@ impl AppState {
         self.update_busy();
     }
 
+    /// Tray tooltip and icon; the progress timer runs only while jobs do.
     fn update_busy(&mut self) {
-        if self.active_jobs == 0 {
-            self.tray.set_busy(false, "SwissWheel");
-        } else {
-            self.tray.set_busy(
-                true,
-                &format!("SwissWheel · 작업 중 {}개", self.active_jobs),
-            );
+        let progress = self.runner.as_ref().and_then(Runner::progress);
+        self.tray.set_busy(
+            self.active_jobs > 0,
+            &busy_tooltip(self.active_jobs, progress),
+        );
+        unsafe {
+            if self.active_jobs > 0 {
+                SetTimer(Some(self.hwnd), TIMER_PROGRESS, PROGRESS_INTERVAL_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_PROGRESS);
+            }
         }
     }
 
-    fn submit(&mut self, op: Operation) {
+    fn submit(&mut self, selection: Selection) {
+        let Selection { op, preset } = selection;
         if let Operation::Action(action) = op {
             self.tray
                 .notify(action.label(), "다음 버전에서 지원 예정입니다");
@@ -466,11 +476,7 @@ impl AppState {
         let Some(runner) = &self.runner else {
             return;
         };
-        runner.submit(Job {
-            op,
-            preset: None,
-            inputs,
-        });
+        runner.submit(Job { op, preset, inputs });
         self.active_jobs += 1;
         self.update_busy();
     }
@@ -554,7 +560,7 @@ pub fn on_drop(x: i32, y: i32) -> DROPEFFECT {
         match op {
             Some(op) => {
                 s.dragged = dragged;
-                s.submit(op.op);
+                s.submit(op);
                 DROPEFFECT_COPY
             }
             None => DROPEFFECT_NONE,

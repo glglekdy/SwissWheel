@@ -9,4 +9,5 @@ jobs:
         with: { components: "clippy, rustfmt" }
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: choco install ffmpeg -y --no-progress
       - run: cargo test --workspace

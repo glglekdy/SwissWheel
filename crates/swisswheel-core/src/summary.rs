@@ -29,6 +29,20 @@ pub fn job_summary(op: &Operation, succeeded: usize, failures: &[String]) -> (St
     (title, body)
 }
 
+/// The tray tooltip: how many jobs run and, when known, how far along they are.
+pub fn busy_tooltip(active_jobs: usize, progress: Option<f32>) -> String {
+    if active_jobs == 0 {
+        return "SwissWheel".to_string();
+    }
+    match progress {
+        Some(p) => {
+            let percent = (p.clamp(0.0, 1.0) * 100.0).round();
+            format!("SwissWheel · 작업 중 {active_jobs}개 · {percent}%")
+        }
+        None => format!("SwissWheel · 작업 중 {active_jobs}개"),
+    }
+}
+
 /// "999 B", "1.5 KB", "12 MB": one decimal below 10, whole numbers above.
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -85,6 +99,21 @@ mod tests {
         assert_eq!(format_size(12 * 1024 * 1024), "12 MB");
         assert_eq!(format_size(1024 * 1024 - 1), "1.0 MB"); // 1023.999 KB must not print "1024 KB"
         assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.0 GB");
+    }
+
+    #[test]
+    fn busy_tooltips() {
+        assert_eq!(busy_tooltip(0, None), "SwissWheel");
+        assert_eq!(busy_tooltip(0, Some(0.5)), "SwissWheel");
+        assert_eq!(busy_tooltip(1, None), "SwissWheel · 작업 중 1개");
+        assert_eq!(
+            busy_tooltip(2, Some(0.374)),
+            "SwissWheel · 작업 중 2개 · 37%"
+        );
+        assert_eq!(
+            busy_tooltip(1, Some(1.7)),
+            "SwissWheel · 작업 중 1개 · 100%"
+        );
     }
 
     #[test]
