@@ -19,7 +19,7 @@ Quit from the tray icon's right-click menu. Settings live in `%APPDATA%\SwissWhe
 - Video conversion between MP4, MKV, WebM, MOV, and AVI, plus video → GIF and video → MP3; animated GIF → MP4/WebM. Compatible streams are copied instead of re-encoded, so MP4 ↔ MKV is near-instant.
 - Audio conversion between MP3, M4A, WAV, FLAC, OGG, and Opus (WMA and AIFF as input)
 - Video tools: compress (H.264), extract audio (copied when possible), mute
-- Options: some items take options (GIF frame rate and size, video resolution, compression strength, shrink ratio, JPG/WebP quality). Drop on the item for the default; the option panel beside the wheel is coming in the next commit.
+- Options: some items take options (GIF frame rate and size, video resolution, compression strength, shrink ratio, JPG/WebP quality). Rest on such an item for a moment and a panel opens beside the wheel; drop on one of its rows, or on the item itself for the default.
 - The tray tooltip shows running jobs and their progress. Quitting cancels running video work and cleans up.
 
 Video and audio need FFmpeg: put `ffmpeg.exe` and `ffprobe.exe` in an `ffmpeg` folder next to `swisswheel.exe`, or have them on `PATH` (the installer will include them from the next version).
