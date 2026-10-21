@@ -10,7 +10,9 @@ Offline file converter for Windows. Drag a file in Explorer, press **Space**, an
 4. The result is saved next to the original (`photo.png` → `photo.jpg`). Originals are never modified or overwritten; name clashes get a number (`photo (1).jpg`).
 5. A notification reports the result. Click it to open the folder with the result selected.
 
-Without a drag, click the desktop and press **Space** to open the menu bar at the top of the screen: **설정** (settings), **플러그인** (plugins), **업데이트** (update). Move with **←/→**, open with **Enter**, close with **Esc** or **Space**. In the settings panel, **↑/↓** picks a setting and **←/→** changes it (or click ◀ ▶, or scroll); changes apply at once and are saved, no restart needed.
+Without a drag, click the desktop and press **Space** to open the menu bar at the top of the screen: **설정** (settings), **플러그인** (plugins), **업데이트** (update). Move with **←/→**, open with **Enter**, close with **Esc** or **Space**. The settings panel has tabs — **단축키** (keys), **도구** (tools), **변환** (convert), **일반** (general): **←/→** on the tab line switches tabs (or click one), **↓** goes into its settings. There **↑/↓** picks a setting and **←/→** changes it (or click ◀ ▶, or scroll); changes apply at once and are saved, no restart needed.
+
+To change a shortcut key, select its row and press **Enter** (or click the key shown), then press the new key. Allowed keys: Space, Tab, Esc, CapsLock, \`, F1–F12, Insert, Delete, Home, End, PageUp, PageDown, Pause, ScrollLock. A key another shortcut already uses swaps the two. Waiting for a key ends after 5 seconds or a click elsewhere. Note that the open key also opens this menu on the desktop: bound to a key the desktop uses itself (Delete, F2, F5, Home…), that key opens the menu there instead of doing its usual job.
 
 Quit from the tray icon's right-click menu. Settings can be changed in the menu's settings panel or in `%APPDATA%\SwissWheel\config.toml` (comments you add there are kept when the panel saves); logs in `%LOCALAPPDATA%\SwissWheel\logs`.
 
@@ -23,7 +25,7 @@ Quit from the tray icon's right-click menu. Settings can be changed in the menu'
 - Video tools: compress (H.264), extract audio (copied when possible), mute
 - Options: some items take options (GIF frame rate and size, video resolution, compression strength, shrink ratio, JPG/WebP quality). Rest on such an item for a moment and a panel opens beside the wheel; drop on one of its rows, or on the item itself for the default.
 - Progress: while jobs run, a small card above the tray lists each file with a progress bar, and a ring around the tray icon fills up. Either can be turned off in the settings panel or `config.toml` (`[progress] window`, `tray_ring`). Quitting cancels running video work and cleans up.
-- Desktop menu and settings panel: wheel keys, start with Windows, JPG/WebP quality, MP3 bitrate, and the progress displays, all applied live.
+- Desktop menu and settings panel: wheel keys (press to bind), the shrink ratio and video compression strength used when you drop on the tool itself, start with Windows, JPG/WebP quality, MP3 bitrate, and the progress displays, all applied live.
 
 Video and audio need FFmpeg: put `ffmpeg.exe` and `ffprobe.exe` in an `ffmpeg` folder next to `swisswheel.exe`, or have them on `PATH` (the installer will include them from the next version).
 
