@@ -5,10 +5,11 @@ use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use ::image::codecs::ico::{IcoEncoder, IcoFrame};
-use ::image::codecs::jpeg::JpegEncoder;
+use ::image::codecs::png::{CompressionType, FilterType as PngFilter, PngEncoder};
 use ::image::imageops::{self, FilterType};
 use ::image::{
-    DynamicImage, ExtendedColorType, ImageDecoder, ImageFormat, ImageReader, RgbImage, RgbaImage,
+    DynamicImage, ExtendedColorType, ImageDecoder, ImageEncoder, ImageFormat, ImageReader,
+    RgbImage, RgbaImage,
 };
 use swisswheel_core::catalog::{Operation, Tool};
 use swisswheel_core::config::Quality;
@@ -106,15 +107,23 @@ fn encode(
         |e: &dyn std::fmt::Display| EngineError::Write(format!("{}: {e}", output.display()));
     let mut out = BufWriter::new(File::create(output).map_err(|e| write(&e))?);
     match format {
-        Format::Jpg => JpegEncoder::new_with_quality(&mut out, jpg_quality)
-            .encode_image(&on_white(img))
-            .map_err(|e| write(&e))?,
+        Format::Jpg => write_jpg(&on_white(img), jpg_quality, &mut out).map_err(|e| write(&e))?,
         Format::Bmp => DynamicImage::ImageRgb8(on_white(img))
             .write_to(&mut out, ImageFormat::Bmp)
             .map_err(|e| write(&e))?,
-        Format::Png => img
-            .write_to(&mut out, ImageFormat::Png)
-            .map_err(|e| write(&e))?,
+        Format::Png => PngEncoder::new_with_quality(
+            &mut out,
+            // The crate's default is its "fast, minimal" level.
+            CompressionType::Default,
+            PngFilter::Adaptive,
+        )
+        .write_image(
+            img.as_bytes(),
+            img.width(),
+            img.height(),
+            img.color().into(),
+        )
+        .map_err(|e| write(&e))?,
         Format::Tiff => img
             .write_to(&mut out, ImageFormat::Tiff)
             .map_err(|e| write(&e))?,
@@ -131,6 +140,25 @@ fn encode(
         other => return Err(EngineError::Unsupported(format!("image output {other:?}"))),
     }
     out.flush().map_err(|e| write(&e))
+}
+
+/// Optimized Huffman tables and 4:2:0 chroma, as most JPEG writers do; the
+/// image crate's own encoder has neither and writes 30-45% larger files.
+fn write_jpg(img: &RgbImage, quality: u8, out: &mut impl Write) -> Result<(), String> {
+    // JPEG itself caps both sides at 65535 pixels.
+    let (Ok(w), Ok(h)) = (u16::try_from(img.width()), u16::try_from(img.height())) else {
+        return Err(format!(
+            "JPG는 가로·세로 65535픽셀까지입니다 ({}x{})",
+            img.width(),
+            img.height()
+        ));
+    };
+    let mut encoder = jpeg_encoder::Encoder::new(out, quality);
+    encoder.set_optimized_huffman_tables(true);
+    encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+    encoder
+        .encode(img.as_raw(), w, h, jpeg_encoder::ColorType::Rgb)
+        .map_err(|e| e.to_string())
 }
 
 /// Flattens transparency onto white for formats without alpha.
@@ -177,6 +205,7 @@ fn compress_png(img: &DynamicImage, output: &Path) -> Result<(), EngineError> {
 pub(crate) mod tests {
     use super::*;
     use ::image::GenericImageView;
+    use ::image::codecs::jpeg::JpegEncoder;
     use std::path::Path;
     use swisswheel_core::catalog::{Operation, Tool};
     use swisswheel_core::config::Quality;
@@ -284,6 +313,110 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(std::fs::metadata(&small).unwrap().len() < std::fs::metadata(&src).unwrap().len());
+    }
+
+    /// Flat blocks and thin lines, like a screenshot.
+    fn screenshot_like(w: u32, h: u32) -> ::image::RgbaImage {
+        ::image::RgbaImage::from_fn(w, h, |x, y| {
+            if y % 7 == 0 && x % 50 < 35 {
+                ::image::Rgba([30, 30, 30, 255])
+            } else if (x / 40 + y / 30) % 2 == 0 {
+                ::image::Rgba([240, 240, 240, 255])
+            } else {
+                ::image::Rgba([60, 120, 200, 255])
+            }
+        })
+    }
+
+    fn balanced_png_len(img: &::image::RgbaImage) -> u64 {
+        use ::image::ImageEncoder;
+        use ::image::codecs::png::{CompressionType, FilterType, PngEncoder};
+        let mut v = Vec::new();
+        PngEncoder::new_with_quality(&mut v, CompressionType::Default, FilterType::Adaptive)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                ExtendedColorType::Rgba8,
+            )
+            .unwrap();
+        v.len() as u64
+    }
+
+    #[test]
+    fn png_output_is_properly_compressed() {
+        // The image crate's PNG default is its "fast, minimal" deflate level,
+        // which made a halved PNG twice the size of its source.
+        let dir = tempfile::tempdir().unwrap();
+        let pixels = screenshot_like(640, 400);
+        let src = dir.path().join("shot.bmp");
+        DynamicImage::ImageRgba8(pixels.clone())
+            .to_rgb8()
+            .save(&src)
+            .unwrap();
+        let out = dir.path().join("shot.png.tmp");
+        run(
+            &Operation::Convert(Format::Png),
+            &src,
+            &out,
+            &Quality::default(),
+        )
+        .unwrap();
+        let len = std::fs::metadata(&out).unwrap().len();
+        let reference = balanced_png_len(&open(&out).to_rgba8());
+        assert!(len * 100 <= reference * 105, "{len} B vs {reference} B");
+
+        let png = dir.path().join("shot.png");
+        pixels.save(&png).unwrap();
+        let half = dir.path().join("half.png.tmp");
+        run(
+            &Operation::Tool(Tool::HalveImage),
+            &png,
+            &half,
+            &Quality::default(),
+        )
+        .unwrap();
+        let len = std::fs::metadata(&half).unwrap().len();
+        let reference = balanced_png_len(&open(&half).to_rgba8());
+        assert!(len * 100 <= reference * 105, "{len} B vs {reference} B");
+    }
+
+    #[test]
+    fn jpg_output_is_optimized() {
+        // Optimized Huffman tables and 4:2:0 chroma make JPGs 30-45% smaller
+        // than the image crate's encoder at the same quality.
+        let dir = tempfile::tempdir().unwrap();
+        let mut seed = 12345u32;
+        let pixels = ::image::RgbImage::from_fn(480, 320, |x, y| {
+            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            let noise = (seed >> 24) as u8 / 16;
+            ::image::Rgb([
+                (x / 2) as u8 + noise,
+                (y / 2) as u8 + noise,
+                ((x + y) / 4) as u8 + noise,
+            ])
+        });
+        let src = dir.path().join("photo.png");
+        pixels.save(&src).unwrap();
+        let out = dir.path().join("photo.jpg.tmp");
+        run(
+            &Operation::Convert(Format::Jpg),
+            &src,
+            &out,
+            &Quality::default(),
+        )
+        .unwrap();
+        let mut baseline = Vec::new();
+        JpegEncoder::new_with_quality(&mut baseline, Quality::default().jpg)
+            .encode_image(&pixels)
+            .unwrap();
+        let len = std::fs::metadata(&out).unwrap().len();
+        assert!(
+            len * 100 < baseline.len() as u64 * 85,
+            "{len} B vs image crate's {} B",
+            baseline.len()
+        );
+        assert_eq!(open(&out).dimensions(), (480, 320));
     }
 
     #[test]
