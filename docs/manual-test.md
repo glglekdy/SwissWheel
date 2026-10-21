@@ -4,6 +4,8 @@
 
 준비: 테스트 폴더에 PNG 몇 개(투명 배경 PNG 1개 포함), 확장자만 맞춘 가짜 파일 `노래.flac`, `영상.mp4`를 둔다. 휠 동작은 확장자로만 판단하므로 M1~M12는 가짜 파일로 충분하다. M13~M16은 진짜 미디어가 필요하다: `ffmpeg -f lavfi -i testsrc=duration=60:size=1280x720:rate=30 -f lavfi -i sine=duration=60 -c:v libx264 -c:a aac -shortest 긴영상.mp4`, `ffmpeg -f lavfi -i sine=duration=5 -c:a flac 진짜노래.flac`, `ffmpeg -f lavfi -i testsrc=duration=2:size=241x181:rate=10 움짤.gif`로 만들 수 있다. FFmpeg가 PATH에 있거나 `swisswheel.exe` 옆 `ffmpeg` 폴더에 있어야 한다.
 
+업데이트 시험 준비 (M40~M46, 저장소 공개 전): 빈 폴더 `app`에 `cargo build`한 `target\debug\swisswheel.exe`를 복사한다. 다른 폴더 `srv`에 같은 exe를 복사하고 끝에 아무 바이트나 덧붙인다(새 버전 대신). `srv`에 `swisswheel.exe.sha256`(`<소문자 해시>  swisswheel.exe`)과 파일 `latest`(`{"tag_name":"v9.0.0","html_url":"https://github.com/glglekdy/SwissWheel/releases","body":"시험","assets":[{"name":"swisswheel.exe","browser_download_url":"http://127.0.0.1:8765/swisswheel.exe"},{"name":"swisswheel.exe.sha256","browser_download_url":"http://127.0.0.1:8765/swisswheel.exe.sha256"}]}`)을 둔다. `srv`에서 `python -m http.server 8765 --bind 127.0.0.1`. 실행 중인 SwissWheel을 끄고, `SWISSWHEEL_UPDATE_URL=http://127.0.0.1:8765/latest`와 `SWISSWHEEL_PREVIEW=update`를 넣고 `app\swisswheel.exe`를 실행한다(메뉴의 업데이트 타일을 누른 것과 같다). 새로 켜진 앱도 같은 환경 변수를 물려받아 확인 창을 한 번 더 띄우는데, "아니요"를 누르면 된다.
+
 | ID | 절차 | PASS 조건 |
 |---|---|---|
 | M1 | 탐색기에서 PNG를 드래그하다가 마우스를 멈추고 Space | 커서 위치에 휠이 지연 없이 나타나고 바깥 칸에 포맷(JPG, WEBP …)이 보임 |
@@ -45,6 +47,14 @@
 | M37 | 키 입력 대기 중 A, ←, Shift 누르기. 다시 대기 시작 후 5초 기다리기. 대기 중 다른 행 클릭 | "이 키는 쓸 수 없습니다" 안내 후 계속 대기, 바탕화면에 아무것도 입력되지 않음. 5초 뒤·클릭 시 대기가 풀리고 값은 그대로 |
 | M38 | 도구 탭에서 축소 비율 25%, 영상 압축 강하게. PNG를 축소 타일에, MP4를 영상 압축 타일에 바로 드롭. 각 타일에 머물러 옵션 패널 보기 | 결과가 25% 크기 / 강하게 압축(720p). 옵션 패널의 "기본" 표시가 25% / 강하게 줄에 있음 |
 | M39 | 트레이 아이콘 확인 → 설정 → 개인 설정 → 색 → "Windows 모드"를 라이트/다크로 바꾸기. 긴 영상 변환 중 트레이 보기. 탐색기·작업 관리자에서 swisswheel.exe 보기 | 다크에선 흰 로고, 라이트에선 검은 로고로 재시작 없이 바뀜. 변환 중엔 작아진 로고 둘레에 초록 링이 참. exe는 어두운 둥근 사각형 위 흰 로고 |
+| M40 | 아래 "업데이트 시험 준비"대로 v9.0.0 가짜 릴리스를 두고, 디버그 exe를 업데이트 미리보기로 실행 → 확인 창 "예" | 오른쪽 아래 진행 창에 "SwissWheel v9.0.0 · 업데이트" 줄. 트레이 아이콘이 잠깐 사라졌다 다시 생기고 "v0.1.0으로 업데이트했습니다" 알림. 폴더에 `swisswheel.exe.old`·`.new` 없음, exe 해시가 가짜 릴리스 파일과 같음. 설정·시작 시 실행 그대로 |
+| M41 | 가짜 릴리스 태그를 `v0.1.0`으로 바꾸고 M40 반복 | "최신 버전입니다 (v0.1.0)" 알림, 확인 창 없음 |
+| M42 | 로컬 서버를 끈 채 M40 반복 | "업데이트를 확인할 수 없습니다" 알림 |
+| M43 | `swisswheel.exe.sha256`의 첫 글자를 바꾸고 M40 반복 | "업데이트 파일이 손상되었습니다" 알림. 폴더에 `.new` 없음, 기존 exe 그대로 실행 중 |
+| M44 | 큰 가짜 exe(60MB)로 받기 시작 직후 트레이 → 종료 | 1~2초 안에 종료. 다시 켜면 `.new` 없음 |
+| M45 | 긴 영상 변환 중 메뉴 → 업데이트 | "진행 중인 변환이 끝난 뒤 다시 눌러 주세요" 알림 |
+| M46 | exe를 쓸 수 없는 폴더(예: `C:\Program Files\SwissWheel`)에 두고 M40 반복 | 확인 창 "…이 위치에서는 자동으로 바꿀 수 없어 다운로드 페이지를 엽니다." 뒤 브라우저에 릴리스 페이지 |
+| M47 | (저장소 공개 뒤) `v0.1.1` 태그를 올려 릴리스가 생기면, 릴리스 빌드 v0.1.0에서 메뉴 → 업데이트 | v0.1.1로 바뀌어 다시 켜지고 완료 알림 |
 
 ## 결과 기록
 

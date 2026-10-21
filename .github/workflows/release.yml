@@ -1,0 +1,36 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Tag matches Cargo.toml
+        run: |
+          $tag = "${{ github.ref_name }}".TrimStart('v')
+          $meta = cargo metadata --no-deps --format-version 1 | ConvertFrom-Json
+          $version = ($meta.packages | Where-Object name -eq 'swisswheel').version
+          if ($tag -ne $version) {
+            Write-Error "tag v$tag does not match Cargo.toml version $version"
+            exit 1
+          }
+      - run: choco install ffmpeg -y --no-progress
+      - run: cargo test --workspace
+      - run: cargo build --release -p swisswheel
+      - name: Checksum
+        run: |
+          Copy-Item target/release/swisswheel.exe .
+          $hash = (Get-FileHash swisswheel.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  swisswheel.exe" | Out-File -Encoding ascii -NoNewline swisswheel.exe.sha256
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create $env:GITHUB_REF_NAME swisswheel.exe swisswheel.exe.sha256 --generate-notes

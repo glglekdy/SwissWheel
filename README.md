@@ -29,7 +29,11 @@ Quit from the tray icon's right-click menu. Settings can be changed in the menu'
 
 Video and audio need FFmpeg: put `ffmpeg.exe` and `ffprobe.exe` in an `ffmpeg` folder next to `swisswheel.exe`, or have them on `PATH` (the installer will include them from the next version).
 
-Shown but not yet implemented (they say "다음 버전에서 지원 예정입니다"): the actions wheel (share, copy, cut, copy path, terminal), and the menu's plugin and update tiles.
+Shown but not yet implemented (they say "다음 버전에서 지원 예정입니다"): the actions wheel (share, copy, cut, copy path, terminal), and the menu's plugin tile.
+
+## Updates
+
+Choose **업데이트** in the desktop menu. SwissWheel checks the latest GitHub release and, if it is newer, asks before downloading it. The download is checked against the release's SHA-256 before it replaces `swisswheel.exe`; the app then restarts on the new version with your settings as they were. If anything fails, the current version stays. While files are converting, it asks you to try again when they finish; if a conversion starts during the download, the update waits for it. When `swisswheel.exe` sits in a folder it can't write to (such as Program Files), it opens the download page instead.
 
 ## Known limitations
 
@@ -45,6 +49,8 @@ Requires Rust (stable, MSVC toolchain) and Visual Studio Build Tools with the C+
 cargo build --release -p swisswheel
 cargo test --workspace
 ```
+
+To publish a version: raise `version` in the root `Cargo.toml`, commit, then `git tag vX.Y.Z` and `git push origin vX.Y.Z`. The release workflow checks that the tag matches `Cargo.toml`, runs the tests, builds, and publishes `swisswheel.exe` with `swisswheel.exe.sha256` as a GitHub release. The in-app updater reads that release, so the repository has to be public for other people's copies to see it.
 
 Manual checks that automated tests can't cover: [docs/manual-test.md](docs/manual-test.md). Design: [docs/superpowers/specs/2026-10-20-swisswheel-design.md](docs/superpowers/specs/2026-10-20-swisswheel-design.md).
 
