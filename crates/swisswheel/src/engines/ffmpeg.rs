@@ -529,6 +529,22 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn resolution_limits_the_short_side() {
+        // A portrait phone clip at "480p" keeps 480 across, not 480 tall.
+        let dir = tempfile::tempdir().unwrap();
+        let tall = pattern(dir.path(), "tall.mp4", "720x1280", 1);
+        let out = convert(
+            Operation::Convert(Format::Mkv),
+            Some(Preset::Resolution(Some(480))),
+            &tall,
+            "tall.mkv",
+        );
+        let (w, h) = dims(&out);
+        assert_eq!(w, 480);
+        assert!(h % 2 == 0 && (850..=856).contains(&h), "{w}x{h}");
+    }
+
+    #[test]
     fn gif_option_sets_fps() {
         let dir = tempfile::tempdir().unwrap();
         let clip = make(dir.path(), "clip.mp4", CLIP);

@@ -65,18 +65,18 @@ pub fn plan(
         }
         Operation::Convert(target) => {
             has_video()?;
-            let max_height = match preset {
+            let max_short_side = match preset {
                 Some(Preset::Resolution(h)) => h,
                 _ => None,
             };
             let encode = Video {
                 crf: 23,
                 aac_kbps: 192,
-                max_height,
+                max_short_side,
                 audio: true,
             };
             let mut attempts = Vec::new();
-            if max_height.is_none()
+            if max_short_side.is_none()
                 && input != Format::Gif
                 && let Some(copy) = remux(target, info)
             {
@@ -91,7 +91,7 @@ pub fn plan(
                 Format::Mp4 | Format::Mkv | Format::Mov => input,
                 _ => Format::Mp4,
             };
-            let (crf, aac_kbps, max_height) = match preset {
+            let (crf, aac_kbps, max_short_side) = match preset {
                 Some(Preset::Compress(Strength::Light)) => (24, 160, None),
                 Some(Preset::Compress(Strength::Strong)) => (32, 96, Some(720)),
                 _ => (28, 128, None),
@@ -99,7 +99,7 @@ pub fn plan(
             let encode = Video {
                 crf,
                 aac_kbps,
-                max_height,
+                max_short_side,
                 audio: true,
             };
             (output, vec![encode.args(output, quality)])
@@ -133,7 +133,7 @@ pub fn plan(
             let encode = Video {
                 crf: 23,
                 aac_kbps: 192,
-                max_height: None,
+                max_short_side: None,
                 audio: false,
             };
             let mut attempts = Vec::new();
@@ -163,16 +163,19 @@ const OPUS_LAYOUTS: &str = "aformat=channel_layouts=7.1|5.1|stereo|mono";
 /// libx264 rejects odd sizes; this rounds both sides down to even.
 const EVEN_SIZE: &str = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
 
-/// Scales down to at most `h` pixels high (never up), keeping sizes even.
-fn max_height_filter(h: u16) -> String {
-    format!("scale=-2:'trunc(min({h},ih)/2)*2'")
+/// Scales down so the short side is at most `h` pixels (never up), keeping
+/// sizes even: "720p" of a portrait phone clip means 720 across, not tall.
+fn max_short_side_filter(h: u16) -> String {
+    format!(
+        "scale='if(gte(iw,ih),-2,trunc(min({h},iw)/2)*2)':'if(gte(iw,ih),trunc(min({h},ih)/2)*2,-2)'"
+    )
 }
 
 struct Video {
     /// H.264 CRF; VP9 and MPEG-4 use their own fixed quality.
     crf: u8,
     aac_kbps: u32,
-    max_height: Option<u16>,
+    max_short_side: Option<u16>,
     audio: bool,
 }
 
@@ -182,7 +185,7 @@ impl Video {
         if self.audio {
             a.extend(strings(&["-map", "0:a?"]));
         }
-        let scale = self.max_height.map(max_height_filter);
+        let scale = self.max_short_side.map(max_short_side_filter);
         match target {
             Format::Webm => {
                 a.extend(strings(&[
@@ -606,7 +609,10 @@ mod tests {
         assert_eq!(p.attempts.len(), 1); // no copy when resizing
         assert!(has(
             &p.attempts[0],
-            &["-vf", "scale=-2:'trunc(min(720,ih)/2)*2'"]
+            &[
+                "-vf",
+                "scale='if(gte(iw,ih),-2,trunc(min(720,iw)/2)*2)':'if(gte(iw,ih),trunc(min(720,ih)/2)*2,-2)'"
+            ]
         ));
         let w = convert(
             Format::Webm,
@@ -618,7 +624,10 @@ mod tests {
         .unwrap();
         assert!(has(
             &w.attempts[0],
-            &["-vf", "scale=-2:'trunc(min(480,ih)/2)*2'"]
+            &[
+                "-vf",
+                "scale='if(gte(iw,ih),-2,trunc(min(480,iw)/2)*2)':'if(gte(iw,ih),trunc(min(480,ih)/2)*2,-2)'"
+            ]
         ));
         let original = convert(
             Format::Mkv,
@@ -831,7 +840,13 @@ mod tests {
         .unwrap();
         let a = &strong.attempts[0];
         assert!(has(a, &["-crf", "32"]) && has(a, &["-b:a", "96k"]));
-        assert!(has(a, &["-vf", "scale=-2:'trunc(min(720,ih)/2)*2'"]));
+        assert!(has(
+            a,
+            &[
+                "-vf",
+                "scale='if(gte(iw,ih),-2,trunc(min(720,iw)/2)*2)':'if(gte(iw,ih),trunc(min(720,ih)/2)*2,-2)'"
+            ]
+        ));
         let light = tool(
             Tool::CompressVideo,
             Some(Preset::Compress(Strength::Light)),

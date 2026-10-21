@@ -10,7 +10,8 @@ pub enum Preset {
         fps: u8,
         max_width: Option<u16>,
     },
-    /// Maximum height; `None` keeps the original size.
+    /// Maximum length of the short side (720 = "720p", portrait or not);
+    /// `None` keeps the original size.
     Resolution(Option<u16>),
     Compress(Strength),
     /// Percent of the original width and height.
