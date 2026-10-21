@@ -101,8 +101,8 @@ mod tests {
         let (t, b) = job_summary(&Operation::Convert(Format::Png), 3, &[]);
         assert_eq!(t, "PNG 변환 완료");
         assert_eq!(b, "파일 3개 · 클릭하면 폴더를 엽니다");
-        let (t, _) = job_summary(&Operation::Tool(Tool::HalveImage), 1, &[]);
-        assert_eq!(t, "50% 축소 완료");
+        let (t, _) = job_summary(&Operation::Tool(Tool::Shrink), 1, &[]);
+        assert_eq!(t, "축소 완료");
     }
 
     #[test]

@@ -131,7 +131,7 @@ mod tests {
         assert_eq!(s.hovered(), Hit::Cancel);
         assert_eq!(
             s.drop_at(0.0, -100.0, 1.0),
-            Some(Operation::Tool(Tool::HalveImage))
+            Some(Operation::Tool(Tool::Shrink))
         );
     }
 

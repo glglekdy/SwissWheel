@@ -3,7 +3,21 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use crate::catalog::{Operation, Tool};
+use crate::options::Preset;
+
 pub const TEMP_SUFFIX: &str = ".swisswheel-tmp";
+
+/// The `(suffix)` for an operation's output name, including the chosen
+/// option where it changes what the file is (`사진 (25%).png`, `영상 (720p).mp4`).
+pub fn suffix_for(op: &Operation, preset: Option<Preset>) -> Option<String> {
+    match (op, preset) {
+        (Operation::Tool(Tool::Shrink), Some(Preset::Scale(p))) => Some(format!("{p}%")),
+        (Operation::Convert(_), Some(Preset::Resolution(Some(h)))) => Some(format!("{h}p")),
+        (Operation::Tool(tool), _) => tool.suffix().map(str::to_string),
+        _ => None,
+    }
+}
 
 /// `input`'s folder + `stem[ (suffix)][ (n)].extension`, counting `n` up from 1
 /// while the candidate `exists` or equals `input` (ignoring case).
@@ -65,6 +79,52 @@ mod tests {
                 &none
             ),
             PathBuf::from(r"C:\p\photo (compressed).jpg")
+        );
+    }
+
+    #[test]
+    fn suffixes_carry_the_chosen_option() {
+        use crate::catalog::{Operation, Tool};
+        use crate::format::Format;
+        use crate::options::{Preset, Strength};
+        let shrink = Operation::Tool(Tool::Shrink);
+        assert_eq!(
+            suffix_for(&shrink, Some(Preset::Scale(25))).as_deref(),
+            Some("25%")
+        );
+        assert_eq!(suffix_for(&shrink, None).as_deref(), Some("50%"));
+        assert_eq!(
+            suffix_for(
+                &Operation::Convert(Format::Mp4),
+                Some(Preset::Resolution(Some(720)))
+            )
+            .as_deref(),
+            Some("720p")
+        );
+        assert_eq!(
+            suffix_for(
+                &Operation::Convert(Format::Mp4),
+                Some(Preset::Resolution(None))
+            ),
+            None
+        );
+        assert_eq!(
+            suffix_for(
+                &Operation::Tool(Tool::CompressVideo),
+                Some(Preset::Compress(Strength::Strong))
+            )
+            .as_deref(),
+            Some("compressed")
+        );
+        assert_eq!(
+            suffix_for(
+                &Operation::Convert(Format::Gif),
+                Some(Preset::Gif {
+                    fps: 10,
+                    max_width: Some(320)
+                })
+            ),
+            None
         );
     }
 

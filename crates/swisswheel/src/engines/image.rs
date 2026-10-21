@@ -27,7 +27,7 @@ pub fn supports(op: &Operation, input: Format) -> bool {
     input.kind() == MediaKind::Image
         && match op {
             Operation::Convert(target) => target.kind() == MediaKind::Image,
-            Operation::Tool(Tool::HalveImage) => true,
+            Operation::Tool(Tool::Shrink) => true,
             Operation::Tool(Tool::CompressImage) => {
                 matches!(input, Format::Jpg | Format::Png | Format::Webp)
             }
@@ -60,7 +60,7 @@ pub fn run(
     let img = decode(input)?;
     match op {
         Operation::Convert(target) => encode(&img, *target, quality.jpg, quality.webp, output),
-        Operation::Tool(Tool::HalveImage) => {
+        Operation::Tool(Tool::Shrink) => {
             let half = img.resize_exact(
                 (img.width() / 2).max(1),
                 (img.height() / 2).max(1),
@@ -297,7 +297,7 @@ pub(crate) mod tests {
         drop(file);
         let half = dir.path().join("half.tmp");
         run(
-            &Operation::Tool(Tool::HalveImage),
+            &Operation::Tool(Tool::Shrink),
             &src,
             &half,
             &Quality::default(),
@@ -370,7 +370,7 @@ pub(crate) mod tests {
         pixels.save(&png).unwrap();
         let half = dir.path().join("half.png.tmp");
         run(
-            &Operation::Tool(Tool::HalveImage),
+            &Operation::Tool(Tool::Shrink),
             &png,
             &half,
             &Quality::default(),
@@ -443,7 +443,7 @@ pub(crate) mod tests {
         use Format::*;
         assert!(supports(&Operation::Convert(Jpg), Png));
         assert!(supports(&Operation::Convert(Gif), Png));
-        assert!(supports(&Operation::Tool(Tool::HalveImage), Bmp));
+        assert!(supports(&Operation::Tool(Tool::Shrink), Bmp));
         assert!(!supports(&Operation::Convert(Gif), Mkv)); // video → GIF is FFmpeg's job
         assert!(!supports(&Operation::Convert(Mp4), Gif)); // animated GIF → video
         assert!(!supports(&Operation::Tool(Tool::Mute), Mp4));

@@ -281,7 +281,7 @@ mod tests {
         let p = sub.join("할머니 생신.png");
         rgba_png(&p, 10, 10, 255);
         let r = &run_jobs(vec![Job {
-            op: Operation::Tool(Tool::HalveImage),
+            op: Operation::Tool(Tool::Shrink),
             inputs: vec![p],
         }])[0];
         assert_eq!(r.outputs, vec![sub.join("할머니 생신 (50%).png")]);

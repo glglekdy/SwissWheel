@@ -33,7 +33,7 @@ impl WheelKind {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Tool {
-    HalveImage,
+    Shrink,
     CompressImage,
     CompressVideo,
     ExtractAudio,
@@ -43,7 +43,7 @@ pub enum Tool {
 impl Tool {
     pub fn label(self) -> &'static str {
         match self {
-            Tool::HalveImage => "50% 축소",
+            Tool::Shrink => "축소",
             Tool::CompressImage => "압축",
             Tool::CompressVideo => "영상 압축",
             Tool::ExtractAudio => "오디오 추출",
@@ -54,7 +54,7 @@ impl Tool {
     /// Appended to the output file name as `name (suffix).ext`.
     pub fn suffix(self) -> Option<&'static str> {
         match self {
-            Tool::HalveImage => Some("50%"),
+            Tool::Shrink => Some("50%"),
             Tool::CompressImage | Tool::CompressVideo => Some("compressed"),
             Tool::ExtractAudio => None,
             Tool::Mute => Some("muted"),
@@ -202,9 +202,9 @@ fn items_for_one(wheel: WheelKind, input: &InputItem) -> Vec<Operation> {
             } else {
                 match (format.kind(), format) {
                     (MediaKind::Image, Format::Jpg | Format::Png | Format::Webp) => {
-                        &[Tool::HalveImage, Tool::CompressImage]
+                        &[Tool::Shrink, Tool::CompressImage]
                     }
-                    (MediaKind::Image, _) => &[Tool::HalveImage],
+                    (MediaKind::Image, _) => &[Tool::Shrink],
                     (MediaKind::Video, _) => &[Tool::CompressVideo, Tool::ExtractAudio, Tool::Mute],
                     (MediaKind::Audio, _) => &[],
                 }
@@ -269,12 +269,12 @@ mod tests {
         use Format::*;
         assert_eq!(
             items_for(WheelKind::Tools, &[file(Bmp)]),
-            vec![Operation::Tool(Tool::HalveImage)]
+            vec![Operation::Tool(Tool::Shrink)]
         );
         assert_eq!(
             items_for(WheelKind::Tools, &[file(Jpg)]),
             vec![
-                Operation::Tool(Tool::HalveImage),
+                Operation::Tool(Tool::Shrink),
                 Operation::Tool(Tool::CompressImage)
             ]
         );

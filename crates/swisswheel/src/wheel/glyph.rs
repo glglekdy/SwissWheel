@@ -15,10 +15,10 @@ pub fn glyph(op: &Operation) -> char {
             MediaKind::Audio => '\u{E8D6}', // Audio
         },
         Operation::Tool(t) => match t {
-            Tool::HalveImage => '\u{E73F}', // BackToWindow (arrows pointing in)
+            Tool::Shrink => '\u{E73F}', // BackToWindow (arrows pointing in)
             Tool::CompressImage | Tool::CompressVideo => '\u{F012}', // ZipFolder
             Tool::ExtractAudio => '\u{E767}', // Volume
-            Tool::Mute => '\u{E74F}',       // Mute
+            Tool::Mute => '\u{E74F}',   // Mute
         },
         Operation::Action(a) => match a {
             Action::Share => '\u{E72D}',
@@ -58,7 +58,7 @@ mod tests {
         Format::Aiff,
     ];
     const TOOLS: [Tool; 5] = [
-        Tool::HalveImage,
+        Tool::Shrink,
         Tool::CompressImage,
         Tool::CompressVideo,
         Tool::ExtractAudio,
@@ -116,7 +116,7 @@ mod tests {
         let tool = |t| glyph(&Operation::Tool(t));
         assert_eq!(tool(Tool::CompressImage), tool(Tool::CompressVideo));
         assert_ne!(tool(Tool::ExtractAudio), tool(Tool::Mute));
-        assert_ne!(tool(Tool::HalveImage), tool(Tool::CompressImage));
+        assert_ne!(tool(Tool::Shrink), tool(Tool::CompressImage));
         let mut actions: Vec<char> = ACTIONS
             .iter()
             .map(|&a| glyph(&Operation::Action(a)))
