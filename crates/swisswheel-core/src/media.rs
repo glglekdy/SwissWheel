@@ -279,6 +279,8 @@ fn remux(target: Format, info: &MediaInfo) -> Option<Vec<String>> {
     Some(finish(a, target))
 }
 
+/// One palette per frame: a single global palette would make FFmpeg hold the
+/// whole video in memory until the input ends (gigabytes for a few minutes).
 fn gif(preset: Option<Preset>) -> Vec<String> {
     let (fps, max_width) = match preset {
         Some(Preset::Gif { fps, max_width }) => (fps, max_width),
@@ -287,7 +289,9 @@ fn gif(preset: Option<Preset>) -> Vec<String> {
     let scale = max_width
         .map(|w| format!("scale='min({w},iw)':-2:flags=lanczos,"))
         .unwrap_or_default();
-    let filter = format!("fps={fps},{scale}split[a][b];[a]palettegen[p];[b][p]paletteuse");
+    let filter = format!(
+        "fps={fps},{scale}split[a][b];[a]palettegen=stats_mode=single[p];[b][p]paletteuse=new=1"
+    );
     let mut a = strings(&["-map", "0:v:0", "-vf"]);
     a.push(filter);
     a.extend(strings(&["-loop", "0"]));
@@ -782,6 +786,26 @@ mod tests {
             }))
             .starts_with("fps=24,split")
         );
+    }
+
+    #[test]
+    fn gif_palette_streams_instead_of_buffering_the_video() {
+        // A global palette makes FFmpeg hold every frame until the input ends
+        // (1.9 GB for 60 s of 720p); a per-frame palette streams.
+        let p = convert(
+            Format::Gif,
+            None,
+            Format::Mp4,
+            &info(Some("h264"), Some("aac")),
+            &Quality::default(),
+        )
+        .unwrap();
+        let vf = p.attempts[0]
+            .iter()
+            .find(|s| s.contains("palette"))
+            .unwrap();
+        assert!(vf.contains("palettegen=stats_mode=single"), "{vf}");
+        assert!(vf.ends_with("paletteuse=new=1"), "{vf}");
     }
 
     #[test]
