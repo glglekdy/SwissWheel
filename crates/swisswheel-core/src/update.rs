@@ -175,6 +175,16 @@ pub enum ReadyDecision {
     WaitForJobs,
 }
 
+/// How long a waiting swap holds off after the last conversion ends, so its
+/// notification isn't dismissed by the restart.
+pub const SWAP_AFTER_JOBS: std::time::Duration = std::time::Duration::from_secs(4);
+
+/// A job just finished: when a verified download is waiting (`pending`) and
+/// nothing runs any more, swap after [`SWAP_AFTER_JOBS`].
+pub fn on_jobs_finished(pending: bool, active_jobs: usize) -> Option<std::time::Duration> {
+    (pending && active_jobs == 0).then_some(SWAP_AFTER_JOBS)
+}
+
 /// The new exe is downloaded and verified; swapping it in restarts the app,
 /// so it waits for running conversions.
 pub fn on_ready(active_jobs: usize) -> ReadyDecision {
@@ -363,6 +373,14 @@ mod tests {
     fn ready_waits_for_jobs() {
         assert_eq!(on_ready(0), ReadyDecision::SwapNow);
         assert_eq!(on_ready(1), ReadyDecision::WaitForJobs);
+    }
+
+    #[test]
+    fn swap_waits_after_the_last_jobs_notice() {
+        assert_eq!(on_jobs_finished(true, 0), Some(SWAP_AFTER_JOBS));
+        assert!(SWAP_AFTER_JOBS >= std::time::Duration::from_secs(3));
+        assert_eq!(on_jobs_finished(true, 1), None);
+        assert_eq!(on_jobs_finished(false, 0), None);
     }
 
     #[test]

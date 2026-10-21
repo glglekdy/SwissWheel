@@ -73,6 +73,8 @@ const TIMER_PANEL: usize = 6;
 const TIMER_MENU_ANIMATION: usize = 7;
 /// Gives up waiting for a key on a shortcut row.
 const TIMER_MENU_CAPTURE: usize = 8;
+/// Fires once to swap in a waiting update after the last job's notice.
+const TIMER_SWAP: usize = 9;
 const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const PANEL_TICK_MS: u32 = 50;
 /// How often the tray tooltip refreshes the progress of running jobs.
@@ -160,7 +162,7 @@ pub fn run() -> Result<()> {
     let old_exited = after_update.map(|pid| swap::wait_for_exit(pid, AFTER_UPDATE_WAIT));
     let _instance = unsafe { CreateMutexW(None, true, w!("Local\\SwissWheel.SingleInstance"))? };
     // A debug preview may run beside an installed copy: it only draws.
-    let previewing = cfg!(debug_assertions) && std::env::var_os("SWISSWHEEL_PREVIEW").is_some();
+    let previewing = previewing(std::env::var("SWISSWHEEL_PREVIEW").ok());
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS && !previewing {
         return Ok(()); // already running: the existing tray icon stays
     }
@@ -981,6 +983,17 @@ impl AppState {
                 }
             }
             TIMER_PROGRESS => self.update_busy(),
+            TIMER_SWAP => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_SWAP);
+                }
+                // A job started meanwhile: its end sets the timer again.
+                if self.active_jobs == 0
+                    && let Some(version) = self.pending_swap.take()
+                {
+                    self.apply_swap(version);
+                }
+            }
             TIMER_MENU_CAPTURE => {
                 self.disarm_capture();
                 if self.menu.as_mut().is_some_and(MenuSession::cancel_capture) {
@@ -1062,10 +1075,10 @@ impl AppState {
                 self.tray.warn(&title, &body);
             }
         }
-        if self.active_jobs == 0
-            && let Some(version) = self.pending_swap.take()
+        if let Some(delay) =
+            release::on_jobs_finished(self.pending_swap.is_some(), self.active_jobs)
         {
-            self.apply_swap(version);
+            unsafe { SetTimer(Some(self.hwnd), TIMER_SWAP, delay.as_millis() as u32, None) };
         }
         self.update_busy();
     }
@@ -1343,6 +1356,13 @@ fn show_menu(hwnd: HWND, pt: POINT) {
     }
 }
 
+/// Debug previews draw beside an installed copy, so they skip the
+/// single-instance check and autostart; the update preview doesn't, since it
+/// exercises the real restart hand-off.
+fn previewing(preview: Option<String>) -> bool {
+    cfg!(debug_assertions) && preview.is_some_and(|what| what != "update")
+}
+
 /// Opens a release page in the browser; only https links.
 fn open_page(url: &str) {
     if !url.starts_with("https://") {
@@ -1364,6 +1384,14 @@ fn open_page(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn update_preview_keeps_the_single_instance_rules() {
+        // The restart check needs the mutex hand-off and autostart as in use.
+        assert!(!previewing(Some("update".into())));
+        assert_eq!(previewing(Some("panel".into())), cfg!(debug_assertions));
+        assert!(!previewing(None));
+    }
 
     #[test]
     fn autostart_follows_a_readable_config() {
