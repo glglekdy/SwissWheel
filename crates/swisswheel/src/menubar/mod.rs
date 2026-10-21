@@ -1,8 +1,6 @@
 //! The desktop menu popup: a bar of tiles at the top of the screen and the
 //! settings panel under it (menu design spec 2).
 
-#![expect(dead_code, reason = "input is wired into the app in the next step")]
-
 mod render;
 mod window;
 

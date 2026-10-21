@@ -8,10 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use swisswheel_core::catalog::Operation;
-use swisswheel_core::config::ProgressDisplay;
+use swisswheel_core::config::Config;
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
 use swisswheel_core::geometry::Hit;
+use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession};
+use swisswheel_core::menu_geometry;
 use swisswheel_core::session::{Selection, WheelSession};
+use swisswheel_core::settings::{self, Dir, SettingItem};
 use swisswheel_core::summary::{busy_tooltip, job_summary, selection_label};
 use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{
@@ -26,6 +29,7 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::System::WinRT::{
     CreateDispatcherQueueController, DQTAT_COM_NONE, DQTYPE_THREAD_CURRENT, DispatcherQueueOptions,
 };
+use windows::Win32::UI::Accessibility::HWINEVENTHOOK;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
@@ -36,15 +40,15 @@ use windows::Win32::UI::Shell::NIN_BALLOONUSERCLICK;
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{Result, w};
 
-use crate::config_file;
 use crate::dnd::DropTarget;
-use crate::hook::{self, Hooks, WM_APP_DRAG};
+use crate::hook::{self, Hooks, WM_APP_DRAG, WM_APP_FOREGROUND};
 use crate::jobs::{Job, JobReport, Runner};
-use crate::menubar::{MenuBar, MenuMouse};
+use crate::menubar::{self, MenuBar, MenuMouse, MenuView};
 use crate::probe;
 use crate::progress::ProgressWindow;
 use crate::tray::{Tray, WM_APP_TRAY};
 use crate::wheel::{PanelView, WheelView, WheelWindow};
+use crate::{autostart, config_file};
 
 const ID_MENU_EXIT: usize = 1;
 const WM_APP_JOB_DONE: u32 = WM_APP + 30;
@@ -58,6 +62,8 @@ const TIMER_MAINTENANCE: usize = 4;
 const TIMER_PROGRESS: usize = 5;
 /// Finishes a panel dwell while the cursor rests (no DragOver arrives then).
 const TIMER_PANEL: usize = 6;
+/// Runs the desktop menu's open slide and panel fade.
+const TIMER_MENU_ANIMATION: usize = 7;
 const PANEL_TICK_MS: u32 = 50;
 /// How often the tray tooltip refreshes the progress of running jobs.
 const PROGRESS_INTERVAL_MS: u32 = 500;
@@ -80,9 +86,22 @@ pub(crate) struct AppState {
     wheel: WheelWindow,
     /// The desktop menu's popup; `None` if it couldn't be created.
     menubar: Option<MenuBar>,
+    /// The open desktop menu, if any, and when it and its panel opened.
+    menu: Option<MenuSession>,
+    menu_opened_at: Instant,
+    menu_panel_at: Instant,
+    /// Foreground watch while the menu is open (it closes when another
+    /// window comes forward).
+    foreground_hook: Option<HWINEVENTHOOK>,
     progress_window: ProgressWindow,
-    /// Where job progress shows (config `[progress]`).
-    progress_display: ProgressDisplay,
+    /// The settings in effect; the settings panel edits them live.
+    config: Config,
+    config_dir: PathBuf,
+    /// False when config.toml was unusable at startup: edits apply but are
+    /// not saved over the file the user may be fixing.
+    config_writable: bool,
+    /// The row whose last change couldn't be saved (shows ⚠).
+    save_failed: Option<SettingItem>,
     _drop_target: IDropTarget,
     _dispatcher: DispatcherQueueController,
     runner: Option<Runner>,
@@ -151,6 +170,12 @@ pub fn run() -> Result<()> {
         log_error!("설정 파일 오류: {w}");
         tray.warn("설정 파일 오류", &format!("{w}\n기본 설정으로 실행합니다"));
     }
+    // The Run entry follows the setting (e.g. after the exe moved).
+    if autostart::is_enabled() != config.start_with_windows
+        && let Err(e) = autostart::set(config.start_with_windows)
+    {
+        log_error!("시작 프로그램 등록 실패: {e}");
+    }
     let hooks = hook::install(hwnd, KeyBindings::from(&config))?;
     let wheel = WheelWindow::new(hwnd)?;
     // Without its window the desktop menu stays off; Space then passes through.
@@ -204,8 +229,15 @@ pub fn run() -> Result<()> {
         hooks,
         wheel,
         menubar,
+        menu: None,
+        menu_opened_at: Instant::now(),
+        menu_panel_at: Instant::now(),
+        foreground_hook: None,
         progress_window,
-        progress_display: config.progress.clone(),
+        config_writable: warning.is_none(),
+        config,
+        config_dir,
+        save_failed: None,
         _drop_target: drop_target,
         _dispatcher: dispatcher,
         runner: Some(runner),
@@ -286,6 +318,20 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_JOB_DONE => {
             with_state(AppState::on_jobs_done);
         }
+        WM_APP_FOREGROUND => {
+            with_state(|s| s.on_foreground(HWND(wparam.0 as *mut _)));
+        }
+        // Monitors, DPI, or the work area changed: the bar's placement is stale.
+        WM_DISPLAYCHANGE | WM_DPICHANGED => {
+            with_state(AppState::close_menu);
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
+        WM_SETTINGCHANGE => {
+            if wparam.0 == SPI_SETWORKAREA.0 as usize {
+                with_state(AppState::close_menu);
+            }
+            return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
+        }
         WM_APP_TRAY => on_tray(hwnd, wparam, lparam),
         WM_COMMAND if wparam.0 & 0xFFFF == ID_MENU_EXIT => unsafe {
             let _ = DestroyWindow(hwnd);
@@ -299,6 +345,9 @@ unsafe extern "system" fn wnd_proc(
             if let Some(mut state) = STATE.take() {
                 unsafe {
                     let _ = RevokeDragDrop(state.wheel.hwnd());
+                }
+                if let Some(watch) = state.foreground_hook.take() {
+                    hook::unwatch_foreground(watch);
                 }
                 log_info!("종료 중: 작업 대기");
                 if let Some(runner) = state.runner.take() {
@@ -338,11 +387,24 @@ impl AppState {
                 }
             }
             DragCommand::Cancel => self.close_wheel(),
-            // The desktop menu is wired up in a later step.
-            DragCommand::OpenMenu
-            | DragCommand::MenuKey(_)
-            | DragCommand::MenuPointerDown { .. }
-            | DragCommand::CloseMenu => hook::notify(DragEvent::MenuClosed),
+            DragCommand::OpenMenu => self.open_menu(),
+            DragCommand::MenuKey(key) => match &mut self.menu {
+                Some(menu) => {
+                    let action = menu.key(key);
+                    self.on_menu_action(action);
+                }
+                None => hook::notify(DragEvent::MenuClosed), // out of step: resync
+            },
+            DragCommand::MenuPointerDown { x, y } => {
+                let inside = self
+                    .menubar
+                    .as_ref()
+                    .is_some_and(|bar| bar.contains_screen(x, y));
+                if !inside {
+                    self.close_menu();
+                }
+            }
+            DragCommand::CloseMenu => self.close_menu(),
             DragCommand::ButtonReleasedWhileOpen => unsafe {
                 // WM_LBUTTONUP reaches the hook before OLE delivers Drop; wait for it.
                 SetTimer(
@@ -355,6 +417,170 @@ impl AppState {
         }
     }
 
+    fn open_menu(&mut self) {
+        let Some(bar) = &mut self.menubar else {
+            hook::notify(DragEvent::MenuClosed);
+            return;
+        };
+        if self.session.is_some() {
+            hook::notify(DragEvent::MenuClosed); // the wheel is up
+            return;
+        }
+        let mut cursor = POINT::default();
+        unsafe {
+            let _ = GetCursorPos(&mut cursor);
+        }
+        bar.place(cursor, !self.config_writable);
+        bar.show();
+        self.menu = Some(MenuSession::new());
+        self.menu_opened_at = Instant::now();
+        if self.foreground_hook.is_none() {
+            self.foreground_hook = hook::watch_foreground();
+        }
+        self.render_menu();
+        unsafe { SetTimer(Some(self.hwnd), TIMER_MENU_ANIMATION, 16, None) };
+    }
+
+    fn close_menu(&mut self) {
+        if self.menu.take().is_none() {
+            return;
+        }
+        unsafe {
+            let _ = KillTimer(Some(self.hwnd), TIMER_MENU_ANIMATION);
+        }
+        if let Some(bar) = &mut self.menubar {
+            bar.hide();
+            bar.set_panel(false);
+        }
+        if let Some(watch) = self.foreground_hook.take() {
+            hook::unwatch_foreground(watch);
+        }
+        hook::notify(DragEvent::MenuClosed);
+    }
+
+    /// Another window came forward (Alt+Tab, the Start menu, a click on a
+    /// window): the menu belongs to the desktop, so it closes.
+    fn on_foreground(&mut self, hwnd: HWND) {
+        if self.menu.is_some() && !hook::is_desktop(hwnd) {
+            self.close_menu();
+        }
+    }
+
+    fn on_menu_mouse(&mut self, event: MenuMouse) {
+        let (Some(menu), Some(bar)) = (&mut self.menu, &self.menubar) else {
+            return;
+        };
+        let panel_open = menu.row().is_some();
+        let hit = |x, y| menu_geometry::hit(bar.layout(), panel_open, x, y);
+        let action = match event {
+            MenuMouse::Move { x, y } => {
+                if menu.hover(hit(x, y)) {
+                    MenuAction::Redraw
+                } else {
+                    MenuAction::None
+                }
+            }
+            MenuMouse::Leave => {
+                if menu.hover(MenuHit::Outside) {
+                    MenuAction::Redraw
+                } else {
+                    MenuAction::None
+                }
+            }
+            MenuMouse::Click { x, y } => menu.click(hit(x, y)),
+            MenuMouse::Wheel { x, y, delta } => {
+                let dir = if delta > 0 { Dir::Forward } else { Dir::Back };
+                menu.scroll(hit(x, y), dir)
+            }
+        };
+        self.on_menu_action(action);
+    }
+
+    fn on_menu_action(&mut self, action: MenuAction) {
+        match action {
+            MenuAction::None => {}
+            MenuAction::Redraw => self.render_menu(),
+            MenuAction::Change(item, dir) => {
+                if let Some(new) = settings::step(&self.config, item, dir) {
+                    self.apply_config(new, item);
+                }
+                self.render_menu();
+            }
+            MenuAction::Notice(tile) => {
+                self.close_menu();
+                self.tray
+                    .notify(tile.label(), "다음 버전에서 지원 예정입니다");
+            }
+            MenuAction::Close => self.close_menu(),
+        }
+    }
+
+    /// Puts a settings change into effect right away, then saves it.
+    fn apply_config(&mut self, mut new: Config, item: SettingItem) {
+        let old = &self.config;
+        if (new.open_key, new.cycle_key, new.cancel_key)
+            != (old.open_key, old.cycle_key, old.cancel_key)
+        {
+            hook::set_keys(KeyBindings::from(&new));
+        }
+        if new.quality != old.quality
+            && let Some(runner) = &self.runner
+        {
+            runner.set_quality(new.quality.clone());
+        }
+        if new.start_with_windows != old.start_with_windows
+            && let Err(e) = autostart::set(new.start_with_windows)
+        {
+            log_error!("시작 프로그램 등록 실패: {e}");
+            self.tray
+                .warn("시작 프로그램 등록에 실패했습니다", &e.message());
+            new.start_with_windows = old.start_with_windows;
+        }
+        let progress_changed = new.progress != old.progress;
+        self.config = new;
+        if progress_changed {
+            self.update_busy();
+        }
+        if !self.config_writable {
+            return; // see CONFIG_NOTICE
+        }
+        match config_file::save(&self.config_dir, &self.config) {
+            Ok(()) => self.save_failed = None,
+            Err(e) => {
+                log_error!("설정 저장 실패: {e}");
+                if self.save_failed.is_none() {
+                    self.tray.warn("설정을 저장하지 못했습니다", &e.to_string());
+                }
+                self.save_failed = Some(item);
+            }
+        }
+    }
+
+    fn render_menu(&mut self) {
+        let (Some(menu), Some(bar)) = (&self.menu, &mut self.menubar) else {
+            return;
+        };
+        let panel_open = menu.row().is_some();
+        if panel_open != bar.panel_open() {
+            bar.set_panel(panel_open);
+            if panel_open {
+                self.menu_panel_at = Instant::now();
+                unsafe { SetTimer(Some(self.hwnd), TIMER_MENU_ANIMATION, 16, None) };
+            }
+        }
+        let rows = menubar::rows(&self.config, self.save_failed);
+        let view = MenuView {
+            selected: menu.tile(),
+            rows: panel_open.then_some(rows.as_slice()),
+            row: menu.row(),
+            hovered: menu.hovered(),
+            notice: (!self.config_writable).then_some(CONFIG_NOTICE),
+            progress: fraction(self.menu_opened_at, OPEN_ANIMATION),
+            panel_progress: fraction(self.menu_panel_at, PANEL_FADE),
+        };
+        bar.render(&view);
+    }
+
     fn open_wheel(&mut self) {
         let mut cursor = POINT::default();
         unsafe {
@@ -364,6 +590,7 @@ impl AppState {
     }
 
     fn open_wheel_at(&mut self, cursor: POINT) {
+        self.close_menu(); // the tracker already did; this hides the bar
         self.dragged.clear();
         self.wheel.place_at(cursor);
         let mut session = WheelSession::new();
@@ -607,6 +834,17 @@ impl AppState {
                 }
             }
             TIMER_PROGRESS => self.update_busy(),
+            TIMER_MENU_ANIMATION => {
+                self.render_menu();
+                if self.menu.is_none()
+                    || (self.menu_opened_at.elapsed() >= OPEN_ANIMATION
+                        && self.menu_panel_at.elapsed() >= PANEL_FADE)
+                {
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), TIMER_MENU_ANIMATION);
+                    }
+                }
+            }
             TIMER_PANEL => {
                 let now = self.now_ms();
                 if self.session.as_mut().is_some_and(|s| s.tick(now)) {
@@ -618,7 +856,13 @@ impl AppState {
             }
             TIMER_MAINTENANCE => {
                 self.wheel.release_if_idle(RENDERER_IDLE);
-                if !self.wheel.is_visible() && self.hooks_installed_at.elapsed() >= HOOK_REINSTALL {
+                if let Some(bar) = &mut self.menubar {
+                    bar.release_if_idle(RENDERER_IDLE);
+                }
+                if !self.wheel.is_visible()
+                    && self.menu.is_none()
+                    && self.hooks_installed_at.elapsed() >= HOOK_REINSTALL
+                {
                     match self.hooks.reinstall() {
                         Ok(()) => self.hooks_installed_at = Instant::now(),
                         Err(e) => log_error!("훅 재설치 실패: {e}"),
@@ -672,11 +916,11 @@ impl AppState {
     fn update_busy(&mut self) {
         let active = self.active_jobs > 0;
         let progress = self.runner.as_ref().and_then(Runner::progress);
-        let ring = progress.filter(|_| active && self.progress_display.tray_ring);
+        let ring = progress.filter(|_| active && self.config.progress.tray_ring);
         self.tray
             .set_busy(active, &busy_tooltip(self.active_jobs, progress), ring);
         let rows = match &self.runner {
-            Some(runner) if active && self.progress_display.window => runner.rows(),
+            Some(runner) if active && self.config.progress.window => runner.rows(),
             _ => Vec::new(),
         };
         self.progress_window.update(&rows);
@@ -723,13 +967,18 @@ fn selection_summary(paths: &[PathBuf]) -> String {
     selection_label(files, folders, bytes)
 }
 
-// Drop target callbacks (called on the UI thread by OLE).
+/// How far an animation that started at `start` and lasts `length` has run,
+/// 0.0 → 1.0.
+fn fraction(start: Instant, length: Duration) -> f32 {
+    (start.elapsed().as_secs_f32() / length.as_secs_f32()).min(1.0)
+}
 
 /// Mouse input on the desktop menu (from its window procedure).
 pub fn on_menu_mouse(event: MenuMouse) {
-    // The menu's input is wired up in a later step.
-    let _ = event;
+    with_state(|s| s.on_menu_mouse(event));
 }
+
+// Drop target callbacks (called on the UI thread by OLE).
 
 pub fn on_drag_enter(paths: Vec<PathBuf>, x: i32, y: i32) -> DROPEFFECT {
     with_state(|s| {

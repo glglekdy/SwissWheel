@@ -99,8 +99,8 @@ impl MenuBar {
         &self.layout
     }
 
-    pub fn is_visible(&self) -> bool {
-        self.visible
+    pub fn panel_open(&self) -> bool {
+        self.panel_open
     }
 
     /// Sizes and positions the (still hidden) window at the top center of

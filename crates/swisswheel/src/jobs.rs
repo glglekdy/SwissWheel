@@ -141,10 +141,6 @@ impl Runner {
 
     /// New quality settings from the settings panel. Files already being
     /// converted keep the values they started with.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "used once the menu is wired into the app")
-    )]
     pub fn set_quality(&self, quality: Quality) {
         *self
             .shared

@@ -1,5 +1,4 @@
 //! "Windows 시작 시 실행": the `SwissWheel` value under the user's Run key.
-#![expect(dead_code, reason = "used once the menu is wired into the app")]
 
 use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 use windows::Win32::System::Registry::{

@@ -7,11 +7,15 @@ use swisswheel_core::drag::{DragCommand, DragEvent, DragTracker, KeyBindings};
 use swisswheel_core::menu::MenuKey;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{PCWSTR, w};
 
 /// Posted to the host window; the parameters are `encode(DragCommand)`.
 pub const WM_APP_DRAG: u32 = WM_APP + 20;
+/// Posted to the host window while the desktop menu watches the foreground;
+/// `wParam` is the new foreground window.
+pub const WM_APP_FOREGROUND: u32 = WM_APP + 21;
 
 thread_local! {
     static TRACKER: RefCell<Option<DragTracker>> = const { RefCell::new(None) };
@@ -122,9 +126,51 @@ pub fn decode(wparam: WPARAM, lparam: LPARAM) -> Option<DragCommand> {
     })
 }
 
+/// Reports foreground window changes as `WM_APP_FOREGROUND` (the desktop
+/// menu closes when another window comes forward). Out of context, so the
+/// callback runs on this thread's message loop.
+pub fn watch_foreground() -> Option<HWINEVENTHOOK> {
+    let hook = unsafe {
+        SetWinEventHook(
+            EVENT_SYSTEM_FOREGROUND,
+            EVENT_SYSTEM_FOREGROUND,
+            None,
+            Some(foreground_proc),
+            0,
+            0,
+            WINEVENT_OUTOFCONTEXT,
+        )
+    };
+    (!hook.is_invalid()).then_some(hook)
+}
+
+pub fn unwatch_foreground(hook: HWINEVENTHOOK) {
+    unsafe {
+        let _ = UnhookWinEvent(hook);
+    }
+}
+
+unsafe extern "system" fn foreground_proc(
+    _hook: HWINEVENTHOOK,
+    _event: u32,
+    hwnd: HWND,
+    _object: i32,
+    _child: i32,
+    _thread: u32,
+    _time: u32,
+) {
+    unsafe {
+        let _ = PostMessageW(
+            Some(TARGET.get()),
+            WM_APP_FOREGROUND,
+            WPARAM(hwnd.0 as usize),
+            LPARAM(0),
+        );
+    }
+}
+
 /// Rebinds the wheel and menu keys (settings panel). UI thread only, like
 /// the hooks themselves.
-#[expect(dead_code, reason = "used once the menu is wired into the app")]
 pub fn set_keys(keys: KeyBindings) {
     with_tracker(|t| t.set_keys(keys));
 }

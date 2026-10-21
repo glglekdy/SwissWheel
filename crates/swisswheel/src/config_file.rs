@@ -44,10 +44,6 @@ pub fn load(dir: &Path) -> (Config, Option<String>) {
 /// Writes `config` into `dir/config.toml`, changing only the values that
 /// differ: comments, key order, and keys this version doesn't know survive.
 /// A file that isn't TOML is left alone (`InvalidData`).
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used once the menu is wired into the app")
-)]
 pub fn save(dir: &Path, config: &Config) -> std::io::Result<()> {
     let path = dir.join("config.toml");
     let text = match std::fs::read_to_string(&path) {
@@ -70,10 +66,6 @@ pub fn save(dir: &Path, config: &Config) -> std::io::Result<()> {
 
 /// Copies `src` into `dst` key by key, keeping each existing value's
 /// surrounding comments and whitespace.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used once the menu is wired into the app")
-)]
 fn merge(dst: &mut Table, src: &Table) {
     for (key, item) in src.iter() {
         if let Some(src_table) = as_table(item) {
@@ -100,10 +92,6 @@ fn merge(dst: &mut Table, src: &Table) {
 
 /// The serializer may write nested structs as inline tables; the file keeps
 /// them as `[section]` tables.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "used once the menu is wired into the app")
-)]
 fn as_table(item: &Item) -> Option<Table> {
     match item {
         Item::Table(t) => Some(t.clone()),
