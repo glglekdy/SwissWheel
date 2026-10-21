@@ -170,9 +170,12 @@ pub fn run() -> Result<()> {
         log_error!("설정 파일 오류: {w}");
         tray.warn("설정 파일 오류", &format!("{w}\n기본 설정으로 실행합니다"));
     }
-    // The Run entry follows the setting (e.g. after the exe moved).
-    if autostart::is_enabled() != config.start_with_windows
-        && let Err(e) = autostart::set(config.start_with_windows)
+    if let Some(enable) = autostart_fix(
+        autostart::is_enabled(),
+        &config,
+        warning.is_none(),
+        previewing,
+    ) && let Err(e) = autostart::set(enable)
     {
         log_error!("시작 프로그램 등록 실패: {e}");
     }
@@ -967,6 +970,20 @@ fn selection_summary(paths: &[PathBuf]) -> String {
     selection_label(files, folders, bytes)
 }
 
+/// What the Run entry should be set to at startup, if anything: the setting,
+/// when it differs from what is `registered` (e.g. the exe moved). Not when
+/// the config file was unreadable (its defaults aren't the user's choice) or
+/// for a debug preview (it would register the debug build).
+fn autostart_fix(
+    registered: bool,
+    config: &Config,
+    config_ok: bool,
+    previewing: bool,
+) -> Option<bool> {
+    (config_ok && !previewing && registered != config.start_with_windows)
+        .then_some(config.start_with_windows)
+}
+
 /// How far an animation that started at `start` and lasts `length` has run,
 /// 0.0 → 1.0.
 fn fraction(start: Instant, length: Duration) -> f32 {
@@ -1087,5 +1104,43 @@ fn show_menu(hwnd: HWND, pt: POINT) {
         let _ = TrackPopupMenu(menu, TPM_RIGHTBUTTON, pt.x, pt.y, None, hwnd, None);
         let _ = PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0));
         let _ = DestroyMenu(menu);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn autostart_follows_a_readable_config() {
+        let on = Config {
+            start_with_windows: true,
+            ..Config::default()
+        };
+        assert_eq!(autostart_fix(false, &on, true, false), Some(true));
+        assert_eq!(
+            autostart_fix(true, &Config::default(), true, false),
+            Some(false)
+        );
+        assert_eq!(autostart_fix(true, &on, true, false), None);
+    }
+
+    #[test]
+    fn broken_config_or_preview_leaves_autostart_alone() {
+        // Defaults stand in for a broken file: they must not unregister.
+        assert_eq!(autostart_fix(true, &Config::default(), false, false), None);
+        // A debug preview must not point the Run entry at itself.
+        assert_eq!(
+            autostart_fix(
+                false,
+                &Config {
+                    start_with_windows: true,
+                    ..Config::default()
+                },
+                true,
+                true
+            ),
+            None
+        );
     }
 }
