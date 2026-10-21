@@ -41,10 +41,12 @@ pub fn load(dir: &Path) -> (Config, Option<String>) {
     }
 }
 
-/// Writes `config` into `dir/config.toml`, changing only the values that
-/// differ: comments, key order, and keys this version doesn't know survive.
-/// A file that isn't TOML is left alone (`InvalidData`).
-pub fn save(dir: &Path, config: &Config) -> std::io::Result<()> {
+/// Writes the settings that changed from `before` to `after` into
+/// `dir/config.toml`. Everything else in the file stays as it is: comments,
+/// key order, keys this version doesn't know, edits the user made by hand
+/// while the app was running, and defaults left unwritten. A file that
+/// isn't TOML is left alone (`InvalidData`).
+pub fn save(dir: &Path, before: &Config, after: &Config) -> std::io::Result<()> {
     let path = dir.join("config.toml");
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
@@ -55,8 +57,9 @@ pub fn save(dir: &Path, config: &Config) -> std::io::Result<()> {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
     };
     let mut doc: DocumentMut = text.parse().map_err(|e| invalid(&e))?;
-    let new = toml_edit::ser::to_document(config).map_err(|e| invalid(&e))?;
-    merge(doc.as_table_mut(), new.as_table());
+    let old = toml_edit::ser::to_document(before).map_err(|e| invalid(&e))?;
+    let new = toml_edit::ser::to_document(after).map_err(|e| invalid(&e))?;
+    merge(doc.as_table_mut(), old.as_table(), new.as_table());
     std::fs::create_dir_all(dir)?;
     // Write beside it and swap, so a failed write never leaves half a file.
     let temp = dir.join("config.toml.tmp");
@@ -64,17 +67,29 @@ pub fn save(dir: &Path, config: &Config) -> std::io::Result<()> {
     std::fs::rename(&temp, &path)
 }
 
-/// Copies `src` into `dst` key by key, keeping each existing value's
-/// surrounding comments and whitespace.
-fn merge(dst: &mut Table, src: &Table) {
-    for (key, item) in src.iter() {
-        if let Some(src_table) = as_table(item) {
+/// Copies into `dst` the keys whose value differs between `old` and `new`,
+/// keeping each existing value's surrounding comments and whitespace.
+fn merge(dst: &mut Table, old: &Table, new: &Table) {
+    for (key, item) in new.iter() {
+        let before = old.get(key);
+        if let Some(new_table) = as_table(item) {
+            let old_table = before.and_then(as_table).unwrap_or_default();
             match dst.get_mut(key) {
-                Some(Item::Table(dst_table)) => merge(dst_table, &src_table),
+                Some(Item::Table(dst_table)) => merge(dst_table, &old_table, &new_table),
                 _ => {
-                    dst.insert(key, Item::Table(src_table));
+                    // A section the file doesn't have yet: only if it gets keys.
+                    let mut section = Table::new();
+                    merge(&mut section, &old_table, &new_table);
+                    if !section.is_empty() {
+                        dst.insert(key, Item::Table(section));
+                    }
                 }
             }
+            continue;
+        }
+        let changed = before.and_then(Item::as_value).map(Value::to_string)
+            != item.as_value().map(Value::to_string);
+        if !changed {
             continue;
         }
         match (dst.get_mut(key), item) {
@@ -145,10 +160,11 @@ mod tests {
             "# my keys\nopen_key = \"Space\" # hold me\nfuture = 1\n\n[quality]\n# sharp\njpg = 42\n",
         )
         .unwrap();
-        let mut c = load(dir.path()).0;
+        let before = load(dir.path()).0;
+        let mut c = before.clone();
         c.open_key = Key::CapsLock;
         c.quality.webp = 70;
-        save(dir.path(), &c).unwrap();
+        save(dir.path(), &before, &c).unwrap();
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(
             text.starts_with("# my keys\nopen_key = \"CapsLock\" # hold me\nfuture = 1\n"),
@@ -167,8 +183,25 @@ mod tests {
             start_with_windows: true,
             ..Config::default()
         };
-        save(&sub, &c).unwrap();
+        save(&sub, &Config::default(), &c).unwrap();
         assert_eq!(load(&sub).0, c);
+    }
+
+    #[test]
+    fn save_writes_only_what_changed() {
+        // The user set webp = 70 by hand while the app still has 85.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "open_key = \"Space\"\n\n[quality]\nwebp = 70\n").unwrap();
+        let before = Config::default();
+        let mut after = before.clone();
+        after.progress.tray_ring = false;
+        save(dir.path(), &before, &after).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("webp = 70"), "{text}");
+        assert!(text.contains("tray_ring = false"), "{text}");
+        assert!(!text.contains("jpg"), "defaults stay unwritten: {text}");
+        assert!(!text.contains("cycle_key"), "{text}");
     }
 
     #[test]
@@ -176,7 +209,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(&path, "this is not toml").unwrap();
-        let err = save(dir.path(), &Config::default()).unwrap_err();
+        let mut after = Config::default();
+        after.quality.jpg = 80;
+        let err = save(dir.path(), &Config::default(), &after).unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is not toml");
     }

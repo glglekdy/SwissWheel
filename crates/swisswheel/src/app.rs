@@ -537,14 +537,14 @@ impl AppState {
             new.start_with_windows = old.start_with_windows;
         }
         let progress_changed = new.progress != old.progress;
-        self.config = new;
+        let before = std::mem::replace(&mut self.config, new);
         if progress_changed {
             self.update_busy();
         }
         if !self.config_writable {
             return; // see CONFIG_NOTICE
         }
-        match config_file::save(&self.config_dir, &self.config) {
+        match config_file::save(&self.config_dir, &before, &self.config) {
             Ok(()) => self.save_failed = None,
             Err(e) => {
                 log_error!("설정 저장 실패: {e}");
