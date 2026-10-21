@@ -134,7 +134,7 @@
   - `capture(vk) -> MenuAction`: 대기 중이면 `Bind(현재 행 항목, vk)`. 허용 여부 판단과 결과 문구는 앱이 `settings::bind`로 한다. 거절이면 앱이 `rearm`해서 대기를 유지한다.
   - `cancel_capture()`: 타이머 만료용.
 - `menu_geometry.rs`: 탭 줄 상자 4개, 행 상자(단축키 행은 `keycap` 상자), 안내 줄 상자. `layout()`은 고정 3행으로 계산하고 `hit()`이 `Tab`·`KeyCap`을 돌려준다.
-- `drag.rs`: `capture: bool`. 메뉴가 열려 있고 `capture`이면 다음 키 누름(반복 아님) 하나를 어떤 키든 삼키고 `DragCommand::MenuCapture(vk)`를 보낸 뒤 `capture`를 끈다. 그 키는 `menu_press`로 표시돼 뗌도 삼켜진다. 메뉴가 닫히면 `capture`도 꺼진다. `set_capture(bool)` 추가.
+- `drag.rs`: `capture: bool`. 메뉴가 열려 있고 `capture`이면 키 누름(반복 아님)을 어떤 키든 삼키고 `DragCommand::MenuCapture(vk)`를 보낸다. `capture`는 앱이 끌 때까지(바인딩 성공, 취소, 시간 초과) 켜져 있어서, 거절된 키 뒤에 빨리 누른 다음 키도 새지 않는다. 그 키는 `menu_press`로 표시돼 뗌도 삼켜진다. 메뉴가 닫히면 `capture`도 꺼진다. `set_capture(bool)` 추가.
 
 ### 3.2 `swisswheel` (앱)
 

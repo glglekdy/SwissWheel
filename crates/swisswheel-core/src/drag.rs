@@ -103,7 +103,7 @@ pub struct DragTracker {
     menu: bool,
     /// Off when the menu window couldn't be created: the open key passes.
     menu_enabled: bool,
-    /// The settings panel waits for a key: the next press goes to it.
+    /// The settings panel waits for a key: presses go to it.
     capture: bool,
 }
 
@@ -137,8 +137,10 @@ impl DragTracker {
         self.menu_enabled = enabled;
     }
 
-    /// Hand the next key press, whatever it is, to the open menu as
-    /// `MenuCapture`. One-shot; closing the menu turns it off too.
+    /// Hand key presses, whatever they are, to the open menu as
+    /// `MenuCapture` until the app turns this off again (a key was bound,
+    /// the wait ended) or the menu closes. Staying on between a rejected key
+    /// and the app's next word keeps a quick second press off the desktop.
     pub fn set_capture(&mut self, on: bool) {
         self.capture = on;
     }
@@ -244,7 +246,6 @@ impl DragTracker {
             };
         }
         if self.menu && self.capture && !repeat {
-            self.capture = false;
             self.set_menu_press(vk, true);
             self.set_swallowed(vk, true);
             return Decision {
@@ -691,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn capture_swallows_any_key_once_and_its_release() {
+    fn capture_swallows_any_key_and_its_release() {
         let mut t = menu_open();
         t.set_capture(true);
         assert_eq!(
@@ -700,7 +701,23 @@ mod tests {
         );
         assert_eq!(t.on_event(DragEvent::KeyDown(0x41)), swallow_only()); // its repeat
         assert_eq!(t.on_event(DragEvent::KeyUp(0x41)), swallow_only());
-        assert_eq!(t.on_event(DragEvent::KeyDown(0x41)), pass()); // one-shot
+        t.set_capture(false);
+        assert_eq!(t.on_event(DragEvent::KeyDown(0x41)), pass());
+    }
+
+    #[test]
+    fn capture_stays_on_until_the_app_ends_it() {
+        // A rejected key, then a quick second press before the app re-arms:
+        // the second press must not reach the desktop either.
+        let mut t = menu_open();
+        t.set_capture(true);
+        t.on_event(DragEvent::KeyDown(0x41));
+        assert_eq!(
+            t.on_event(DragEvent::KeyDown(0x53)),
+            swallow(DragCommand::MenuCapture(0x53))
+        );
+        assert_eq!(t.on_event(DragEvent::KeyUp(0x41)), swallow_only());
+        assert_eq!(t.on_event(DragEvent::KeyUp(0x53)), swallow_only());
     }
 
     #[test]
