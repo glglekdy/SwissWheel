@@ -603,6 +603,7 @@ impl AppState {
         self.wheel.place_at(cursor);
         let mut session = WheelSession::new();
         session.set_panel_side(self.wheel.panel_side());
+        session.set_tools(self.config.tools.clone());
         self.session = Some(session);
         self.session_started = Instant::now();
         self.panel_item = None;
@@ -659,7 +660,7 @@ impl AppState {
         let panel = session.panel().map(|p| PanelView {
             title: p.set.title,
             choices: p.set.choices,
-            default: p.set.default,
+            default: p.default,
             hovered: p.hovered,
             side: self.wheel.panel_side(),
             progress: (self.panel_shown_at.elapsed().as_secs_f32() / PANEL_FADE.as_secs_f32())

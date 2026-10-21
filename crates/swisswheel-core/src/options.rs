@@ -2,6 +2,7 @@
 //! (spec 2.5). Dropping on the item itself means the set's default.
 
 use crate::catalog::{InputItem, Operation, Tool};
+use crate::config::Tools;
 use crate::format::{Format, MediaKind};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -50,6 +51,19 @@ pub struct OptionSet {
 impl OptionSet {
     pub fn default_preset(&self) -> Preset {
         self.choices[self.default].preset
+    }
+
+    /// The row a drop on the tile itself uses: the one `tools` names for the
+    /// shrink and video-compress sets, the fixed default for the rest.
+    pub fn default_index(&self, tools: &Tools) -> usize {
+        self.choices
+            .iter()
+            .position(|c| match c.preset {
+                Preset::Scale(p) => p == tools.shrink_percent,
+                Preset::Compress(s) => s == tools.compress_video,
+                _ => false,
+            })
+            .unwrap_or(self.default)
     }
 }
 
@@ -270,5 +284,19 @@ mod tests {
                 .default_preset(),
             Preset::Quality(Level::Normal)
         );
+    }
+
+    #[test]
+    fn tool_defaults_pick_the_default_row() {
+        let tools = Tools {
+            shrink_percent: 75,
+            compress_video: Strength::Light,
+        };
+        let shrink = options_for(&Operation::Tool(Tool::Shrink), &[image()]).unwrap();
+        assert_eq!(shrink.default_index(&tools), 2);
+        let compress = options_for(&Operation::Tool(Tool::CompressVideo), &[video()]).unwrap();
+        assert_eq!(compress.default_index(&tools), 0);
+        let gif = options_for(&Operation::Convert(Format::Gif), &[video()]).unwrap();
+        assert_eq!(gif.default_index(&tools), gif.default); // not a tool set
     }
 }

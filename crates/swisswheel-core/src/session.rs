@@ -2,6 +2,7 @@
 //! and which item's option panel is open beside it (spec 2.5).
 
 use crate::catalog::{InputItem, Operation, WheelKind, initial_wheel, items_for, next_wheel};
+use crate::config::Tools;
 use crate::geometry::{Hit, PanelHit, Side, hit_test, panel_hit};
 use crate::options::{OptionSet, Preset, options_for};
 
@@ -25,6 +26,8 @@ pub struct PanelState {
     pub item: usize,
     pub set: &'static OptionSet,
     pub hovered: Option<usize>,
+    /// The row a drop on the tile uses (marked "기본").
+    pub default: usize,
 }
 
 pub struct WheelSession {
@@ -38,6 +41,7 @@ pub struct WheelSession {
     panel: Option<usize>,
     /// An item waiting to open its panel: (index, since when in ms).
     pending: Option<(usize, u64)>,
+    tools: Tools,
 }
 
 impl Default for WheelSession {
@@ -56,7 +60,13 @@ impl WheelSession {
             side: Side::Right,
             panel: None,
             pending: None,
+            tools: Tools::default(),
         }
+    }
+
+    /// The tool defaults from the settings (shrink ratio, compress strength).
+    pub fn set_tools(&mut self, tools: Tools) {
+        self.tools = tools;
     }
 
     pub fn set_inputs(&mut self, inputs: Vec<InputItem>) {
@@ -131,9 +141,11 @@ impl WheelSession {
 
     pub fn panel(&self) -> Option<PanelState> {
         let item = self.panel?;
+        let set = self.options(item)?;
         Some(PanelState {
             item,
-            set: self.options(item)?,
+            set,
+            default: set.default_index(&self.tools),
             hovered: match self.hovered {
                 Hit::Choice(r) => Some(r),
                 _ => None,
@@ -145,7 +157,9 @@ impl WheelSession {
         match self.hit(dx, dy, scale) {
             Hit::Item(i) => Some(Selection {
                 op: *self.items.get(i)?,
-                preset: self.options(i).map(OptionSet::default_preset),
+                preset: self
+                    .options(i)
+                    .map(|set| set.choices[set.default_index(&self.tools)].preset),
             }),
             Hit::Choice(row) => {
                 let item = self.panel?;
@@ -331,6 +345,29 @@ mod tests {
         s.hover(x, y, 1.0, 4000);
         s.tick(5000);
         assert_eq!(s.panel().unwrap().set.title, "해상도");
+    }
+
+    #[test]
+    fn tile_drop_uses_configured_tool_default() {
+        use crate::catalog::Tool;
+        use crate::config::Tools;
+        use crate::options::Strength;
+        let mut s = WheelSession::new();
+        s.set_inputs(vec![video()]);
+        s.cycle(); // tools wheel
+        s.set_tools(Tools {
+            shrink_percent: 50,
+            compress_video: Strength::Strong,
+        });
+        let op = Operation::Tool(Tool::CompressVideo);
+        let i = s.items().iter().position(|o| *o == op).unwrap();
+        let (x, y) = at(i, s.items().len());
+        assert_eq!(
+            s.drop_at(x, y, 1.0),
+            sel(op, Some(Preset::Compress(Strength::Strong)))
+        );
+        open_panel(&mut s, i);
+        assert_eq!(s.panel().unwrap().default, 2);
     }
 
     #[test]
