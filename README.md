@@ -20,7 +20,7 @@ Quit from the tray icon's right-click menu. Settings live in `%APPDATA%\SwissWhe
 - Audio conversion between MP3, M4A, WAV, FLAC, OGG, and Opus (WMA and AIFF as input)
 - Video tools: compress (H.264), extract audio (copied when possible), mute
 - Options: some items take options (GIF frame rate and size, video resolution, compression strength, shrink ratio, JPG/WebP quality). Rest on such an item for a moment and a panel opens beside the wheel; drop on one of its rows, or on the item itself for the default.
-- The tray tooltip shows running jobs and their progress. Quitting cancels running video work and cleans up.
+- Progress: while jobs run, a small card above the tray lists each file with a progress bar, and a ring around the tray icon fills up. Either can be turned off in `config.toml` (`[progress] window`, `tray_ring`). Quitting cancels running video work and cleans up.
 
 Video and audio need FFmpeg: put `ffmpeg.exe` and `ffprobe.exe` in an `ffmpeg` folder next to `swisswheel.exe`, or have them on `PATH` (the installer will include them from the next version).
 

@@ -39,26 +39,26 @@ const HUB_INSET: f32 = 6.0;
 pub(super) const PANEL_CORNER: f32 = 10.0;
 const ROW_CORNER: f32 = 8.0;
 
-struct Palette {
+pub(crate) struct Palette {
     /// Glass: a light translucent tint over the blur. Solid: an opaque disc.
-    disc: D2D1_COLOR_F,
+    pub(crate) disc: D2D1_COLOR_F,
     /// 1 px highlight just inside the disc edge, faint line just outside it.
-    rim: D2D1_COLOR_F,
-    outline: D2D1_COLOR_F,
+    pub(crate) rim: D2D1_COLOR_F,
+    pub(crate) outline: D2D1_COLOR_F,
     /// Tiles shade from top to bottom and cast a 1 px drop shadow.
-    tile_top: D2D1_COLOR_F,
-    tile_bottom: D2D1_COLOR_F,
-    shadow: D2D1_COLOR_F,
-    hub: D2D1_COLOR_F,
-    hub_ring: D2D1_COLOR_F,
-    text: D2D1_COLOR_F,
-    subtext: D2D1_COLOR_F,
-    accent_top: D2D1_COLOR_F,
-    accent_bottom: D2D1_COLOR_F,
-    accent_text: D2D1_COLOR_F,
+    pub(crate) tile_top: D2D1_COLOR_F,
+    pub(crate) tile_bottom: D2D1_COLOR_F,
+    pub(crate) shadow: D2D1_COLOR_F,
+    pub(crate) hub: D2D1_COLOR_F,
+    pub(crate) hub_ring: D2D1_COLOR_F,
+    pub(crate) text: D2D1_COLOR_F,
+    pub(crate) subtext: D2D1_COLOR_F,
+    pub(crate) accent_top: D2D1_COLOR_F,
+    pub(crate) accent_bottom: D2D1_COLOR_F,
+    pub(crate) accent_text: D2D1_COLOR_F,
 }
 
-fn rgb(hex: u32, alpha: f32) -> D2D1_COLOR_F {
+pub(crate) fn rgb(hex: u32, alpha: f32) -> D2D1_COLOR_F {
     let c = |shift: u32| ((hex >> shift) & 0xFF) as f32 / 255.0;
     D2D1_COLOR_F {
         r: c(16),
@@ -69,7 +69,7 @@ fn rgb(hex: u32, alpha: f32) -> D2D1_COLOR_F {
 }
 
 /// `alpha` fades everything in during the open animation.
-fn palette(light: bool, glass: bool, alpha: f32) -> Palette {
+pub(crate) fn palette(light: bool, glass: bool, alpha: f32) -> Palette {
     let a = |v: f32| v * alpha;
     let accent_top = rgb(0xEA4A4E, alpha);
     let accent_bottom = rgb(0xD2343A, alpha);
@@ -135,12 +135,12 @@ fn personalize_flag(name: PCWSTR, default: bool) -> bool {
     if status.is_err() { default } else { value != 0 }
 }
 
-fn light_theme() -> bool {
+pub(crate) fn light_theme() -> bool {
     personalize_flag(w!("AppsUseLightTheme"), true)
 }
 
 /// Settings → Personalization → Colors → Transparency effects.
-fn transparency_enabled() -> bool {
+pub(crate) fn transparency_enabled() -> bool {
     personalize_flag(w!("EnableTransparency"), true)
 }
 
@@ -913,7 +913,7 @@ fn ellipse_at(cx: f32, cy: f32, r: f32) -> D2D1_ELLIPSE {
     }
 }
 
-fn create_d3d_device() -> Result<ID3D11Device> {
+pub(crate) fn create_d3d_device() -> Result<ID3D11Device> {
     let mut device = None;
     let mut attempt = |driver: D3D_DRIVER_TYPE| unsafe {
         D3D11CreateDevice(

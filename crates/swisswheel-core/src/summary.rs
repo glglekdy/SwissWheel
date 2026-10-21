@@ -29,6 +29,27 @@ pub fn job_summary(op: &Operation, succeeded: usize, failures: &[String]) -> (St
     (title, body)
 }
 
+/// One progress-window row: "긴영상.mp4 → WEBM", or "a.mp4 · 영상 압축" for tools.
+pub fn progress_title(file_name: &str, op: &Operation) -> String {
+    match op {
+        Operation::Convert(f) => format!("{file_name} → {}", f.label()),
+        other => format!("{file_name} · {}", other.label()),
+    }
+}
+
+/// The row's right side: a percentage, or "대기" for a file still queued.
+pub fn progress_value(fraction: Option<f32>) -> String {
+    match fraction {
+        Some(p) => format!("{}%", (p.clamp(0.0, 1.0) * 100.0).round()),
+        None => "대기".to_string(),
+    }
+}
+
+/// The last line when more files run than the window lists.
+pub fn more_files(hidden: usize) -> String {
+    format!("외 {hidden}개")
+}
+
 /// The tray tooltip: how many jobs run and, when known, how far along they are.
 pub fn busy_tooltip(active_jobs: usize, progress: Option<f32>) -> String {
     if active_jobs == 0 {
@@ -99,6 +120,22 @@ mod tests {
         assert_eq!(format_size(12 * 1024 * 1024), "12 MB");
         assert_eq!(format_size(1024 * 1024 - 1), "1.0 MB"); // 1023.999 KB must not print "1024 KB"
         assert_eq!(format_size(5 * 1024 * 1024 * 1024), "5.0 GB");
+    }
+
+    #[test]
+    fn progress_window_text() {
+        assert_eq!(
+            progress_title("긴영상.mp4", &Operation::Convert(Format::Webm)),
+            "긴영상.mp4 → WEBM"
+        );
+        assert_eq!(
+            progress_title("a.mp4", &Operation::Tool(Tool::CompressVideo)),
+            "a.mp4 · 영상 압축"
+        );
+        assert_eq!(progress_value(None), "대기");
+        assert_eq!(progress_value(Some(0.374)), "37%");
+        assert_eq!(progress_value(Some(1.2)), "100%");
+        assert_eq!(more_files(3), "외 3개");
     }
 
     #[test]

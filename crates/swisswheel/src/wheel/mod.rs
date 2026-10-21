@@ -1,7 +1,7 @@
 //! The wheel popup: window management and Direct2D rendering.
 
 mod glyph;
-mod render;
+pub(crate) mod render;
 mod window;
 
 use swisswheel_core::catalog::Operation;

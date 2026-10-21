@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use swisswheel_core::catalog::Operation;
+use swisswheel_core::config::ProgressDisplay;
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::session::{Selection, WheelSession};
@@ -40,6 +41,7 @@ use crate::dnd::DropTarget;
 use crate::hook::{self, Hooks, WM_APP_DRAG};
 use crate::jobs::{Job, JobReport, Runner};
 use crate::probe;
+use crate::progress::ProgressWindow;
 use crate::tray::{Tray, WM_APP_TRAY};
 use crate::wheel::{PanelView, WheelView, WheelWindow};
 
@@ -72,6 +74,9 @@ pub(crate) struct AppState {
     tray: Tray,
     hooks: Hooks,
     wheel: WheelWindow,
+    progress_window: ProgressWindow,
+    /// Where job progress shows (config `[progress]`).
+    progress_display: ProgressDisplay,
     _drop_target: IDropTarget,
     _dispatcher: DispatcherQueueController,
     runner: Option<Runner>,
@@ -140,6 +145,7 @@ pub fn run() -> Result<()> {
     }
     let hooks = hook::install(hwnd, KeyBindings::from(&config))?;
     let wheel = WheelWindow::new(hwnd)?;
+    let progress_window = ProgressWindow::new(hwnd)?;
     let drop_target: IDropTarget = DropTarget.into();
     unsafe { RegisterDragDrop(wheel.hwnd(), &drop_target)? };
 
@@ -182,6 +188,8 @@ pub fn run() -> Result<()> {
         tray,
         hooks,
         wheel,
+        progress_window,
+        progress_display: config.progress.clone(),
         _drop_target: drop_target,
         _dispatcher: dispatcher,
         runner: Some(runner),
@@ -198,6 +206,10 @@ pub fn run() -> Result<()> {
         hooks_installed_at: Instant::now(),
         taskbar_created,
     }));
+    #[cfg(debug_assertions)]
+    if let Ok(what) = std::env::var("SWISSWHEEL_PREVIEW") {
+        with_state(|s| s.preview(&what));
+    }
 
     let mut msg = MSG::default();
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.into() {
@@ -327,6 +339,10 @@ impl AppState {
         unsafe {
             let _ = GetCursorPos(&mut cursor);
         }
+        self.open_wheel_at(cursor);
+    }
+
+    fn open_wheel_at(&mut self, cursor: POINT) {
         self.dragged.clear();
         self.wheel.place_at(cursor);
         let mut session = WheelSession::new();
@@ -402,6 +418,85 @@ impl AppState {
             panel,
         };
         self.wheel.render(&view);
+    }
+
+    /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`, or
+    /// `progress` shows that UI at startup without a drag, so the drawing can
+    /// be checked by eye (the wheel otherwise needs a real Explorer drag).
+    #[cfg(debug_assertions)]
+    fn preview(&mut self, what: &str) {
+        use swisswheel_core::catalog::{InputItem, Operation};
+        use swisswheel_core::format::Format;
+        use swisswheel_core::geometry::{panel_rect, sector};
+        use swisswheel_core::session::PANEL_DWELL_MS;
+
+        let ago = |secs| Instant::now().checked_sub(Duration::from_secs(secs));
+        match what {
+            "panel" | "panel-left" => {
+                let (sw, sh) =
+                    unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) };
+                let x = if what == "panel" { sw / 2 } else { sw - 200 };
+                self.open_wheel_at(POINT { x, y: sh / 2 });
+                let scale = self.wheel.scale();
+                let Some(session) = &mut self.session else {
+                    return;
+                };
+                session.set_inputs(vec![InputItem::File {
+                    format: Some(Format::Mp4),
+                    animated_gif: false,
+                }]);
+                // Rest on GIF, then hover the first panel row.
+                let n = session.items().len();
+                let gif = session
+                    .items()
+                    .iter()
+                    .position(|op| *op == Operation::Convert(Format::Gif))
+                    .unwrap_or(0);
+                let s = sector(n, gif, scale);
+                let (r, deg) = (
+                    (s.inner_radius + s.outer_radius) / 2.0,
+                    ((s.start_deg + s.end_deg) / 2.0).to_radians(),
+                );
+                session.hover(r * deg.sin(), -r * deg.cos(), scale, 0);
+                session.tick(PANEL_DWELL_MS);
+                let rows = session.panel().map_or(0, |p| p.set.choices.len());
+                let rect = panel_rect(self.wheel.panel_side(), rows, scale);
+                let row_y = rect.top + (30.0 + 20.0) * scale;
+                session.hover((rect.left + rect.right) / 2.0, row_y, scale, 1000);
+                self.selection = "12 MB".into();
+                self.opened_at = ago(1).unwrap_or_else(Instant::now);
+                self.sync_panel();
+                self.panel_shown_at = ago(1).unwrap_or_else(Instant::now);
+                self.render();
+            }
+            "progress" => {
+                let row = |file: &str, op, fraction| crate::jobs::ProgressRow {
+                    file: file.into(),
+                    op,
+                    fraction,
+                };
+                let rows = [
+                    row("긴영상.mp4", Operation::Convert(Format::Webm), Some(0.37)),
+                    row(
+                        "여행 브이로그 2026 최종 편집본 진짜최종.mp4",
+                        Operation::Convert(Format::Mp4),
+                        Some(0.82),
+                    ),
+                    row("노래.flac", Operation::Convert(Format::Mp3), None),
+                    row("움짤.gif", Operation::Convert(Format::Mp4), None),
+                    row(
+                        "a.mp4",
+                        Operation::Tool(swisswheel_core::catalog::Tool::CompressVideo),
+                        None,
+                    ),
+                    row("b.mp4", Operation::Convert(Format::Mkv), None),
+                    row("c.mp4", Operation::Convert(Format::Mkv), None),
+                ];
+                self.progress_window.update(&rows);
+                self.tray.set_busy(true, "SwissWheel · preview", Some(0.4));
+            }
+            other => log_error!("SWISSWHEEL_PREVIEW: 알 수 없는 값 {other}"),
+        }
     }
 
     /// Milliseconds since the wheel opened: the session's clock for dwells.
@@ -522,11 +617,16 @@ impl AppState {
 
     /// Tray tooltip and icon; the progress timer runs only while jobs do.
     fn update_busy(&mut self) {
+        let active = self.active_jobs > 0;
         let progress = self.runner.as_ref().and_then(Runner::progress);
-        self.tray.set_busy(
-            self.active_jobs > 0,
-            &busy_tooltip(self.active_jobs, progress),
-        );
+        let ring = progress.filter(|_| active && self.progress_display.tray_ring);
+        self.tray
+            .set_busy(active, &busy_tooltip(self.active_jobs, progress), ring);
+        let rows = match &self.runner {
+            Some(runner) if active && self.progress_display.window => runner.rows(),
+            _ => Vec::new(),
+        };
+        self.progress_window.update(&rows);
         unsafe {
             if self.active_jobs > 0 {
                 SetTimer(Some(self.hwnd), TIMER_PROGRESS, PROGRESS_INTERVAL_MS, None);

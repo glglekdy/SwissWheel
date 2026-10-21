@@ -11,6 +11,7 @@ mod hook;
 mod icon;
 mod jobs;
 mod probe;
+mod progress;
 mod tray;
 mod wheel;
 

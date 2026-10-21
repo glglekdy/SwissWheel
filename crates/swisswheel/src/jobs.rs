@@ -54,9 +54,36 @@ struct JobState {
     op: Operation,
     preset: Option<Preset>,
     results: Mutex<Vec<Option<Result<PathBuf, String>>>>,
-    /// Per file, 0..=1.
-    progress: Mutex<Vec<f32>>,
+    /// Per file, for `Runner::progress` and `Runner::rows`.
+    files: Mutex<Vec<FileState>>,
+    names: Vec<String>,
     remaining: AtomicUsize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum FileState {
+    Waiting,
+    Running(f32),
+    Done,
+}
+
+impl FileState {
+    fn fraction(self) -> f32 {
+        match self {
+            FileState::Waiting => 0.0,
+            FileState::Running(p) => p,
+            FileState::Done => 1.0,
+        }
+    }
+}
+
+/// A file of a job that hasn't finished, for the progress window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProgressRow {
+    pub file: String,
+    pub op: Operation,
+    /// `None` while the file waits for a worker.
+    pub fraction: Option<f32>,
 }
 
 struct Work {
@@ -125,7 +152,8 @@ impl Runner {
             op: job.op,
             preset: job.preset,
             results: Mutex::new(vec![None; n]),
-            progress: Mutex::new(vec![0.0; n]),
+            files: Mutex::new(vec![FileState::Waiting; n]),
+            names: job.inputs.iter().map(|p| file_name(p)).collect(),
             remaining: AtomicUsize::new(n),
         });
         self.shared.active.lock().unwrap().push(Arc::clone(&state));
@@ -151,11 +179,33 @@ impl Runner {
         let active = self.shared.active.lock().unwrap();
         let (mut sum, mut count) = (0.0, 0usize);
         for job in active.iter() {
-            let progress = job.progress.lock().unwrap();
-            sum += progress.iter().sum::<f32>();
-            count += progress.len();
+            let files = job.files.lock().unwrap();
+            sum += files.iter().map(|f| f.fraction()).sum::<f32>();
+            count += files.len();
         }
         (count > 0).then(|| sum / count as f32)
+    }
+
+    /// Every unfinished file of the jobs not yet reported, in submission order.
+    pub fn rows(&self) -> Vec<ProgressRow> {
+        let active = self.shared.active.lock().unwrap();
+        let mut rows = Vec::new();
+        for job in active.iter() {
+            let files = job.files.lock().unwrap();
+            for (name, state) in job.names.iter().zip(files.iter()) {
+                let fraction = match *state {
+                    FileState::Waiting => None,
+                    FileState::Running(p) => Some(p),
+                    FileState::Done => continue,
+                };
+                rows.push(ProgressRow {
+                    file: name.clone(),
+                    op: job.op,
+                    fraction,
+                });
+            }
+        }
+        rows
     }
 
     /// Kills running FFmpeg work, skips queued files, then stops the workers.
@@ -178,10 +228,11 @@ fn worker(rx: &Mutex<Receiver<Work>>, shared: &Shared) {
         let result = if shared.cancel.load(Ordering::SeqCst) {
             Err(EngineError::Cancelled.user_message(&file_name(&work.input)))
         } else {
+            work.job.files.lock().unwrap()[work.index] = FileState::Running(0.0);
             process(&work, shared)
         };
         work.job.results.lock().unwrap()[work.index] = Some(result);
-        work.job.progress.lock().unwrap()[work.index] = 1.0;
+        work.job.files.lock().unwrap()[work.index] = FileState::Done;
         if work.job.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
             shared
                 .active
@@ -258,7 +309,8 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     let result = match &engine {
         Engine::Image => engines::image::run(op, preset, input, &temp, &shared.quality),
         Engine::Media(tools, plan) => {
-            let progress = |p: f32| work.job.progress.lock().unwrap()[work.index] = p;
+            let progress =
+                |p: f32| work.job.files.lock().unwrap()[work.index] = FileState::Running(p);
             ffmpeg::run(tools, plan, input, &temp, &progress, &shared.cancel)
         }
     };
@@ -474,6 +526,40 @@ mod tests {
         assert!(seen, "progress was never reported");
         assert!(report.failures.is_empty(), "{:?}", report.failures);
         assert_eq!(runner.progress(), None);
+        runner.shutdown();
+    }
+
+    #[test]
+    fn rows_list_running_and_waiting_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let clips: Vec<_> = ["a.mp4", "b.mp4", "c.mp4"]
+            .iter()
+            .map(|n| pattern(dir.path(), n, "320x240", 10))
+            .collect();
+        let (runner, rx) = runner();
+        assert!(runner.rows().is_empty());
+        runner.submit(job(Operation::Convert(Format::Webm), clips));
+        // Two media workers: two files run while the third waits.
+        let (mut saw_running, mut saw_waiting) = (false, false);
+        let report = loop {
+            for row in runner.rows() {
+                assert_eq!(row.op, Operation::Convert(Format::Webm));
+                assert!(["a.mp4", "b.mp4", "c.mp4"].contains(&row.file.as_str()));
+                match row.fraction {
+                    Some(p) => {
+                        assert!((0.0..=1.0).contains(&p));
+                        saw_running = true;
+                    }
+                    None => saw_waiting = true,
+                }
+            }
+            if let Ok(r) = rx.recv_timeout(Duration::from_millis(10)) {
+                break r;
+            }
+        };
+        assert!(report.failures.is_empty(), "{:?}", report.failures);
+        assert!(saw_running && saw_waiting);
+        assert!(runner.rows().is_empty());
         runner.shutdown();
     }
 

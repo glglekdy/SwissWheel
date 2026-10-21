@@ -42,6 +42,26 @@ impl Default for Quality {
     }
 }
 
+/// Where running jobs show their progress (spec 2.4). A settings window will
+/// edit these later; for now they live in `config.toml`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProgressDisplay {
+    /// The card above the tray, one row per file.
+    pub window: bool,
+    /// A ring around the tray icon that fills as jobs advance.
+    pub tray_ring: bool,
+}
+
+impl Default for ProgressDisplay {
+    fn default() -> Self {
+        ProgressDisplay {
+            window: true,
+            tray_ring: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -50,6 +70,7 @@ pub struct Config {
     pub cancel_key: Key,
     pub start_with_windows: bool,
     pub quality: Quality,
+    pub progress: ProgressDisplay,
 }
 
 impl Default for Config {
@@ -60,6 +81,7 @@ impl Default for Config {
             cancel_key: Key::Escape,
             start_with_windows: false,
             quality: Quality::default(),
+            progress: ProgressDisplay::default(),
         }
     }
 }
@@ -168,6 +190,27 @@ mod tests {
             parse("this is not toml"),
             Err(ConfigError::Parse(_))
         ));
+    }
+
+    #[test]
+    fn progress_display_settings() {
+        let c = Config::default();
+        assert!(c.progress.window && c.progress.tray_ring);
+        let c = parse(
+            "[progress]
+window = false
+",
+        )
+        .unwrap();
+        assert!(!c.progress.window && c.progress.tray_ring);
+        let c = parse(
+            "[progress]
+tray_ring = false
+",
+        )
+        .unwrap();
+        assert!(c.progress.window && !c.progress.tray_ring);
+        assert!(default_toml().contains("[progress]"));
     }
 
     #[test]

@@ -22,6 +22,9 @@ pub struct Tray {
     busy_icon: HICON,
     busy: bool,
     tooltip: String,
+    icon_size: i32,
+    /// The busy icon with a progress ring, at a 5% step (0..=20).
+    ring: Option<(u8, HICON)>,
 }
 
 impl Tray {
@@ -33,6 +36,8 @@ impl Tray {
             busy_icon: icon::make(true, size)?,
             busy: false,
             tooltip: "SwissWheel".into(),
+            icon_size: size,
+            ring: None,
         };
         tray.add();
         Ok(tray)
@@ -48,9 +53,25 @@ impl Tray {
         }
     }
 
-    pub fn set_busy(&mut self, busy: bool, tooltip: &str) {
+    /// `ring` is the overall progress to draw around the busy icon, or `None`
+    /// for the plain one. The icon is rebuilt only when it moves a 5% step.
+    pub fn set_busy(&mut self, busy: bool, tooltip: &str, ring: Option<f32>) {
         self.busy = busy;
         self.tooltip = tooltip.to_string();
+        let step = ring.map(|p| (p.clamp(0.0, 1.0) * 20.0).round() as u8);
+        if step != self.ring.map(|(s, _)| s) {
+            if let Some((_, old)) = self.ring.take() {
+                unsafe {
+                    let _ = DestroyIcon(old);
+                }
+            }
+            if let Some(step) = step {
+                match icon::make_progress(f32::from(step) / 20.0, self.icon_size) {
+                    Ok(hicon) => self.ring = Some((step, hicon)),
+                    Err(e) => log_error!("진행 아이콘을 만들 수 없습니다: {e}"),
+                }
+            }
+        }
         unsafe {
             let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data());
         }
@@ -82,7 +103,11 @@ impl Tray {
             uID: ICON_ID,
             uFlags: NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP,
             uCallbackMessage: WM_APP_TRAY,
-            hIcon: if self.busy { self.busy_icon } else { self.idle },
+            hIcon: match (self.busy, self.ring) {
+                (false, _) => self.idle,
+                (true, Some((_, ring))) => ring,
+                (true, None) => self.busy_icon,
+            },
             ..Default::default()
         };
         copy_wide(&mut data.szTip, &self.tooltip);
@@ -96,6 +121,9 @@ impl Drop for Tray {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.data());
             let _ = DestroyIcon(self.idle);
             let _ = DestroyIcon(self.busy_icon);
+            if let Some((_, ring)) = self.ring {
+                let _ = DestroyIcon(ring);
+            }
         }
     }
 }
