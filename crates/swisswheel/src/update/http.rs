@@ -190,7 +190,9 @@ mod tests {
     use super::*;
     use crate::update::test_server::{Reply, TestServer};
 
-    fn fetch(url: &str, limit: usize) -> (Result<Vec<u8>, HttpError>, Vec<(u64, Option<u64>)>) {
+    type Seen = Vec<(u64, Option<u64>)>;
+
+    fn fetch(url: &str, limit: usize) -> (Result<Vec<u8>, HttpError>, Seen) {
         let mut seen = Vec::new();
         let result = get(url, limit, &mut |got, total| seen.push((got, total)));
         (result, seen)
