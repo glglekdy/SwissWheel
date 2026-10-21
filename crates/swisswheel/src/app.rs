@@ -40,6 +40,7 @@ use crate::config_file;
 use crate::dnd::DropTarget;
 use crate::hook::{self, Hooks, WM_APP_DRAG};
 use crate::jobs::{Job, JobReport, Runner};
+use crate::menubar::{MenuBar, MenuMouse};
 use crate::probe;
 use crate::progress::ProgressWindow;
 use crate::tray::{Tray, WM_APP_TRAY};
@@ -61,6 +62,9 @@ const PANEL_TICK_MS: u32 = 50;
 /// How often the tray tooltip refreshes the progress of running jobs.
 const PROGRESS_INTERVAL_MS: u32 = 500;
 
+/// Shown at the top of the settings panel when config.toml couldn't be read.
+const CONFIG_NOTICE: &str = "설정 파일에 오류가 있어 저장하지 않습니다";
+
 const ENTER_TIMEOUT: Duration = Duration::from_millis(300);
 const MOUSE_UP_CLOSE_DELAY: Duration = Duration::from_millis(200);
 const OPEN_ANIMATION: Duration = Duration::from_millis(150);
@@ -74,6 +78,8 @@ pub(crate) struct AppState {
     tray: Tray,
     hooks: Hooks,
     wheel: WheelWindow,
+    /// The desktop menu's popup; `None` if it couldn't be created.
+    menubar: Option<MenuBar>,
     progress_window: ProgressWindow,
     /// Where job progress shows (config `[progress]`).
     progress_display: ProgressDisplay,
@@ -112,7 +118,9 @@ fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
 
 pub fn run() -> Result<()> {
     let _instance = unsafe { CreateMutexW(None, true, w!("Local\\SwissWheel.SingleInstance"))? };
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+    // A debug preview may run beside an installed copy: it only draws.
+    let previewing = cfg!(debug_assertions) && std::env::var_os("SWISSWHEEL_PREVIEW").is_some();
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS && !previewing {
         return Ok(()); // already running: the existing tray icon stays
     }
     unsafe {
@@ -145,6 +153,13 @@ pub fn run() -> Result<()> {
     }
     let hooks = hook::install(hwnd, KeyBindings::from(&config))?;
     let wheel = WheelWindow::new(hwnd)?;
+    // Without its window the desktop menu stays off; Space then passes through.
+    let menubar = MenuBar::new(hwnd)
+        .inspect_err(|e| {
+            log_error!("메뉴 창을 만들 수 없습니다: {e}");
+            hook::set_menu_enabled(false);
+        })
+        .ok();
     let progress_window = ProgressWindow::new(hwnd)?;
     let drop_target: IDropTarget = DropTarget.into();
     unsafe { RegisterDragDrop(wheel.hwnd(), &drop_target)? };
@@ -188,6 +203,7 @@ pub fn run() -> Result<()> {
         tray,
         hooks,
         wheel,
+        menubar,
         progress_window,
         progress_display: config.progress.clone(),
         _drop_target: drop_target,
@@ -425,9 +441,9 @@ impl AppState {
         self.wheel.render(&view);
     }
 
-    /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`, or
-    /// `progress` shows that UI at startup without a drag, so the drawing can
-    /// be checked by eye (the wheel otherwise needs a real Explorer drag).
+    /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`,
+    /// `progress`, `menu`, or `menu-settings` shows that UI at startup without
+    /// a drag or key press, so the drawing can be checked by eye.
     #[cfg(debug_assertions)]
     fn preview(&mut self, what: &str) {
         use swisswheel_core::catalog::{InputItem, Operation};
@@ -499,6 +515,38 @@ impl AppState {
                 ];
                 self.progress_window.update(&rows);
                 self.tray.set_busy(true, "SwissWheel · preview", Some(0.4));
+            }
+            "menu" | "menu-settings" => {
+                let Some(bar) = &mut self.menubar else {
+                    return;
+                };
+                let settings = what == "menu-settings";
+                let mut cursor = POINT::default();
+                unsafe {
+                    let _ = GetCursorPos(&mut cursor);
+                }
+                bar.place(cursor, settings);
+                bar.set_panel(settings);
+                let config = swisswheel_core::config::Config::default();
+                let rows = crate::menubar::rows(
+                    &config,
+                    settings.then_some(swisswheel_core::settings::SettingItem::WebpQuality),
+                );
+                let view = crate::menubar::MenuView {
+                    selected: if settings { 0 } else { 1 },
+                    rows: settings.then_some(rows.as_slice()),
+                    row: settings.then_some(3),
+                    hovered: if settings {
+                        swisswheel_core::menu::MenuHit::Row(6)
+                    } else {
+                        swisswheel_core::menu::MenuHit::Tile(2)
+                    },
+                    notice: settings.then_some(CONFIG_NOTICE),
+                    progress: 1.0,
+                    panel_progress: 1.0,
+                };
+                bar.show();
+                bar.render(&view);
             }
             other => log_error!("SWISSWHEEL_PREVIEW: 알 수 없는 값 {other}"),
         }
@@ -676,6 +724,12 @@ fn selection_summary(paths: &[PathBuf]) -> String {
 }
 
 // Drop target callbacks (called on the UI thread by OLE).
+
+/// Mouse input on the desktop menu (from its window procedure).
+pub fn on_menu_mouse(event: MenuMouse) {
+    // The menu's input is wired up in a later step.
+    let _ = event;
+}
 
 pub fn on_drag_enter(paths: Vec<PathBuf>, x: i32, y: i32) -> DROPEFFECT {
     with_state(|s| {

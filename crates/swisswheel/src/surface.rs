@@ -15,7 +15,7 @@ use windows::Win32::System::WinRT::Composition::{ICompositorDesktopInterop, ICom
 use windows::core::{HSTRING, Interface, PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
-use crate::wheel::render::create_d3d_device;
+use crate::wheel::render::{create_d3d_device, icon_font};
 
 pub struct Surface {
     _device: ID3D11Device,
@@ -27,6 +27,8 @@ pub struct Surface {
     glass: Vec<(SpriteVisual, CompositionRoundedRectangleGeometry)>,
     _content: SpriteVisual,
     dwrite: IDWriteFactory,
+    /// Family of the system icon font (see `wheel::glyph`).
+    icon_font: PCWSTR,
     size: (u32, u32),
 }
 
@@ -103,7 +105,9 @@ impl Surface {
                 .CreateCompositionSurfaceForSwapChain(&swap)?;
             content.SetBrush(&compositor.CreateSurfaceBrushWithSurface(&surface)?)?;
             children.InsertAtTop(&content)?;
+            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             Ok(Surface {
+                icon_font: icon_font(&dwrite),
                 _device: device,
                 ctx,
                 swap,
@@ -111,7 +115,7 @@ impl Surface {
                 _target: target,
                 glass,
                 _content: content,
-                dwrite: DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?,
+                dwrite,
                 size: (width, height),
             })
         }
@@ -146,6 +150,10 @@ impl Surface {
 
     pub fn ctx(&self) -> &ID2D1DeviceContext {
         &self.ctx
+    }
+
+    pub fn icon_font(&self) -> PCWSTR {
+        self.icon_font
     }
 
     pub fn present(&self) -> Result<()> {

@@ -11,6 +11,7 @@ mod fsutil;
 mod hook;
 mod icon;
 mod jobs;
+mod menubar;
 mod probe;
 mod progress;
 mod surface;

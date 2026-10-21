@@ -848,7 +848,7 @@ impl Tile {
 
 /// Segoe Fluent Icons ships with Windows 11; Windows 10 has the older Segoe
 /// MDL2 Assets, which has the same code points for the icons we use.
-fn icon_font(dwrite: &IDWriteFactory) -> PCWSTR {
+pub(crate) fn icon_font(dwrite: &IDWriteFactory) -> PCWSTR {
     let fluent = w!("Segoe Fluent Icons");
     let mut fonts = None;
     let (mut index, mut exists) = (0, BOOL::default());

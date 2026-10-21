@@ -130,12 +130,10 @@ pub fn set_keys(keys: KeyBindings) {
 }
 
 /// Turns the desktop menu off when its window can't be created.
-#[expect(dead_code, reason = "used once the menu is wired into the app")]
 pub fn set_menu_enabled(enabled: bool) {
     with_tracker(|t| t.set_menu_enabled(enabled));
 }
 
-#[expect(dead_code, reason = "used once the menu is wired into the app")]
 fn with_tracker(f: impl FnOnce(&mut DragTracker)) {
     TRACKER.with(|t| {
         if let Ok(mut t) = t.try_borrow_mut()
