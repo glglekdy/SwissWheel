@@ -62,6 +62,9 @@ pub enum DragCommand {
     },
     /// A drag started while the menu was open; the tracker already closed it.
     CloseMenu,
+    /// The key pressed while the settings panel waited for one (a
+    /// virtual-key code, any key).
+    MenuCapture(u16),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -100,6 +103,8 @@ pub struct DragTracker {
     menu: bool,
     /// Off when the menu window couldn't be created: the open key passes.
     menu_enabled: bool,
+    /// The settings panel waits for a key: the next press goes to it.
+    capture: bool,
 }
 
 impl DragTracker {
@@ -115,6 +120,7 @@ impl DragTracker {
             menu_press: [false; 256],
             menu: false,
             menu_enabled: true,
+            capture: false,
         }
     }
 
@@ -129,6 +135,12 @@ impl DragTracker {
 
     pub fn set_menu_enabled(&mut self, enabled: bool) {
         self.menu_enabled = enabled;
+    }
+
+    /// Hand the next key press, whatever it is, to the open menu as
+    /// `MenuCapture`. One-shot; closing the menu turns it off too.
+    pub fn set_capture(&mut self, on: bool) {
+        self.capture = on;
     }
 
     pub fn wheel_open(&self) -> bool {
@@ -155,6 +167,7 @@ impl DragTracker {
                     self.button = Button::Dragging;
                     if self.menu {
                         self.menu = false;
+                        self.capture = false;
                         return Decision {
                             swallow: false,
                             command: Some(DragCommand::CloseMenu),
@@ -191,6 +204,7 @@ impl DragTracker {
             }
             DragEvent::MenuClosed => {
                 self.menu = false;
+                self.capture = false;
                 pass
             }
             DragEvent::KeyDown(vk) => self.on_key_down(vk, false),
@@ -227,6 +241,15 @@ impl DragTracker {
             return Decision {
                 swallow: true,
                 command,
+            };
+        }
+        if self.menu && self.capture && !repeat {
+            self.capture = false;
+            self.set_menu_press(vk, true);
+            self.set_swallowed(vk, true);
+            return Decision {
+                swallow: true,
+                command: Some(DragCommand::MenuCapture(vk)),
             };
         }
         if repeat && self.menu && !self.is_swallowed(vk) {
@@ -665,5 +688,61 @@ mod tests {
             t.on_event(DragEvent::KeyDown(LEFT)).command,
             Some(DragCommand::MenuKey(MenuKey::Left))
         );
+    }
+
+    #[test]
+    fn capture_swallows_any_key_once_and_its_release() {
+        let mut t = menu_open();
+        t.set_capture(true);
+        assert_eq!(
+            t.on_event(DragEvent::KeyDown(0x41)),
+            swallow(DragCommand::MenuCapture(0x41))
+        );
+        assert_eq!(t.on_event(DragEvent::KeyDown(0x41)), swallow_only()); // its repeat
+        assert_eq!(t.on_event(DragEvent::KeyUp(0x41)), swallow_only());
+        assert_eq!(t.on_event(DragEvent::KeyDown(0x41)), pass()); // one-shot
+    }
+
+    #[test]
+    fn capture_takes_the_open_key_and_modifiers() {
+        let mut t = menu_open();
+        t.set_capture(true);
+        assert_eq!(
+            t.on_event(DragEvent::DesktopKeyDown(SPACE)),
+            swallow(DragCommand::MenuCapture(SPACE))
+        );
+        assert!(t.menu_open());
+        t.on_event(DragEvent::KeyUp(SPACE));
+        t.set_capture(true);
+        assert_eq!(
+            t.on_event(DragEvent::KeyDown(0xA0)),
+            swallow(DragCommand::MenuCapture(0xA0))
+        );
+    }
+
+    #[test]
+    fn capture_ignores_repeats_of_held_keys() {
+        let mut t = menu_open();
+        t.on_event(DragEvent::KeyDown(0x27)); // → taken by the menu
+        t.set_capture(true);
+        assert_eq!(
+            t.on_event(DragEvent::KeyDown(0x27)).command,
+            Some(DragCommand::MenuKey(MenuKey::Right))
+        );
+        assert_eq!(
+            t.on_event(DragEvent::KeyDown(0x74)),
+            swallow(DragCommand::MenuCapture(0x74))
+        );
+    }
+
+    #[test]
+    fn closing_the_menu_ends_capture() {
+        let mut t = menu_open();
+        t.set_capture(true);
+        t.on_event(DragEvent::MenuClosed);
+        t.on_event(DragEvent::DesktopKeyDown(SPACE)); // reopen
+        t.on_event(DragEvent::KeyUp(SPACE));
+        assert!(t.menu_open());
+        assert_eq!(t.on_event(DragEvent::KeyDown(0x41)), pass());
     }
 }
