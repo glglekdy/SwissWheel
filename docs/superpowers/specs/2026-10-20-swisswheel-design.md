@@ -27,6 +27,7 @@
 | Esc | 휠 열림 | 휠만 닫음. 드래그는 계속됨 (탐색기로 전달하지 않음) |
 | 드롭 | 휠의 항목 위 | 해당 작업 실행, 휠 닫힘 |
 | 드롭 | 휠 중앙(취소 영역) 또는 휠 밖 | 아무 작업 없음 / 휠 밖이면 원래 대상에 정상 드롭 |
+| 커서 올림 | 옵션이 있는 칸 (2.5) | 휠 옆에 그 칸의 옵션 패널 표시. 패널의 줄에 드롭하면 그 설정, 칸에 바로 드롭하면 기본값 |
 
 - 휠이 열려 있는 동안에만 Space·Tab·Esc를 가로챈다. 그 외에는 키 입력을 일절 건드리지 않는다.
 - 키 바인딩은 `config.toml`에서 변경 가능 (`open_key`, `cycle_key`, `cancel_key`).
@@ -41,7 +42,7 @@
 - 화면 가장자리에서는 휠이 화면 안에 들어오도록 위치를 보정한다 (멀티 모니터: 커서가 있는 모니터 기준).
 
 ### 2.3 출력 규칙
-- 결과는 원본과 같은 폴더, 이름은 `원본이름.새확장자`. 도구는 `원본이름 (compressed).확장자`처럼 접미사를 붙인다.
+- 결과는 원본과 같은 폴더, 이름은 `원본이름.새확장자`. 도구는 `원본이름 (compressed).확장자`처럼 접미사를 붙인다. 이미지 축소는 비율(`사진 (25%).png`), 해상도를 고른 영상 변환은 해상도(`영상 (720p).mp4`)를 접미사로 붙인다.
 - 이름이 이미 있으면 `이름 (1).ext`, `이름 (2).ext` … 로 회피. **덮어쓰기 금지.**
 - 원본 폴더에 쓰기 권한이 없으면 실패로 처리하고 알림으로 알린다 (다른 위치로 몰래 저장하지 않음).
 - 작업 중 생성된 임시 파일은 같은 폴더에 `.swisswheel-tmp` 접미사로 쓰고 성공 시 rename, 실패 시 삭제.
@@ -50,6 +51,21 @@
 - 작업 시작: 트레이 아이콘이 "작업 중" 상태 아이콘으로 바뀜 (툴팁에 진행 중 개수/퍼센트).
 - 완료: 풍선 알림 "3개 파일을 PNG로 변환했습니다". 알림 클릭 시 결과 폴더를 열고 결과 파일 선택.
 - 실패: 풍선 알림에 실패 개수와 첫 번째 오류 요약. 상세 로그는 `%LOCALAPPDATA%\SwissWheel\logs\`.
+
+### 2.5 옵션 패널
+드래그 중에는 클릭할 수 없으므로 옵션은 **드롭할 수 있는 줄**로 고른다.
+- 옵션이 있는 칸에 커서가 올라가면 휠 옆(오른쪽, 작업 영역에 자리가 없으면 왼쪽)에 그 칸의 패널을 붙여 표시한다. 패널은 휠 가장자리에 겹쳐 붙어 있어 휠 → 패널 이동 중 창 밖으로 나가지 않는다.
+- 패널은 **옵션이 있는 칸에 마지막으로 올렸던 칸**의 것을 유지한다: 옵션이 없는 칸을 지나가도 닫히지 않고, 옵션이 있는 다른 칸에 올리면 그 칸의 패널로 바뀌며, 취소 영역·휠 전환(Tab)·휠 닫힘에서 닫힌다.
+- 패널: 휠과 같은 유리 스타일, 맨 위에 제목("GIF 옵션"), 줄마다 이름 + 작은 설명, 기본값 줄에 "기본" 표시. 커서가 올라간 줄은 휠 칸과 같은 강조색.
+- 패널이 닫혀 있으면 패널 자리는 히트 테스트되지 않는다(그 아래 창에 정상 드롭).
+
+| 칸 | 선택지 (굵게 = 기본) |
+|---|---|
+| GIF (영상 → GIF) | 작게 10fps·320px / **보통 15fps·480px** / 부드럽게 24fps·원본 크기 |
+| MP4·MKV·WEBM·MOV·AVI (영상 → 영상) | **원본** / 1080p / 720p / 480p — 높이 기준, 원본보다 작을 때만 줄임(확대 안 함). 원본이 아니면 스트림 복사 없이 인코딩 |
+| 영상 압축 | 약하게 CRF 24·오디오 160kbps / **보통 CRF 28·128kbps** / 강하게 CRF 32·96kbps·720p 이하로 축소 |
+| 이미지 축소 | 25% / **50%** / 75% |
+| JPG·WEBP (이미지 → 이미지) | 높게 JPG 95·WEBP 92 / **보통 (설정의 `quality.jpg`·`quality.webp`)** / 작게 JPG 75·WEBP 70 |
 
 ## 3. 기능 목록 (v0.1)
 
@@ -66,12 +82,26 @@
 - ICO 출력은 256/128/64/48/32/16 크기를 포함하는 멀티 사이즈 아이콘으로 만든다.
 - 품질 기본값: JPG 90, WebP 손실 85, MP3 192kbps, 영상 H.264 CRF 23 / VP9 CRF 32.
 
+### 3.1.1 FFmpeg 인코딩 규칙
+| 출력 | 인자 |
+|---|---|
+| MP4, MOV, MKV | `-c:v libx264 -preset medium -crf 23 -pix_fmt yuv420p`, 짝수 크기 보정 `scale=trunc(iw/2)*2:trunc(ih/2)*2`, `-c:a aac -b:a 192k`, MP4·MOV는 `-movflags +faststart` |
+| WEBM | `-c:v libvpx-vp9 -crf 32 -b:v 0 -deadline good -cpu-used 4 -row-mt 1 -c:a libopus -b:a 128k` |
+| AVI | `-c:v mpeg4 -q:v 4 -c:a libmp3lame -b:a <mp3_kbps>k` |
+| GIF | `fps=<fps>,scale='min(<폭>,iw)':-2:flags=lanczos` + palettegen/paletteuse, `-loop 0` |
+| MP3 / M4A / WAV / FLAC / OGG / OPUS | `libmp3lame <mp3_kbps>k` / `aac 192k` / `pcm_s16le` / `flac` / `libvorbis -q:a 6` / `libopus 128k` |
+
+- 스트림 복사를 먼저 시도한다(해상도 옵션이 원본일 때만): MKV는 항상, MP4·MOV는 영상 ∈ {h264, hevc}·오디오 ∈ {없음, aac, mp3}, WEBM은 영상 ∈ {vp8, vp9, av1}·오디오 ∈ {없음, opus, vorbis}. AVI와 애니메이션 GIF 입력은 복사하지 않는다. 복사가 실패하면 인코딩으로 다시 한다.
+- 임시 출력 이름이 `.swisswheel-tmp`로 끝나므로 먹서는 항상 `-f`로 명시한다 (MP4 `mp4`, MKV `matroska`, WEBM `webm`, MOV `mov`, AVI `avi`, GIF `gif`, MP3 `mp3`, M4A `ipod`, WAV `wav`, FLAC `flac`, OGG `ogg`, OPUS `opus`).
+- 오디오 추출: aac→M4A, mp3→MP3, opus→OPUS, vorbis→OGG, flac→FLAC, pcm_s16le→WAV는 스트림 복사, 그 밖은 MP3 인코딩. 오디오가 없으면 "오디오 트랙이 없습니다".
+- 음소거: 입력 포맷 유지(먹서가 없는 WMV는 MP4), 영상 스트림 복사 먼저.
+
 ### 3.2 도구
 | 도구 | 대상 | 동작 |
 |---|---|---|
-| 이미지 50% 축소 | 이미지 | 가로·세로 절반, Lanczos3 |
+| 이미지 축소 | 이미지 | 가로·세로 25/50/75% (기본 50%, 2.5), Lanczos3 |
 | 이미지 압축 | JPG, PNG, WebP | JPG 품질 75 / PNG 무손실 최적화(`oxipng`) / WebP 품질 70 |
-| 영상 압축 | 영상 | H.264 CRF 28, 오디오 128kbps, 컨테이너 유지(불가 시 MP4) |
+| 영상 압축 | 영상 | H.264, 강도별 CRF·오디오 (기본 CRF 28·128kbps, 2.5), 컨테이너 유지(MP4·MKV·MOV, 그 밖은 MP4) |
 | 오디오 추출 | 영상 | 오디오 스트림 복사 가능하면 복사(M4A/OGG 등), 아니면 MP3 |
 | 음소거 | 영상 | 오디오 스트림 제거, 영상 스트림 복사 |
 
@@ -131,12 +161,13 @@ Cargo 워크스페이스 하나에 두 크레이트:
 
 ### 4.3 휠 렌더링
 - DirectComposition 비주얼 + Direct2D 디바이스 컨텍스트로 픽셀 단위 알파를 그린다. 휠이 닫혀 있을 때는 창을 숨기고 D2D 리소스는 유지(재생성 비용 회피)하되, 10분간 사용이 없으면 해제해 대기 메모리를 줄인다.
-- 텍스트는 DirectWrite (Segoe UI Variable, 없으면 Segoe UI). 아이콘은 실행 파일에 넣은 작은 SVG/PNG 리소스 대신 v0.1은 포맷 이름 텍스트 + 그룹 색상으로 표시한다.
+- 텍스트는 DirectWrite (Segoe UI Variable, 없으면 Segoe UI). 칸은 시스템 아이콘 글꼴(Segoe Fluent Icons, Windows 10은 Segoe MDL2 Assets)의 아이콘 아래에 작은 이름을 쓴다 — 이미지 리소스를 넣지 않는다.
 - Per-Monitor DPI Aware v2.
+- 옵션 패널(2.5)은 별도 창이 아니라 휠 창을 패널 자리까지 넓혀 같은 표면에 그린다. 드롭 타깃이 하나라 휠 ↔ 패널 이동에 DragLeave/DragEnter가 생기지 않는다. 창 영역(`SetWindowRgn`)은 패널이 닫혀 있으면 원, 열려 있으면 원 ∪ 패널 사각형.
 
 ### 4.4 작업 실행
 - 동시성: 이미지 작업은 `min(코어 수, 4)`개, FFmpeg 작업은 2개 동시 실행. 나머지는 대기열.
-- FFmpeg: 앱 폴더의 `ffmpeg\ffmpeg.exe`를 `-hide_banner -nostdin -progress pipe:1` 로 실행, `ffprobe`로 길이를 얻어 진행률 계산. 프로세스는 Job Object에 묶어 앱 종료 시 함께 종료.
+- FFmpeg: 앱 폴더의 `ffmpeg\ffmpeg.exe`(없으면 `PATH`의 ffmpeg/ffprobe)를 `-hide_banner -nostdin -progress pipe:1` 로 실행, `ffprobe`로 길이를 얻어 진행률 계산. 프로세스는 Job Object에 묶어 앱 종료 시 함께 종료. 앱을 종료하면 실행 중인 FFmpeg 작업은 즉시 취소하고(대기 중인 파일은 처리하지 않음) 임시 파일을 지운다 — 긴 영상 때문에 종료가 지연되지 않게.
 - 엔진 인터페이스: `trait Engine { fn run(&self, job: &Job, progress: &dyn Fn(f32)) -> Result<PathBuf, EngineError>; }`
 - 오류는 `thiserror` 기반 `EngineError`로 분류(입력 읽기 실패, 지원하지 않는 내용, 쓰기 실패, 엔진 비정상 종료) → 알림 문구로 매핑.
 
