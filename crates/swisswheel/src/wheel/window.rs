@@ -1,13 +1,16 @@
-//! The topmost, non-activating popup that hosts the wheel and the drop target.
+//! The topmost, non-activating popup that hosts the wheel, its option panel,
+//! and the drop target.
 
 use std::time::{Duration, Instant};
 
-use swisswheel_core::geometry::{OUTER_RADIUS, Rect, clamp_center};
+use swisswheel_core::geometry::{
+    OUTER_RADIUS, PANEL_OVERLAP, PANEL_WIDTH, Rect, Side, clamp_center, panel_rect, panel_side,
+};
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
 use windows::Win32::Graphics::Gdi::{
-    CreateEllipticRgn, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
-    SetWindowRgn,
+    CombineRgn, CreateEllipticRgn, CreateRoundRectRgn, DeleteObject, GetMonitorInfoW,
+    MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, RGN_OR, SetWindowRgn,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
@@ -15,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, w};
 
 use super::WheelView;
-use super::render::Renderer;
+use super::render::{PANEL_CORNER, Renderer};
 
 /// Hovered sectors grow outward by this much (DIPs); the window leaves room for it.
 pub(super) const HOVER_GROW: f32 = 6.0;
@@ -26,8 +29,15 @@ pub struct WheelWindow {
     glass_supported: bool,
     renderer: Option<Renderer>,
     scale: f32,
+    /// Wheel center on screen.
     center: POINT,
-    size: i32,
+    /// Wheel center inside the window.
+    origin: POINT,
+    width: i32,
+    height: i32,
+    side: Side,
+    /// Rows of the open panel, as the window region currently has it.
+    panel_rows: Option<usize>,
     visible: bool,
     last_shown: Instant,
 }
@@ -79,7 +89,11 @@ impl WheelWindow {
                 renderer: None,
                 scale: 1.0,
                 center: POINT::default(),
-                size: 1,
+                origin: POINT::default(),
+                width: 1,
+                height: 1,
+                side: Side::Right,
+                panel_rows: None,
                 visible: false,
                 last_shown: Instant::now(),
             })
@@ -98,12 +112,17 @@ impl WheelWindow {
         self.center
     }
 
+    pub fn panel_side(&self) -> Side {
+        self.side
+    }
+
     pub fn is_visible(&self) -> bool {
         self.visible
     }
 
     /// Positions the (still hidden) window around `cursor`, kept inside the
-    /// work area of the cursor's monitor, at that monitor's DPI.
+    /// work area of the cursor's monitor, at that monitor's DPI. The window
+    /// is wide enough for the option panel on whichever side it will open.
     pub fn place_at(&mut self, cursor: POINT) {
         unsafe {
             let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
@@ -116,30 +135,73 @@ impl WheelWindow {
             };
             let _ = GetMonitorInfoW(monitor, &mut info);
             let wa = info.rcWork;
-            let (cx, cy) = clamp_center(
-                (cursor.x, cursor.y),
-                Rect {
-                    left: wa.left,
-                    top: wa.top,
-                    right: wa.right,
-                    bottom: wa.bottom,
-                },
-                self.scale,
-            );
+            let work = Rect {
+                left: wa.left,
+                top: wa.top,
+                right: wa.right,
+                bottom: wa.bottom,
+            };
+            let (cx, cy) = clamp_center((cursor.x, cursor.y), work, self.scale);
             self.center = POINT { x: cx, y: cy };
+            self.side = panel_side(cx, work, self.scale);
+
             let radius = ((OUTER_RADIUS + HOVER_GROW) * self.scale).ceil() as i32;
-            self.size = radius * 2;
+            let panel_reach =
+                ((OUTER_RADIUS - PANEL_OVERLAP + PANEL_WIDTH) * self.scale).ceil() as i32;
+            let extra = (panel_reach - radius).max(0);
+            self.width = radius * 2 + extra;
+            self.height = radius * 2;
+            self.origin = match self.side {
+                Side::Right => POINT {
+                    x: radius,
+                    y: radius,
+                },
+                Side::Left => POINT {
+                    x: radius + extra,
+                    y: radius,
+                },
+            };
             let _ = SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),
-                cx - radius,
-                cy - radius,
-                self.size,
-                self.size,
+                cx - self.origin.x,
+                cy - self.origin.y,
+                self.width,
+                self.height,
                 SWP_NOACTIVATE,
             );
-            // The region limits hit testing (and so the drop target) to the disc.
-            let region = CreateEllipticRgn(0, 0, self.size + 1, self.size + 1);
+            self.panel_rows = Some(usize::MAX); // force the region update below
+            self.set_panel(None);
+        }
+    }
+
+    /// Limits hit testing (and so the drop target) to the disc, plus the
+    /// panel while one is open; elsewhere drops reach the window beneath.
+    pub fn set_panel(&mut self, rows: Option<usize>) {
+        if self.panel_rows == rows {
+            return;
+        }
+        self.panel_rows = rows;
+        let radius = ((OUTER_RADIUS + HOVER_GROW) * self.scale).ceil() as i32;
+        let (ox, oy) = (self.origin.x, self.origin.y);
+        unsafe {
+            let region =
+                CreateEllipticRgn(ox - radius, oy - radius, ox + radius + 1, oy + radius + 1);
+            if let Some(rows) = rows {
+                let r = panel_rect(self.side, rows, self.scale);
+                let corner = (2.0 * PANEL_CORNER * self.scale).round() as i32;
+                let panel = CreateRoundRectRgn(
+                    ox + r.left.floor() as i32,
+                    oy + r.top.floor() as i32,
+                    ox + r.right.ceil() as i32 + 1,
+                    oy + r.bottom.ceil() as i32 + 1,
+                    corner,
+                    corner,
+                );
+                CombineRgn(Some(region), Some(region), Some(panel), RGN_OR);
+                let _ = DeleteObject(panel.into());
+            }
+            // The system owns the region from here on.
             SetWindowRgn(self.hwnd, Some(region), false);
         }
     }
@@ -169,16 +231,17 @@ impl WheelWindow {
     pub fn render(&mut self, view: &WheelView) {
         let scale = self.scale;
         let glass = self.glass_supported;
-        self.with_renderer(|r| r.draw(view, scale, glass));
+        let origin = (self.origin.x as f32, self.origin.y as f32);
+        self.with_renderer(|r| r.draw(view, scale, glass, origin));
     }
 
     fn with_renderer(&mut self, f: impl FnOnce(&mut Renderer) -> windows::core::Result<()>) {
-        let size = self.size as u32;
+        let size = (self.width as u32, self.height as u32);
         if self.renderer.as_ref().is_some_and(|r| r.size() != size) {
             self.renderer = None;
         }
         if self.renderer.is_none() {
-            match Renderer::new(self.hwnd, size) {
+            match Renderer::new(self.hwnd, size.0, size.1) {
                 Ok(r) => self.renderer = Some(r),
                 Err(e) => {
                     log_error!("휠 렌더러를 만들 수 없습니다: {e}");

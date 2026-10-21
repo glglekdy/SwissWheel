@@ -5,7 +5,8 @@ mod render;
 mod window;
 
 use swisswheel_core::catalog::Operation;
-use swisswheel_core::geometry::Hit;
+use swisswheel_core::geometry::{Hit, Side};
+use swisswheel_core::options::Choice;
 
 pub use window::WheelWindow;
 
@@ -18,5 +19,17 @@ pub struct WheelView<'a> {
     pub items: &'a [Operation],
     pub hovered: Hit,
     /// Open animation, 0.0 → 1.0.
+    pub progress: f32,
+    /// The option panel beside the wheel, when open (spec 2.5).
+    pub panel: Option<PanelView<'a>>,
+}
+
+pub struct PanelView<'a> {
+    pub title: &'a str,
+    pub choices: &'a [Choice],
+    pub default: usize,
+    pub hovered: Option<usize>,
+    pub side: Side,
+    /// Fade-in, 0.0 → 1.0.
     pub progress: f32,
 }

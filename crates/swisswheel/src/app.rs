@@ -41,7 +41,7 @@ use crate::hook::{self, Hooks, WM_APP_DRAG};
 use crate::jobs::{Job, JobReport, Runner};
 use crate::probe;
 use crate::tray::{Tray, WM_APP_TRAY};
-use crate::wheel::{WheelView, WheelWindow};
+use crate::wheel::{PanelView, WheelView, WheelWindow};
 
 const ID_MENU_EXIT: usize = 1;
 const WM_APP_JOB_DONE: u32 = WM_APP + 30;
@@ -53,12 +53,16 @@ const TIMER_MOUSE_UP_CLOSE: usize = 2;
 const TIMER_ANIMATION: usize = 3;
 const TIMER_MAINTENANCE: usize = 4;
 const TIMER_PROGRESS: usize = 5;
+/// Finishes a panel dwell while the cursor rests (no DragOver arrives then).
+const TIMER_PANEL: usize = 6;
+const PANEL_TICK_MS: u32 = 50;
 /// How often the tray tooltip refreshes the progress of running jobs.
 const PROGRESS_INTERVAL_MS: u32 = 500;
 
 const ENTER_TIMEOUT: Duration = Duration::from_millis(300);
 const MOUSE_UP_CLOSE_DELAY: Duration = Duration::from_millis(200);
 const OPEN_ANIMATION: Duration = Duration::from_millis(150);
+const PANEL_FADE: Duration = Duration::from_millis(120);
 const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(60);
 const RENDERER_IDLE: Duration = Duration::from_secs(10 * 60);
 const HOOK_REINSTALL: Duration = Duration::from_secs(10 * 60);
@@ -78,6 +82,11 @@ pub(crate) struct AppState {
     /// Center label for the open wheel ("2.4 MB"); see `selection_summary`.
     selection: String,
     opened_at: Instant,
+    /// When the wheel opened: the clock for the panel dwell.
+    session_started: Instant,
+    /// The item whose option panel is shown, and since when (for its fade).
+    panel_item: Option<usize>,
+    panel_shown_at: Instant,
     active_jobs: usize,
     /// First output of the last finished job, opened when its balloon is clicked.
     last_output: Option<PathBuf>,
@@ -181,6 +190,9 @@ pub fn run() -> Result<()> {
         dragged: Vec::new(),
         selection: String::new(),
         opened_at: Instant::now(),
+        session_started: Instant::now(),
+        panel_item: None,
+        panel_shown_at: Instant::now(),
         active_jobs: 0,
         last_output: None,
         hooks_installed_at: Instant::now(),
@@ -293,6 +305,7 @@ impl AppState {
             DragCommand::Cycle => {
                 if let Some(session) = &mut self.session {
                     session.cycle();
+                    self.sync_panel();
                     self.render();
                 }
             }
@@ -314,9 +327,13 @@ impl AppState {
         unsafe {
             let _ = GetCursorPos(&mut cursor);
         }
-        self.session = Some(WheelSession::new());
         self.dragged.clear();
         self.wheel.place_at(cursor);
+        let mut session = WheelSession::new();
+        session.set_panel_side(self.wheel.panel_side());
+        self.session = Some(session);
+        self.session_started = Instant::now();
+        self.panel_item = None;
         // Invisible until DragEnter proves this is a file drag (no flash on a
         // title-bar drag); the open animation starts in on_drag_enter.
         self.wheel.clear();
@@ -348,8 +365,11 @@ impl AppState {
             let _ = KillTimer(Some(self.hwnd), TIMER_ENTER_TIMEOUT);
             let _ = KillTimer(Some(self.hwnd), TIMER_MOUSE_UP_CLOSE);
             let _ = KillTimer(Some(self.hwnd), TIMER_ANIMATION);
+            let _ = KillTimer(Some(self.hwnd), TIMER_PANEL);
         }
         self.wheel.hide();
+        self.wheel.set_panel(None);
+        self.panel_item = None;
         self.session = None;
         hook::notify(DragEvent::WheelClosed);
     }
@@ -364,14 +384,55 @@ impl AppState {
         let title = session.wheel().map_or("—", |kind| kind.label());
         let progress =
             (self.opened_at.elapsed().as_secs_f32() / OPEN_ANIMATION.as_secs_f32()).min(1.0);
+        let panel = session.panel().map(|p| PanelView {
+            title: p.set.title,
+            choices: p.set.choices,
+            default: p.set.default,
+            hovered: p.hovered,
+            side: self.wheel.panel_side(),
+            progress: (self.panel_shown_at.elapsed().as_secs_f32() / PANEL_FADE.as_secs_f32())
+                .min(1.0),
+        });
         let view = WheelView {
             title,
             detail: &self.selection,
             items: session.items(),
             hovered: session.hovered(),
             progress,
+            panel,
         };
         self.wheel.render(&view);
+    }
+
+    /// Milliseconds since the wheel opened: the session's clock for dwells.
+    fn now_ms(&self) -> u64 {
+        self.session_started.elapsed().as_millis() as u64
+    }
+
+    /// Brings the window region, the panel fade, and the dwell timer in line
+    /// with the session's panel. Call after anything that may change it.
+    fn sync_panel(&mut self) {
+        let panel = self.session.as_ref().and_then(WheelSession::panel);
+        let item = panel.map(|p| p.item);
+        if item != self.panel_item {
+            self.panel_item = item;
+            self.panel_shown_at = Instant::now();
+            if item.is_some() {
+                unsafe { SetTimer(Some(self.hwnd), TIMER_ANIMATION, 16, None) }; // fade in
+            }
+        }
+        self.wheel.set_panel(panel.map(|p| p.set.choices.len()));
+        let pending = self
+            .session
+            .as_ref()
+            .is_some_and(WheelSession::switch_pending);
+        unsafe {
+            if pending {
+                SetTimer(Some(self.hwnd), TIMER_PANEL, PANEL_TICK_MS, None);
+            } else {
+                let _ = KillTimer(Some(self.hwnd), TIMER_PANEL);
+            }
+        }
     }
 
     fn on_timer(&mut self, id: usize) {
@@ -389,13 +450,24 @@ impl AppState {
             TIMER_MOUSE_UP_CLOSE => self.close_wheel(),
             TIMER_ANIMATION => {
                 self.render();
-                if self.opened_at.elapsed() >= OPEN_ANIMATION {
+                if self.opened_at.elapsed() >= OPEN_ANIMATION
+                    && self.panel_shown_at.elapsed() >= PANEL_FADE
+                {
                     unsafe {
                         let _ = KillTimer(Some(self.hwnd), TIMER_ANIMATION);
                     }
                 }
             }
             TIMER_PROGRESS => self.update_busy(),
+            TIMER_PANEL => {
+                let now = self.now_ms();
+                if self.session.as_mut().is_some_and(|s| s.tick(now)) {
+                    self.sync_panel();
+                    self.render();
+                } else {
+                    self.sync_panel(); // stops the timer once nothing is pending
+                }
+            }
             TIMER_MAINTENANCE => {
                 self.wheel.release_if_idle(RENDERER_IDLE);
                 if !self.wheel.is_visible() && self.hooks_installed_at.elapsed() >= HOOK_REINSTALL {
@@ -504,19 +576,21 @@ pub fn on_drag_enter(paths: Vec<PathBuf>, x: i32, y: i32) -> DROPEFFECT {
     with_state(|s| {
         let (dx, dy) = s.offset(x, y);
         let scale = s.wheel.scale();
+        let now = s.now_ms();
         let session = s.session.as_mut()?;
         // DragEnter repeats each time the cursor re-enters; files are read once.
         let first_enter = session.is_loading();
         if first_enter {
             session.set_inputs(paths.iter().map(|p| probe::input_item(p)).collect());
         }
-        session.hover(dx, dy, scale, 0);
+        session.hover(dx, dy, scale, now);
         if first_enter {
             s.selection = selection_summary(&paths);
             s.dragged = paths;
             s.opened_at = Instant::now(); // the wheel becomes visible now
             unsafe { SetTimer(Some(s.hwnd), TIMER_ANIMATION, 16, None) };
         }
+        s.sync_panel();
         s.render();
         Some(s.effect())
     })
@@ -528,7 +602,9 @@ pub fn on_drag_over(x: i32, y: i32) -> DROPEFFECT {
     with_state(|s| {
         let (dx, dy) = s.offset(x, y);
         let scale = s.wheel.scale();
-        let changed = s.session.as_mut()?.hover(dx, dy, scale, 0);
+        let now = s.now_ms();
+        let changed = s.session.as_mut()?.hover(dx, dy, scale, now);
+        s.sync_panel();
         if changed {
             s.render();
         }
@@ -540,9 +616,11 @@ pub fn on_drag_over(x: i32, y: i32) -> DROPEFFECT {
 
 pub fn on_drag_leave() {
     with_state(|s| {
+        let now = s.now_ms();
         if let Some(session) = &mut s.session
-            && session.hover(f32::MAX, f32::MAX, 1.0, 0)
+            && session.hover(f32::MAX, f32::MAX, 1.0, now)
         {
+            s.sync_panel();
             s.render();
         }
     });

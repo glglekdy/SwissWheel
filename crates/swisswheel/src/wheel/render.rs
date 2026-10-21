@@ -3,9 +3,14 @@
 //! on top a Direct2D swap chain with the tint, sectors, and labels.
 
 use swisswheel_core::geometry::Hit;
-use swisswheel_core::geometry::{CANCEL_RADIUS, OUTER_RADIUS, RING_CAPACITY, sector};
+use swisswheel_core::geometry::{
+    CANCEL_RADIUS, OUTER_RADIUS, PANEL_HEADER, PANEL_PAD, PANEL_ROW, RING_CAPACITY, panel_rect,
+    sector,
+};
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
-use windows::UI::Composition::{CompositionEllipseGeometry, Compositor, SpriteVisual};
+use windows::UI::Composition::{
+    CompositionEllipseGeometry, CompositionRoundedRectangleGeometry, Compositor, SpriteVisual,
+};
 use windows::Win32::Foundation::{HMODULE, HWND};
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
@@ -19,9 +24,9 @@ use windows::Win32::System::WinRT::Composition::{ICompositorDesktopInterop, ICom
 use windows::core::{BOOL, HSTRING, Interface, PCWSTR, Result, w};
 use windows_numerics::Vector2;
 
-use super::WheelView;
 use super::glyph::glyph;
 use super::window::HOVER_GROW;
+use super::{PanelView, WheelView};
 
 const OPEN_SCALE_FROM: f32 = 0.92; // wheel scales from 92% to 100% while opening
 
@@ -30,6 +35,9 @@ const TILE_GAP: f32 = 4.0;
 const TILE_CORNER: f32 = 6.0;
 /// The hub (center circle) sits this far inside the cancel radius.
 const HUB_INSET: f32 = 6.0;
+/// Rounding of the option panel and of its rows (DIPs).
+pub(super) const PANEL_CORNER: f32 = 10.0;
+const ROW_CORNER: f32 = 8.0;
 
 struct Palette {
     /// Glass: a light translucent tint over the blur. Solid: an opaque disc.
@@ -146,17 +154,20 @@ pub struct Renderer {
     /// Acrylic blur of whatever is behind the window, clipped to `backdrop_clip`.
     backdrop: SpriteVisual,
     backdrop_clip: CompositionEllipseGeometry,
+    /// The same blur behind the option panel.
+    panel_backdrop: SpriteVisual,
+    panel_clip: CompositionRoundedRectangleGeometry,
     _content: SpriteVisual,
     dwrite: IDWriteFactory,
     /// Family of the system icon font (see `glyph`).
     icon_font: PCWSTR,
     /// Round line joins: stroking a tile with its own fill rounds its corners.
     round: ID2D1StrokeStyle1,
-    size: u32,
+    size: (u32, u32),
 }
 
 impl Renderer {
-    pub fn new(hwnd: HWND, size: u32) -> Result<Renderer> {
+    pub fn new(hwnd: HWND, width: u32, height: u32) -> Result<Renderer> {
         unsafe {
             let device = create_d3d_device()?;
             let dxgi_device: IDXGIDevice = device.cast()?;
@@ -169,8 +180,8 @@ impl Renderer {
 
             let dxgi_factory: IDXGIFactory2 = CreateDXGIFactory2(DXGI_CREATE_FACTORY_FLAGS(0))?;
             let desc = DXGI_SWAP_CHAIN_DESC1 {
-                Width: size,
-                Height: size,
+                Width: width,
+                Height: height,
                 Format: DXGI_FORMAT_B8G8R8A8_UNORM,
                 SampleDesc: DXGI_SAMPLE_DESC {
                     Count: 1,
@@ -204,8 +215,8 @@ impl Renderer {
                 .cast::<ICompositorDesktopInterop>()?
                 .CreateDesktopWindowTarget(hwnd, true)?;
             let full = Vector2 {
-                X: size as f32,
-                Y: size as f32,
+                X: width as f32,
+                Y: height as f32,
             };
             let root = compositor.CreateContainerVisual()?;
             root.SetSize(full)?;
@@ -215,10 +226,14 @@ impl Renderer {
             backdrop.SetSize(full)?;
             backdrop.SetBrush(&compositor.CreateHostBackdropBrush()?)?;
             let backdrop_clip = compositor.CreateEllipseGeometry()?;
-            let c = size as f32 / 2.0;
-            backdrop_clip.SetCenter(Vector2 { X: c, Y: c })?;
             backdrop.SetClip(&compositor.CreateGeometricClipWithGeometry(&backdrop_clip)?)?;
             backdrop.SetIsVisible(false)?;
+            let panel_backdrop = compositor.CreateSpriteVisual()?;
+            panel_backdrop.SetSize(full)?;
+            panel_backdrop.SetBrush(&compositor.CreateHostBackdropBrush()?)?;
+            let panel_clip = compositor.CreateRoundedRectangleGeometry()?;
+            panel_backdrop.SetClip(&compositor.CreateGeometricClipWithGeometry(&panel_clip)?)?;
+            panel_backdrop.SetIsVisible(false)?;
 
             let surface = compositor
                 .cast::<ICompositorInterop>()?
@@ -229,6 +244,7 @@ impl Renderer {
 
             let children = root.Children()?;
             children.InsertAtBottom(&backdrop)?;
+            children.InsertAtBottom(&panel_backdrop)?;
             children.InsertAtTop(&content)?;
 
             let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
@@ -255,16 +271,18 @@ impl Renderer {
                 _target: target,
                 backdrop,
                 backdrop_clip,
+                panel_backdrop,
+                panel_clip,
                 _content: content,
                 dwrite,
                 icon_font,
                 round,
-                size,
+                size: (width, height),
             })
         }
     }
 
-    pub fn size(&self) -> u32 {
+    pub fn size(&self) -> (u32, u32) {
         self.size
     }
 
@@ -281,21 +299,30 @@ impl Renderer {
             self.ctx.EndDraw(None, None)?;
             self.swap.Present(1, DXGI_PRESENT(0)).ok()?;
         }
+        self.panel_backdrop.SetIsVisible(false)?;
         self.backdrop.SetIsVisible(false)
     }
 
-    pub fn draw(&mut self, view: &WheelView, scale: f32, glass_supported: bool) -> Result<()> {
+    /// `origin` is the wheel center in the surface (the panel side is wider).
+    pub fn draw(
+        &mut self,
+        view: &WheelView,
+        scale: f32,
+        glass_supported: bool,
+        (cx, cy): (f32, f32),
+    ) -> Result<()> {
         let eased = 1.0 - (1.0 - view.progress.clamp(0.0, 1.0)).powi(3);
         let grow = OPEN_SCALE_FROM + (1.0 - OPEN_SCALE_FROM) * eased;
         // With transparency effects off the host backdrop draws nothing useful,
         // so fall back to an opaque disc.
         let glass = glass_supported && transparency_enabled();
-        let colors = palette(light_theme(), glass, eased);
-        let c = self.size as f32 / 2.0;
+        let light = light_theme();
+        let colors = palette(light, glass, eased);
         let n = view.items.len();
         let disc = OUTER_RADIUS * scale * grow;
         self.backdrop.SetIsVisible(glass)?;
         self.backdrop.SetOpacity(eased)?;
+        self.backdrop_clip.SetCenter(Vector2 { X: cx, Y: cy })?;
         self.backdrop_clip.SetRadius(Vector2 { X: disc, Y: disc })?;
         unsafe {
             let ctx = &self.ctx;
@@ -309,15 +336,15 @@ impl Renderer {
             let brush = |color: &D2D1_COLOR_F| ctx.CreateSolidColorBrush(color, None);
 
             // Base disc with a light edge inside and a faint line outside.
-            ctx.FillEllipse(&ellipse(c, disc), &brush(&colors.disc)?);
+            ctx.FillEllipse(&ellipse_at(cx, cy, disc), &brush(&colors.disc)?);
             ctx.DrawEllipse(
-                &ellipse(c, disc + 0.5 * scale),
+                &ellipse_at(cx, cy, disc + 0.5 * scale),
                 &brush(&colors.outline)?,
                 scale,
                 None,
             );
             ctx.DrawEllipse(
-                &ellipse(c, disc - 0.5 * scale),
+                &ellipse_at(cx, cy, disc - 0.5 * scale),
                 &brush(&colors.rim)?,
                 scale,
                 None,
@@ -343,18 +370,22 @@ impl Renderer {
                 let tile = Tile::new(inner, outer, s.start_deg, s.end_deg, scale);
 
                 // Drop shadow: the same tile, 1 px lower.
-                self.fill_tile(&self.tile_path(c, c + 1.2 * scale, &tile)?, &tile, &shadow)?;
+                self.fill_tile(
+                    &self.tile_path(cx, cy + 1.2 * scale, &tile)?,
+                    &tile,
+                    &shadow,
+                )?;
                 let (top, bottom) = if hovered {
                     (&colors.accent_top, &colors.accent_bottom)
                 } else {
                     (&colors.tile_top, &colors.tile_bottom)
                 };
-                let (y0, y1) = tile.vertical_extent(c);
-                let fill = self.vertical_gradient(c, y0, y1, top, bottom)?;
-                self.fill_tile(&self.tile_path(c, c, &tile)?, &tile, &fill)?;
+                let (y0, y1) = tile.vertical_extent(cy);
+                let fill = self.vertical_gradient(cx, y0, y1, top, bottom)?;
+                self.fill_tile(&self.tile_path(cx, cy, &tile)?, &tile, &fill)?;
 
                 let mid = (s.start_deg + s.end_deg) / 2.0;
-                let (x, y) = polar(c, (inner + outer) / 2.0, mid);
+                let (x, y) = polar_at(cx, cy, (inner + outer) / 2.0, mid);
                 let text = brush(if hovered {
                     &colors.accent_text
                 } else {
@@ -382,10 +413,10 @@ impl Renderer {
 
             // Hub: a raised circle with what is being dragged and the wheel's name.
             let hub = (CANCEL_RADIUS - HUB_INSET) * scale * grow;
-            ctx.FillEllipse(&ellipse_at(c, c + 1.2 * scale, hub), &shadow);
-            ctx.FillEllipse(&ellipse(c, hub), &brush(&colors.hub)?);
+            ctx.FillEllipse(&ellipse_at(cx, cy + 1.2 * scale, hub), &shadow);
+            ctx.FillEllipse(&ellipse_at(cx, cy, hub), &brush(&colors.hub)?);
             ctx.DrawEllipse(
-                &ellipse(c, hub - 0.5 * scale),
+                &ellipse_at(cx, cy, hub - 0.5 * scale),
                 &brush(&colors.hub_ring)?,
                 scale,
                 None,
@@ -397,8 +428,8 @@ impl Renderer {
                 self.draw_text(
                     view.title,
                     &detail_format,
-                    c,
-                    c,
+                    cx,
+                    cy,
                     width,
                     22.0 * scale,
                     &brush(&colors.text)?,
@@ -407,8 +438,8 @@ impl Renderer {
                 self.draw_text(
                     view.detail,
                     &detail_format,
-                    c,
-                    c - 6.0 * scale,
+                    cx,
+                    cy - 6.0 * scale,
                     width,
                     20.0 * scale,
                     &brush(&colors.text)?,
@@ -416,16 +447,175 @@ impl Renderer {
                 self.draw_text(
                     view.title,
                     &title_format,
-                    c,
-                    c + 11.0 * scale,
+                    cx,
+                    cy + 11.0 * scale,
                     width,
                     16.0 * scale,
                     &brush(&colors.subtext)?,
                 );
             }
 
+            match &view.panel {
+                Some(panel) => self.draw_panel(panel, scale, light, glass, eased, (cx, cy))?,
+                None => self.panel_backdrop.SetIsVisible(false)?,
+            }
+
             ctx.EndDraw(None, None)?;
             self.swap.Present(1, DXGI_PRESENT(0)).ok()?;
+        }
+        Ok(())
+    }
+
+    /// The option panel beside the wheel (spec 2.5): a glass card with a
+    /// title and one rounded row per choice, the hovered row in the accent.
+    fn draw_panel(
+        &self,
+        panel: &PanelView,
+        scale: f32,
+        light: bool,
+        glass: bool,
+        wheel_fade: f32,
+        (cx, cy): (f32, f32),
+    ) -> Result<()> {
+        let fade = (1.0 - (1.0 - panel.progress.clamp(0.0, 1.0)).powi(3)).min(wheel_fade);
+        let colors = palette(light, glass, fade);
+        let r = panel_rect(panel.side, panel.choices.len(), scale);
+        let rect = D2D_RECT_F {
+            left: cx + r.left,
+            top: cy + r.top,
+            right: cx + r.right,
+            bottom: cy + r.bottom,
+        };
+        let corner = PANEL_CORNER * scale;
+        self.panel_clip.SetOffset(point((rect.left, rect.top)))?;
+        self.panel_clip.SetSize(Vector2 {
+            X: rect.right - rect.left,
+            Y: rect.bottom - rect.top,
+        })?;
+        self.panel_clip.SetCornerRadius(Vector2 {
+            X: corner,
+            Y: corner,
+        })?;
+        self.panel_backdrop.SetIsVisible(glass)?;
+        self.panel_backdrop.SetOpacity(fade)?;
+
+        let ctx = &self.ctx;
+        let brush = |color: &D2D1_COLOR_F| unsafe { ctx.CreateSolidColorBrush(color, None) };
+        let rounded = |rect: D2D_RECT_F, radius: f32| D2D1_ROUNDED_RECT {
+            rect,
+            radiusX: radius,
+            radiusY: radius,
+        };
+        let inset = |rect: D2D_RECT_F, d: f32| D2D_RECT_F {
+            left: rect.left + d,
+            top: rect.top + d,
+            right: rect.right - d,
+            bottom: rect.bottom - d,
+        };
+        unsafe {
+            ctx.FillRoundedRectangle(&rounded(rect, corner), &brush(&colors.disc)?);
+            ctx.DrawRoundedRectangle(
+                &rounded(inset(rect, -0.5 * scale), corner),
+                &brush(&colors.outline)?,
+                scale,
+                None,
+            );
+            ctx.DrawRoundedRectangle(
+                &rounded(inset(rect, 0.5 * scale), corner),
+                &brush(&colors.rim)?,
+                scale,
+                None,
+            );
+        }
+
+        let pad = 12.0 * scale;
+        let title_format = self.aligned_format(
+            10.5 * scale,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+        )?;
+        let label_format = self.aligned_format(
+            13.0 * scale,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_ALIGNMENT_LEADING,
+        )?;
+        let detail_format = self.aligned_format(
+            10.5 * scale,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_TEXT_ALIGNMENT_TRAILING,
+        )?;
+        let width = rect.right - rect.left - 2.0 * pad;
+        let mid_x = (rect.left + rect.right) / 2.0;
+        self.draw_text(
+            panel.title,
+            &title_format,
+            mid_x,
+            rect.top + PANEL_HEADER * scale / 2.0 + 2.0 * scale,
+            width,
+            PANEL_HEADER * scale,
+            &brush(&colors.subtext)?,
+        );
+
+        let shadow = brush(&colors.shadow)?;
+        for (i, choice) in panel.choices.iter().enumerate() {
+            let top = rect.top + (PANEL_HEADER + i as f32 * PANEL_ROW) * scale;
+            let row = D2D_RECT_F {
+                left: rect.left + PANEL_PAD * scale,
+                top: top + 2.0 * scale,
+                right: rect.right - PANEL_PAD * scale,
+                bottom: top + (PANEL_ROW - 2.0) * scale,
+            };
+            let hovered = panel.hovered == Some(i);
+            let (fill_top, fill_bottom, text, subtext) = if hovered {
+                (
+                    &colors.accent_top,
+                    &colors.accent_bottom,
+                    &colors.accent_text,
+                    &colors.accent_text,
+                )
+            } else {
+                (
+                    &colors.tile_top,
+                    &colors.tile_bottom,
+                    &colors.text,
+                    &colors.subtext,
+                )
+            };
+            let lowered = D2D_RECT_F {
+                top: row.top + 1.2 * scale,
+                bottom: row.bottom + 1.2 * scale,
+                ..row
+            };
+            let fill = self.vertical_gradient(mid_x, row.top, row.bottom, fill_top, fill_bottom)?;
+            unsafe {
+                ctx.FillRoundedRectangle(&rounded(lowered, ROW_CORNER * scale), &shadow);
+                ctx.FillRoundedRectangle(&rounded(row, ROW_CORNER * scale), &fill);
+            }
+            let row_mid_y = (row.top + row.bottom) / 2.0;
+            let row_width = row.right - row.left - 2.0 * 10.0 * scale;
+            self.draw_text(
+                choice.label,
+                &label_format,
+                mid_x,
+                row_mid_y,
+                row_width,
+                row.bottom - row.top,
+                &brush(text)?,
+            );
+            let detail = if i == panel.default {
+                format!("{} · 기본", choice.detail)
+            } else {
+                choice.detail.to_string()
+            };
+            self.draw_text(
+                &detail,
+                &detail_format,
+                mid_x,
+                row_mid_y,
+                row_width,
+                row.bottom - row.top,
+                &brush(subtext)?,
+            );
         }
         Ok(())
     }
@@ -481,6 +671,18 @@ impl Renderer {
     fn text_format(&self, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
         // Hangul falls back to the system's Korean UI font automatically.
         self.font_format(w!("Segoe UI Variable Text"), size, weight)
+    }
+
+    /// `text_format` aligned to one side of its box instead of centered.
+    fn aligned_format(
+        &self,
+        size: f32,
+        weight: DWRITE_FONT_WEIGHT,
+        alignment: DWRITE_TEXT_ALIGNMENT,
+    ) -> Result<IDWriteTextFormat> {
+        let format = self.text_format(size, weight)?;
+        unsafe { format.SetTextAlignment(alignment)? };
+        Ok(format)
     }
 
     fn font_format(
@@ -629,13 +831,13 @@ impl Tile {
         }
     }
 
-    /// Top and bottom y of the finished tile, for its gradient.
-    fn vertical_extent(&self, c: f32) -> (f32, f32) {
+    /// Top and bottom y of the finished tile around a center at `cy`, for its gradient.
+    fn vertical_extent(&self, cy: f32) -> (f32, f32) {
         let (mut y0, mut y1) = (f32::MAX, f32::MIN);
         for k in 0..=8 {
             let deg = self.start + (self.end - self.start) * k as f32 / 8.0;
             for r in [self.outer + self.corner, self.inner - self.corner] {
-                let y = polar(c, r, deg).1;
+                let y = polar_at(0.0, cy, r, deg).1;
                 y0 = y0.min(y);
                 y1 = y1.max(y);
             }
@@ -698,10 +900,6 @@ fn polar_at(cx: f32, cy: f32, r: f32, deg: f32) -> (f32, f32) {
     (cx + r * rad.sin(), cy - r * rad.cos())
 }
 
-fn polar(c: f32, r: f32, deg: f32) -> (f32, f32) {
-    polar_at(c, c, r, deg)
-}
-
 /// Direct2D points are `windows_numerics::Vector2` in windows 0.61.
 fn point((x, y): (f32, f32)) -> Vector2 {
     Vector2 { X: x, Y: y }
@@ -713,10 +911,6 @@ fn ellipse_at(cx: f32, cy: f32, r: f32) -> D2D1_ELLIPSE {
         radiusX: r,
         radiusY: r,
     }
-}
-
-fn ellipse(c: f32, r: f32) -> D2D1_ELLIPSE {
-    ellipse_at(c, c, r)
 }
 
 fn create_d3d_device() -> Result<ID3D11Device> {
