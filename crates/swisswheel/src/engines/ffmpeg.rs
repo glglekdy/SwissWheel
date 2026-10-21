@@ -462,6 +462,18 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn animated_gif_to_webm() {
+        let dir = tempfile::tempdir().unwrap();
+        let gif = make(
+            dir.path(),
+            "anim.gif",
+            &["-f", "lavfi", "-i", "testsrc=duration=1:size=81x61:rate=5"],
+        );
+        let out = convert(Operation::Convert(Format::Webm), None, &gif, "anim.webm");
+        assert_eq!(codecs(&out).0, some("vp9"));
+    }
+
+    #[test]
     fn resolution_scales_down_only() {
         let dir = tempfile::tempdir().unwrap();
         let hd = pattern(dir.path(), "hd.mp4", "1280x720", 1);

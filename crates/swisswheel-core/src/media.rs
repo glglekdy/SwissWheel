@@ -194,6 +194,10 @@ impl Video {
                     "4",
                     "-row-mt",
                     "1",
+                    // GIFs decode to RGB with alpha, which libvpx-vp9 refuses;
+                    // yuv420p is also what every player handles.
+                    "-pix_fmt",
+                    "yuv420p",
                 ]));
                 if let Some(vf) = scale {
                     a.extend(["-vf".to_string(), vf]);
@@ -627,6 +631,24 @@ mod tests {
             &p.attempts[0],
             &["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]
         ));
+    }
+
+    #[test]
+    fn vp9_output_pins_a_playable_pixel_format() {
+        // A GIF decodes to RGB with alpha; left alone, FFmpeg picks gbrap, which
+        // libvpx-vp9 refuses without -strict experimental.
+        let q = Quality::default();
+        for (input, info) in [
+            (Format::Gif, info(Some("gif"), None)),
+            (Format::Avi, info(Some("mpeg4"), Some("mp3"))),
+        ] {
+            let p = convert(Format::Webm, None, input, &info, &q).unwrap();
+            let encode = p.attempts.last().unwrap();
+            assert!(
+                has(encode, &["-pix_fmt", "yuv420p"]),
+                "{input:?}: {encode:?}"
+            );
+        }
     }
 
     #[test]
