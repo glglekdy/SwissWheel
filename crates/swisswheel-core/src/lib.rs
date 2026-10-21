@@ -9,4 +9,5 @@ pub mod media;
 pub mod naming;
 pub mod options;
 pub mod session;
+pub mod settings;
 pub mod summary;
