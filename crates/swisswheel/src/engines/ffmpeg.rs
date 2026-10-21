@@ -474,6 +474,38 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn surround_audio_to_webm() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make(
+            dir.path(),
+            "surround.mkv",
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=duration=2:size=160x120:rate=10",
+                "-f",
+                "lavfi",
+                "-i",
+                "anullsrc=channel_layout=5.1(side):sample_rate=48000",
+                "-t",
+                "2",
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "ac3",
+            ],
+        );
+        let out = convert(
+            Operation::Convert(Format::Webm),
+            None,
+            &clip,
+            "surround.webm",
+        );
+        assert_eq!(codecs(&out), (some("vp9"), some("opus")));
+    }
+
+    #[test]
     fn resolution_scales_down_only() {
         let dir = tempfile::tempdir().unwrap();
         let hd = pattern(dir.path(), "hd.mp4", "1280x720", 1);

@@ -156,6 +156,10 @@ pub fn plan(
     })
 }
 
+/// libopus refuses some layouts, notably 5.1(side), which AC3 and DTS 5.1
+/// decode to; FFmpeg converts to the nearest of these instead.
+const OPUS_LAYOUTS: &str = "aformat=channel_layouts=7.1|5.1|stereo|mono";
+
 /// libx264 rejects odd sizes; this rounds both sides down to even.
 const EVEN_SIZE: &str = "scale=trunc(iw/2)*2:trunc(ih/2)*2";
 
@@ -203,7 +207,14 @@ impl Video {
                     a.extend(["-vf".to_string(), vf]);
                 }
                 if self.audio {
-                    a.extend(strings(&["-c:a", "libopus", "-b:a", "128k"]));
+                    a.extend(strings(&[
+                        "-c:a",
+                        "libopus",
+                        "-b:a",
+                        "128k",
+                        "-af",
+                        OPUS_LAYOUTS,
+                    ]));
                 }
             }
             Format::Avi => {
@@ -294,7 +305,7 @@ fn encode_audio(target: Format, quality: &Quality) -> Vec<String> {
         Format::Wav => a.push("pcm_s16le".into()),
         Format::Flac => a.push("flac".into()),
         Format::Ogg => a.extend(strings(&["libvorbis", "-q:a", "6"])),
-        _ => a.extend(strings(&["libopus", "-b:a", "128k"])), // Opus
+        _ => a.extend(strings(&["libopus", "-b:a", "128k", "-af", OPUS_LAYOUTS])), // Opus
     }
     finish(a, target)
 }
@@ -631,6 +642,31 @@ mod tests {
             &p.attempts[0],
             &["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2"]
         ));
+    }
+
+    #[test]
+    fn opus_output_accepts_surround_layouts() {
+        // libopus rejects 5.1(side), which AC3/DTS 5.1 decodes to.
+        let q = Quality::default();
+        let downmix = ["-af", "aformat=channel_layouts=7.1|5.1|stereo|mono"];
+        let webm = convert(
+            Format::Webm,
+            None,
+            Format::Mkv,
+            &info(Some("h264"), Some("ac3")),
+            &q,
+        )
+        .unwrap();
+        assert!(has(webm.attempts.last().unwrap(), &downmix));
+        let opus = convert(
+            Format::Opus,
+            None,
+            Format::Flac,
+            &info(None, Some("flac")),
+            &q,
+        )
+        .unwrap();
+        assert!(has(&opus.attempts[0], &downmix));
     }
 
     #[test]
