@@ -414,7 +414,7 @@ impl AppState {
     fn effect(&self) -> DROPEFFECT {
         // Never DROPEFFECT_MOVE: the drag source would delete the original.
         match self.session.as_ref().map(WheelSession::hovered) {
-            Some(Hit::Item(_)) => DROPEFFECT_COPY,
+            Some(Hit::Item(_) | Hit::Choice(_)) => DROPEFFECT_COPY,
             _ => DROPEFFECT_NONE,
         }
     }
@@ -504,7 +504,7 @@ pub fn on_drag_enter(paths: Vec<PathBuf>, x: i32, y: i32) -> DROPEFFECT {
         if first_enter {
             session.set_inputs(paths.iter().map(|p| probe::input_item(p)).collect());
         }
-        session.hover(dx, dy, scale);
+        session.hover(dx, dy, scale, 0);
         if first_enter {
             s.selection = selection_summary(&paths);
             s.dragged = paths;
@@ -522,7 +522,7 @@ pub fn on_drag_over(x: i32, y: i32) -> DROPEFFECT {
     with_state(|s| {
         let (dx, dy) = s.offset(x, y);
         let scale = s.wheel.scale();
-        let changed = s.session.as_mut()?.hover(dx, dy, scale);
+        let changed = s.session.as_mut()?.hover(dx, dy, scale, 0);
         if changed {
             s.render();
         }
@@ -535,7 +535,7 @@ pub fn on_drag_over(x: i32, y: i32) -> DROPEFFECT {
 pub fn on_drag_leave() {
     with_state(|s| {
         if let Some(session) = &mut s.session
-            && session.hover(f32::MAX, f32::MAX, 1.0)
+            && session.hover(f32::MAX, f32::MAX, 1.0, 0)
         {
             s.render();
         }
@@ -554,7 +554,7 @@ pub fn on_drop(x: i32, y: i32) -> DROPEFFECT {
         match op {
             Some(op) => {
                 s.dragged = dragged;
-                s.submit(op);
+                s.submit(op.op);
                 DROPEFFECT_COPY
             }
             None => DROPEFFECT_NONE,

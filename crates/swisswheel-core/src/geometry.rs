@@ -23,6 +23,83 @@ pub enum Hit {
     Cancel,
     Item(usize),
     Outside,
+    /// A row of the option panel.
+    Choice(usize),
+    /// The option panel's title or margin: nothing to drop on.
+    Panel,
+}
+
+/// The option panel beside the wheel (spec 2.5), in DIPs.
+pub const PANEL_WIDTH: f32 = 168.0;
+pub const PANEL_HEADER: f32 = 30.0;
+pub const PANEL_ROW: f32 = 40.0;
+pub const PANEL_PAD: f32 = 6.0;
+/// The panel reaches this far over the wheel's edge, so moving from the
+/// wheel onto it never leaves the window.
+pub const PANEL_OVERLAP: f32 = 12.0;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Left,
+    Right,
+}
+
+/// Relative to the wheel center, in physical pixels (y down).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PanelRect {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelHit {
+    Header,
+    Row(usize),
+}
+
+pub fn panel_rect(side: Side, rows: usize, scale: f32) -> PanelRect {
+    let near = (OUTER_RADIUS - PANEL_OVERLAP) * scale;
+    let far = near + PANEL_WIDTH * scale;
+    let half = (PANEL_HEADER + rows as f32 * PANEL_ROW + PANEL_PAD) * scale / 2.0;
+    let (left, right) = match side {
+        Side::Right => (near, far),
+        Side::Left => (-far, -near),
+    };
+    PanelRect {
+        left,
+        top: -half,
+        right,
+        bottom: half,
+    }
+}
+
+pub fn panel_hit(side: Side, rows: usize, dx: f32, dy: f32, scale: f32) -> Option<PanelHit> {
+    let r = panel_rect(side, rows, scale);
+    if !(dx >= r.left && dx <= r.right && dy >= r.top && dy <= r.bottom) {
+        return None; // also rejects NaN
+    }
+    let y = (dy - r.top) / scale - PANEL_HEADER;
+    if y < 0.0 {
+        return Some(PanelHit::Header);
+    }
+    let row = (y / PANEL_ROW) as usize;
+    Some(if row < rows {
+        PanelHit::Row(row)
+    } else {
+        PanelHit::Header // bottom margin
+    })
+}
+
+/// Right of the wheel when the work area has room there, otherwise left.
+pub fn panel_side(center_x: i32, work_area: Rect, scale: f32) -> Side {
+    let reach = ((OUTER_RADIUS - PANEL_OVERLAP + PANEL_WIDTH) * scale).ceil() as i32;
+    if center_x + reach <= work_area.right {
+        Side::Right
+    } else {
+        Side::Left
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -231,5 +308,53 @@ mod tests {
             bottom: 1024,
         };
         assert_eq!(clamp_center((-1275, 512), left, 1.0), (-1120, 512));
+    }
+    #[test]
+    fn panel_rect_and_hit_on_the_right() {
+        let r = panel_rect(Side::Right, 3, 1.0);
+        assert_eq!((r.left, r.right), (148.0, 316.0));
+        assert_eq!((r.top, r.bottom), (-78.0, 78.0)); // 30 + 3*40 + 6 = 156
+        assert_eq!(
+            panel_hit(Side::Right, 3, 200.0, -70.0, 1.0),
+            Some(PanelHit::Header)
+        );
+        assert_eq!(
+            panel_hit(Side::Right, 3, 200.0, -40.0, 1.0),
+            Some(PanelHit::Row(0))
+        );
+        assert_eq!(
+            panel_hit(Side::Right, 3, 200.0, 70.0, 1.0),
+            Some(PanelHit::Row(2))
+        );
+        assert_eq!(panel_hit(Side::Right, 3, 100.0, 0.0, 1.0), None);
+        assert_eq!(
+            panel_hit(Side::Right, 3, 400.0, 0.0, 2.0),
+            Some(PanelHit::Row(1))
+        ); // scaled
+    }
+
+    #[test]
+    fn panel_hit_mirrors_on_the_left() {
+        let r = panel_rect(Side::Left, 4, 1.0);
+        assert_eq!((r.left, r.right), (-316.0, -148.0));
+        assert_eq!(
+            panel_hit(Side::Left, 4, -200.0, -40.0, 1.0),
+            panel_hit(Side::Right, 4, 200.0, -40.0, 1.0)
+        );
+        assert_eq!(panel_hit(Side::Left, 4, 200.0, -40.0, 1.0), None);
+    }
+
+    #[test]
+    fn panel_side_flips_at_the_right_edge() {
+        let work = Rect {
+            left: 0,
+            top: 0,
+            right: 1920,
+            bottom: 1080,
+        };
+        assert_eq!(panel_side(960, work, 1.0), Side::Right);
+        assert_eq!(panel_side(1920 - 160, work, 1.0), Side::Left); // needs 316 to the right
+        assert_eq!(panel_side(1920 - 316, work, 1.0), Side::Right);
+        assert_eq!(panel_side(1920 - 400, work, 1.5), Side::Left); // 316 * 1.5 = 474
     }
 }
