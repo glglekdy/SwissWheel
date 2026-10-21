@@ -117,7 +117,7 @@ const IMAGE_TARGETS: [Format; 7] = [
     Format::Gif,
     Format::Ico,
 ];
-const VIDEO_TARGETS: [Format; 7] = [
+pub(crate) const VIDEO_TARGETS: [Format; 7] = [
     Format::Mp4,
     Format::Mkv,
     Format::Webm,
@@ -126,8 +126,8 @@ const VIDEO_TARGETS: [Format; 7] = [
     Format::Gif,
     Format::Mp3,
 ];
-const ANIMATED_GIF_TARGETS: [Format; 2] = [Format::Mp4, Format::Webm];
-const AUDIO_TARGETS: [Format; 6] = [
+pub(crate) const ANIMATED_GIF_TARGETS: [Format; 2] = [Format::Mp4, Format::Webm];
+pub(crate) const AUDIO_TARGETS: [Format; 6] = [
     Format::Mp3,
     Format::M4a,
     Format::Wav,
