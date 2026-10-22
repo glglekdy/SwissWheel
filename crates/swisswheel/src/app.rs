@@ -721,9 +721,11 @@ impl AppState {
                 self.notify(info(tile.label(), "다음 버전에서 지원 예정입니다"));
             }
             MenuAction::OpenDownloads => {
-                self.refresh_download_panel();
+                // The check first: it may mark the release as being checked,
+                // which changes the buttons; the refresh then hands the menu
+                // the same buttons it draws, and draws them.
                 self.start_essentials_check();
-                self.render_menu();
+                self.refresh_download_panel();
             }
             MenuAction::Essential(Essential::Ffmpeg, action) => {
                 self.close_menu();
