@@ -2,6 +2,7 @@
 //! queued file, glass like the wheel, click-through, never focused, and
 //! hidden when nothing runs.
 
+use swisswheel_core::appearance::Accent;
 use swisswheel_core::summary::{more_files, progress_value};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::*;
@@ -13,12 +14,12 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::WindowsAndMessaging::*;
-use windows::core::{BOOL, PCWSTR, Result, w};
+use windows::core::{BOOL, Result, w};
 
+use crate::fonts;
 use crate::jobs::ProgressRow;
-use crate::surface::{Surface, draw_text, inset, rounded};
-use crate::theme::{light_theme, transparency_enabled};
-use crate::wheel::render::{Palette, palette};
+use crate::surface::{Surface, draw_text, rounded};
+use crate::theme::{Theme, glass_layer, rounded_shape};
 
 /// Card layout in DIPs.
 const WIDTH: f32 = 300.0;
@@ -94,7 +95,7 @@ impl ProgressWindow {
     }
 
     /// Shows `rows`, or hides the card when there are none.
-    pub fn update(&mut self, rows: &[ProgressRow]) {
+    pub fn update(&mut self, rows: &[ProgressRow], accent: Accent) {
         if rows.is_empty() {
             self.hide();
             return;
@@ -108,7 +109,7 @@ impl ProgressWindow {
         }
         let (scale, glass) = (self.scale, self.glass_supported);
         if let Some(surface) = &mut self.surface
-            && let Err(e) = draw_card(surface, rows, scale, glass)
+            && let Err(e) = draw_card(surface, rows, accent, scale, glass)
         {
             log_error!("진행 창 그리기 실패: {e}");
             self.surface = None; // rebuilt on the next show
@@ -167,16 +168,14 @@ fn card_height(rows: usize, more: bool) -> f32 {
     HEADER + rows as f32 * ROW + if more { MORE } else { 0.0 } + BOTTOM
 }
 
-const FONT: PCWSTR = w!("Segoe UI Variable Text");
-
 fn draw_card(
     surface: &Surface,
     rows: &[ProgressRow],
+    accent: Accent,
     scale: f32,
     glass_supported: bool,
 ) -> Result<()> {
-    let glass = glass_supported && transparency_enabled();
-    let colors = palette(light_theme(), glass, 1.0);
+    let theme = Theme::current(glass_supported, accent, 1.0);
     let shown = rows.len().min(MAX_ROWS);
     let hidden = rows.len() - shown;
     let (w, h) = (surface.size().0 as f32, surface.size().1 as f32);
@@ -188,22 +187,19 @@ fn draw_card(
         bottom: h,
     };
     let corner = CORNER * scale;
-    surface.set_glass(0, glass.then_some(card), corner)?;
+    surface.set_glass(0, theme.glass.then_some(card), corner)?;
 
-    let leading = surface.text_format(
-        FONT,
+    let leading = fonts::trimmed_format(
         12.5 * scale,
         DWRITE_FONT_WEIGHT_SEMI_BOLD,
         DWRITE_TEXT_ALIGNMENT_LEADING,
     )?;
-    let small_leading = surface.text_format(
-        FONT,
+    let small_leading = fonts::trimmed_format(
         11.0 * scale,
         DWRITE_FONT_WEIGHT_SEMI_BOLD,
         DWRITE_TEXT_ALIGNMENT_LEADING,
     )?;
-    let trailing = surface.text_format(
-        FONT,
+    let trailing = fonts::trimmed_format(
         11.0 * scale,
         DWRITE_FONT_WEIGHT_NORMAL,
         DWRITE_TEXT_ALIGNMENT_TRAILING,
@@ -213,13 +209,7 @@ fn draw_card(
         ctx.BeginDraw();
         ctx.Clear(Some(&D2D1_COLOR_F::default()));
         let brush = |color: &D2D1_COLOR_F| ctx.CreateSolidColorBrush(color, None);
-        ctx.FillRoundedRectangle(&rounded(card, corner), &brush(&colors.disc)?);
-        ctx.DrawRoundedRectangle(
-            &rounded(inset(card, 0.5 * scale), corner),
-            &brush(&colors.rim)?,
-            scale,
-            None,
-        );
+        glass_layer(ctx, &rounded_shape(ctx, card, corner)?, card, &theme, scale)?;
 
         let pad = PAD * scale;
         let text_box = |top: f32, height: f32| D2D_RECT_F {
@@ -234,10 +224,10 @@ fn draw_card(
             &header,
             &small_leading,
             text_box(card.top + 4.0 * scale, HEADER * scale - 4.0 * scale),
-            &brush(&colors.subtext)?,
+            &brush(&theme.subtext)?,
         );
 
-        let track = brush(&track_color(&colors))?;
+        let track = brush(&theme.track)?;
         for (i, row) in rows.iter().take(shown).enumerate() {
             let top = card.top + (HEADER + i as f32 * ROW) * scale;
             let line = text_box(top, 20.0 * scale);
@@ -249,14 +239,14 @@ fn draw_card(
                     right: line.right - 44.0 * scale, // room for "100%"
                     ..line
                 },
-                &brush(&colors.text)?,
+                &brush(&theme.text)?,
             );
             draw_text(
                 ctx,
                 &progress_value(row.fraction),
                 &trailing,
                 line,
-                &brush(&colors.subtext)?,
+                &brush(&theme.subtext)?,
             );
             let bar = D2D_RECT_F {
                 left: line.left,
@@ -271,7 +261,7 @@ fn draw_card(
                     right: bar.left + (bar.right - bar.left) * p.clamp(0.0, 1.0),
                     ..bar
                 };
-                ctx.FillRoundedRectangle(&rounded(filled, radius), &brush(&colors.accent_top)?);
+                ctx.FillRoundedRectangle(&rounded(filled, radius), &brush(&theme.accent)?);
             }
         }
         if hidden > 0 {
@@ -281,20 +271,12 @@ fn draw_card(
                 &more_files(hidden),
                 &small_leading,
                 text_box(top, MORE * scale),
-                &brush(&colors.subtext)?,
+                &brush(&theme.subtext)?,
             );
         }
         ctx.EndDraw(None, None)?;
     }
     surface.present()
-}
-
-/// The empty part of a progress bar: the text color, faint.
-fn track_color(colors: &Palette) -> D2D1_COLOR_F {
-    D2D1_COLOR_F {
-        a: colors.text.a * 0.15,
-        ..colors.text
-    }
 }
 
 unsafe extern "system" fn wnd_proc(

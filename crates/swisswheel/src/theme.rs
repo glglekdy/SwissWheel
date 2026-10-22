@@ -67,6 +67,8 @@ pub struct Theme {
     pub alpha: f32,
     pub accent: D2D1_COLOR_F,
     pub failure: D2D1_COLOR_F,
+    /// Text and icons on an accent piece.
+    pub on_accent: D2D1_COLOR_F,
     /// Base layer tint, top to bottom.
     pub tint_top: D2D1_COLOR_F,
     pub tint_bottom: D2D1_COLOR_F,
@@ -100,6 +102,7 @@ impl Theme {
                 alpha,
                 accent,
                 failure,
+                on_accent: c(0xFFFFFF, 1.0),
                 tint_top: c(0xFFFFFF, 0.32),
                 tint_bottom: c(0xFFFFFF, 0.18),
                 opaque: c(0xF2F2F5, 1.0),
@@ -120,6 +123,7 @@ impl Theme {
                 alpha,
                 accent,
                 failure,
+                on_accent: c(0xFFFFFF, 1.0),
                 tint_top: c(0x2A2A2E, 0.55),
                 tint_bottom: c(0x1C1C1E, 0.45),
                 opaque: c(0x1F1F22, 1.0),
@@ -152,13 +156,11 @@ impl Theme {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Piece {
     Plain,
-    // Not drawn with until the menu switches over; `expect` flags these
-    // attributes for removal once it does.
-    #[cfg_attr(not(test), expect(dead_code))]
     Selected,
     Accent,
-    #[cfg_attr(not(test), expect(dead_code))]
     Keycap,
+    /// The selected tab of a segmented control.
+    Tab,
 }
 
 /// A base glass layer (wheel disc, menu bar, panels, cards): tint, inner
@@ -218,6 +220,10 @@ pub fn glass_piece(
             0xFFFFFF,
             if theme.light { 0.80 } else { 0.12 } * theme.alpha,
         ),
+        Piece::Tab => rgb(
+            0xFFFFFF,
+            if theme.light { 0.85 } else { 0.18 } * theme.alpha,
+        ),
     };
     let glow = if piece == Piece::Accent {
         // Its colored shadow, under the fill.
@@ -242,7 +248,6 @@ pub fn glass_piece(
 
 /// A soft shadow around a floating window's shape (menu, cards), offset
 /// downward. Masked to the outside of `shape` so it never darkens the glass.
-#[cfg_attr(not(test), expect(dead_code))] // until the menu and cards use it
 pub fn outer_shadow(
     ctx: &ID2D1DeviceContext,
     shape: &ID2D1Geometry,
@@ -258,6 +263,23 @@ pub fn outer_shadow(
         });
     });
     Ok(())
+}
+
+/// A rounded rectangle to draw glass with.
+pub fn rounded_shape(
+    ctx: &ID2D1DeviceContext,
+    rect: D2D_RECT_F,
+    corner: f32,
+) -> Result<ID2D1Geometry> {
+    unsafe {
+        ctx.GetFactory()?
+            .CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
+                rect,
+                radiusX: corner,
+                radiusY: corner,
+            })?
+            .cast()
+    }
 }
 
 /// Inner glow, sheen, and rim, shared by layers and pieces.
@@ -497,30 +519,18 @@ mod tests {
         }
     }
 
-    fn rounded(factory: &ID2D1Factory1, rect: D2D_RECT_F, corner: f32) -> Result<ID2D1Geometry> {
-        unsafe {
-            factory
-                .CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: corner,
-                    radiusY: corner,
-                })?
-                .cast()
-        }
-    }
-
     /// Every routine on a real device context; D2D reports misused layers or
     /// brushes from `EndDraw`.
     #[test]
     fn draws_on_a_device_context() -> Result<()> {
-        let (factory, ctx, _target) = canvas(200, 120)?;
+        let (_factory, ctx, _target) = canvas(200, 120)?;
         let rect = D2D_RECT_F {
             left: 20.0,
             top: 20.0,
             right: 180.0,
             bottom: 100.0,
         };
-        let shape = rounded(&factory, rect, 16.0)?;
+        let shape = rounded_shape(&ctx, rect, 16.0)?;
         unsafe {
             ctx.BeginDraw();
             ctx.SetTransform(&Matrix3x2::translation(0.5, 0.5));
@@ -531,7 +541,13 @@ mod tests {
             ] {
                 outer_shadow(&ctx, &shape, &theme, 1.25)?;
                 glass_layer(&ctx, &shape, rect, &theme, 1.25)?;
-                for piece in [Piece::Plain, Piece::Selected, Piece::Accent, Piece::Keycap] {
+                for piece in [
+                    Piece::Plain,
+                    Piece::Selected,
+                    Piece::Accent,
+                    Piece::Keycap,
+                    Piece::Tab,
+                ] {
                     glass_piece(&ctx, &shape, rect, &theme, piece, 1.25)?;
                 }
             }
@@ -543,7 +559,7 @@ mod tests {
     /// translucent piece itself.
     #[test]
     fn piece_shadow_stays_outside_the_piece() -> Result<()> {
-        let (factory, ctx, target) = canvas(120, 120)?;
+        let (_factory, ctx, target) = canvas(120, 120)?;
         let rect = D2D_RECT_F {
             left: 20.0,
             top: 20.0,
@@ -557,7 +573,7 @@ mod tests {
             ctx.Clear(Some(&rgb(0x2A2A2E, 1.0)));
             glass_piece(
                 &ctx,
-                &rounded(&factory, rect, 9.0)?,
+                &rounded_shape(&ctx, rect, 9.0)?,
                 rect,
                 &theme,
                 Piece::Plain,

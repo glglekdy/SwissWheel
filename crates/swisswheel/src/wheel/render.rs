@@ -28,7 +28,7 @@ use super::glyph::glyph;
 use super::window::HOVER_GROW;
 use super::{PanelView, WheelView};
 use crate::fonts;
-use crate::theme::{Piece, Theme, glass_layer, glass_piece, rgb};
+use crate::theme::{Piece, Theme, glass_layer, glass_piece, rounded_shape};
 
 const OPEN_SCALE_FROM: f32 = 0.92; // wheel scales from 92% to 100% while opening
 
@@ -42,63 +42,6 @@ pub(super) const PANEL_CORNER: f32 = 16.0;
 const ROW_CORNER: f32 = 11.0;
 /// Marks the default choice in the option panel.
 const BADGE: &str = "기본";
-
-/// The old flat colors, still used by the menu bar and the progress card.
-pub(crate) struct Palette {
-    /// Glass: a light translucent tint over the blur. Solid: an opaque disc.
-    pub(crate) disc: D2D1_COLOR_F,
-    /// 1 px highlight just inside the edge.
-    pub(crate) rim: D2D1_COLOR_F,
-    /// Tiles shade from top to bottom.
-    pub(crate) tile_top: D2D1_COLOR_F,
-    pub(crate) tile_bottom: D2D1_COLOR_F,
-    pub(crate) text: D2D1_COLOR_F,
-    pub(crate) subtext: D2D1_COLOR_F,
-    pub(crate) accent_top: D2D1_COLOR_F,
-    pub(crate) accent_bottom: D2D1_COLOR_F,
-    pub(crate) accent_text: D2D1_COLOR_F,
-}
-
-/// `alpha` fades everything in during the open animation.
-pub(crate) fn palette(light: bool, glass: bool, alpha: f32) -> Palette {
-    let a = |v: f32| v * alpha;
-    let accent_top = rgb(0xEA4A4E, alpha);
-    let accent_bottom = rgb(0xD2343A, alpha);
-    let accent_text = rgb(0xFFFFFF, alpha);
-    if light {
-        Palette {
-            disc: if glass {
-                rgb(0xECECEF, a(0.62))
-            } else {
-                rgb(0xE6E6EA, alpha)
-            },
-            rim: rgb(0xFFFFFF, a(0.90)),
-            tile_top: rgb(0xFFFFFF, a(0.96)),
-            tile_bottom: rgb(0xEFEFF2, a(0.96)),
-            text: rgb(0x2B2B2E, alpha),
-            subtext: rgb(0x7A7A80, alpha),
-            accent_top,
-            accent_bottom,
-            accent_text,
-        }
-    } else {
-        Palette {
-            disc: if glass {
-                rgb(0x2A2A2E, a(0.58))
-            } else {
-                rgb(0x242428, alpha)
-            },
-            rim: rgb(0xFFFFFF, a(0.14)),
-            tile_top: rgb(0x4A4A50, a(0.92)),
-            tile_bottom: rgb(0x3C3C42, a(0.92)),
-            text: rgb(0xF0F0F2, alpha),
-            subtext: rgb(0xA8A8AE, alpha),
-            accent_top,
-            accent_bottom,
-            accent_text,
-        }
-    }
-}
 
 pub struct Renderer {
     _device: ID3D11Device,
@@ -300,14 +243,14 @@ impl Renderer {
             } else {
                 (22.0, 10.5, -7.0, 13.0)
             };
-            let icon_format = self.icon_format(icon_size * scale)?;
+            let icon_format = fonts::icon_format(self.icon_font, icon_size * scale)?;
             let label_format = fonts::text_format(
                 label_size * scale,
                 DWRITE_FONT_WEIGHT_SEMI_BOLD,
                 DWRITE_TEXT_ALIGNMENT_CENTER,
             )?;
             let text = brush(&theme.text)?;
-            let on_accent = brush(&rgb(0xFFFFFF, eased))?;
+            let on_accent = brush(&theme.on_accent)?;
             // The hovered tile last: it grows over its neighbors' edges.
             let order = (0..n)
                 .filter(|&i| view.hovered != Hit::Item(i))
@@ -444,7 +387,7 @@ impl Renderer {
 
         let ctx = &self.ctx;
         let brush = |color: &D2D1_COLOR_F| unsafe { ctx.CreateSolidColorBrush(color, None) };
-        glass_layer(ctx, &self.rounded(rect, corner)?, rect, &theme, scale)?;
+        glass_layer(ctx, &rounded_shape(ctx, rect, corner)?, rect, &theme, scale)?;
 
         let pad = 12.0 * scale;
         let title_format = fonts::text_format(
@@ -470,7 +413,7 @@ impl Renderer {
         let width = rect.right - rect.left - 2.0 * pad;
         let mid_x = (rect.left + rect.right) / 2.0;
         let (text, subtext) = (brush(&theme.text)?, brush(&theme.subtext)?);
-        let on_accent = brush(&rgb(0xFFFFFF, fade))?;
+        let on_accent = brush(&theme.on_accent)?;
         self.draw_text(
             panel.title,
             &title_format,
@@ -491,7 +434,7 @@ impl Renderer {
             };
             let hovered = panel.hovered == Some(i);
             if hovered {
-                let shape = self.rounded(row, ROW_CORNER * scale)?;
+                let shape = rounded_shape(ctx, row, ROW_CORNER * scale)?;
                 glass_piece(ctx, &shape, row, &theme, Piece::Accent, scale)?;
             }
             let (text, subtext) = if hovered {
@@ -522,8 +465,8 @@ impl Renderer {
             );
             if i == panel.default {
                 // A small pill right after the label.
-                let (label_width, _) = text_size(choice.label, &label_format)?;
-                let (badge_width, badge_height) = text_size(BADGE, &badge_format)?;
+                let (label_width, _) = fonts::text_size(choice.label, &label_format)?;
+                let (badge_width, badge_height) = fonts::text_size(BADGE, &badge_format)?;
                 let (w, h) = (badge_width + 12.0 * scale, badge_height + 3.0 * scale);
                 let left = row.left + inner + label_width + 6.0 * scale;
                 let pill = D2D_RECT_F {
@@ -532,7 +475,7 @@ impl Renderer {
                     right: left + w,
                     bottom: row_mid_y + h / 2.0,
                 };
-                let shape = self.rounded(pill, h / 2.0)?;
+                let shape = rounded_shape(ctx, pill, h / 2.0)?;
                 glass_piece(ctx, &shape, pill, &theme, Piece::Plain, scale)?;
                 self.draw_text(
                     BADGE,
@@ -546,25 +489,6 @@ impl Renderer {
             }
         }
         Ok(())
-    }
-
-    /// The system icon font (see `icon_font`), centered like `fonts::text_format`.
-    fn icon_format(&self, size: f32) -> Result<IDWriteTextFormat> {
-        unsafe {
-            let format = fonts::factory().CreateTextFormat(
-                self.icon_font,
-                None,
-                DWRITE_FONT_WEIGHT_NORMAL,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                size,
-                w!("ko-kr"),
-            )?;
-            format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
-            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-            Ok(format)
-        }
     }
 
     /// Draws `text` centered on (`x`, `y`) in a `width` × `height` box.
@@ -602,18 +526,6 @@ impl Renderer {
         unsafe {
             self.factory
                 .CreateEllipseGeometry(&ellipse_at(cx, cy, r))?
-                .cast()
-        }
-    }
-
-    fn rounded(&self, rect: D2D_RECT_F, radius: f32) -> Result<ID2D1Geometry> {
-        unsafe {
-            self.factory
-                .CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
-                    rect,
-                    radiusX: radius,
-                    radiusY: radius,
-                })?
                 .cast()
         }
     }
@@ -809,17 +721,6 @@ fn square(cx: f32, cy: f32, r: f32) -> D2D_RECT_F {
         top: cy - r,
         right: cx + r,
         bottom: cy + r,
-    }
-}
-
-/// Width and height of `text` laid out on one line in `format`.
-fn text_size(text: &str, format: &IDWriteTextFormat) -> Result<(f32, f32)> {
-    let wide: Vec<u16> = text.encode_utf16().collect();
-    unsafe {
-        let layout = fonts::factory().CreateTextLayout(&wide, format, f32::MAX, f32::MAX)?;
-        let mut metrics = DWRITE_TEXT_METRICS::default();
-        layout.GetMetrics(&mut metrics)?;
-        Ok((metrics.width, metrics.height))
     }
 }
 

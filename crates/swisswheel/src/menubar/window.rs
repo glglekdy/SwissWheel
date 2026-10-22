@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::time::{Duration, Instant};
 
 use swisswheel_core::geometry::Rect;
-use swisswheel_core::menu_geometry::{Box2, MenuLayout, layout, window_origin};
+use swisswheel_core::menu_geometry::{Box2, DROP, MenuLayout, RowBoxes, layout, window_origin};
 
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM};
 use windows::Win32::Graphics::Dwm::{DWMWA_USE_HOSTBACKDROPBRUSH, DwmSetWindowAttribute};
@@ -24,6 +24,9 @@ use super::render::{BAR_CORNER, PANEL_CORNER, draw};
 use super::{MenuMouse, MenuView};
 use crate::surface::Surface;
 
+/// Room around the bar and the panel for their outer shadow (DIPs).
+const SHADOW_MARGIN: f32 = 10.0;
+
 /// Not exported by the `windows` crate under WindowsAndMessaging.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 
@@ -38,7 +41,11 @@ pub struct MenuBar {
     glass_supported: bool,
     surface: Option<Surface>,
     scale: f32,
+    /// `menu_geometry`'s layout moved in by `margin` on every side, so its
+    /// boxes are in window pixels.
     layout: MenuLayout,
+    /// `SHADOW_MARGIN` in pixels.
+    margin: f32,
     /// The window's top-left on screen.
     origin: POINT,
     panel_open: bool,
@@ -87,6 +94,7 @@ impl MenuBar {
                 surface: None,
                 scale: 1.0,
                 layout: layout(false, 1.0),
+                margin: 0.0,
                 origin: POINT::default(),
                 panel_open: false,
                 visible: false,
@@ -124,8 +132,12 @@ impl MenuBar {
                 right: wa.right,
                 bottom: wa.bottom,
             };
-            self.layout = layout(notice, self.scale);
-            let (x, y) = window_origin(work, &self.layout, self.scale);
+            let core = layout(notice, self.scale);
+            let (x, y) = window_origin(work, &core, self.scale);
+            self.margin = (SHADOW_MARGIN * self.scale).round();
+            self.layout = with_margin(&core, self.margin);
+            let m = self.margin as i32;
+            let (x, y) = (x - m, y - m);
             self.origin = POINT { x, y };
             let _ = SetWindowPos(
                 self.hwnd,
@@ -142,18 +154,22 @@ impl MenuBar {
     }
 
     /// Limits hit testing to the bar (with the strip it slides in from) and,
-    /// while open, the panel; clicks elsewhere reach the desktop.
+    /// while open, the panel, each with its shadow; clicks elsewhere reach
+    /// the desktop.
     pub fn set_panel(&mut self, open: bool) {
         if self.panel_open == open {
             return;
         }
         self.panel_open = open;
-        let l = &self.layout;
-        let bar = Box2 { top: 0.0, ..l.bar };
+        let (l, m) = (&self.layout, self.margin);
+        let bar = Box2 {
+            top: 0.0,
+            ..grow(l.bar, m)
+        };
         unsafe {
-            let region = round_rect_region(bar, BAR_CORNER * self.scale);
+            let region = round_rect_region(bar, BAR_CORNER * self.scale + m);
             if open {
-                let panel = round_rect_region(l.panel, PANEL_CORNER * self.scale);
+                let panel = round_rect_region(grow(l.panel, m), PANEL_CORNER * self.scale + m);
                 CombineRgn(Some(region), Some(region), Some(panel), RGN_OR);
                 let _ = DeleteObject(panel.into());
             }
@@ -166,7 +182,11 @@ impl MenuBar {
     pub fn contains_screen(&self, x: i32, y: i32) -> bool {
         let (x, y) = ((x - self.origin.x) as f32, (y - self.origin.y) as f32);
         let l = &self.layout;
-        Box2 { top: 0.0, ..l.bar }.contains(x, y) || (self.panel_open && l.panel.contains(x, y))
+        let bar = Box2 {
+            top: l.bar.top - DROP * self.scale,
+            ..l.bar
+        };
+        bar.contains(x, y) || (self.panel_open && l.panel.contains(x, y))
     }
 
     pub fn show(&mut self) {
@@ -224,6 +244,48 @@ impl MenuBar {
             self.surface = None;
             log_info!("메뉴 렌더러 해제 (미사용 {}분)", idle.as_secs() / 60);
         }
+    }
+}
+
+/// `b` grown by `d` on every side.
+fn grow(b: Box2, d: f32) -> Box2 {
+    Box2 {
+        left: b.left - d,
+        top: b.top - d,
+        right: b.right + d,
+        bottom: b.bottom + d,
+    }
+}
+
+/// `l` in a window `margin` pixels larger on every side: each box moves by
+/// `margin`, so hit testing on window pixels finds the same targets.
+fn with_margin(l: &MenuLayout, margin: f32) -> MenuLayout {
+    let at = |b: Box2| Box2 {
+        left: b.left + margin,
+        top: b.top + margin,
+        right: b.right + margin,
+        bottom: b.bottom + margin,
+    };
+    let extra = 2 * margin.ceil() as i32;
+    MenuLayout {
+        width: l.width + extra,
+        height: l.height + extra,
+        bar: at(l.bar),
+        tiles: l.tiles.map(at),
+        panel: at(l.panel),
+        notice: l.notice.map(at),
+        tabs: l.tabs.map(at),
+        rows: l
+            .rows
+            .iter()
+            .map(|r| RowBoxes {
+                row: at(r.row),
+                back: at(r.back),
+                forward: at(r.forward),
+                keycap: at(r.keycap),
+            })
+            .collect(),
+        hint: at(l.hint),
     }
 }
 
@@ -306,4 +368,49 @@ unsafe extern "system" fn wnd_proc(
     };
     crate::app::on_menu_mouse(event);
     LRESULT(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swisswheel_core::menu::MenuHit;
+    use swisswheel_core::menu_geometry::{PanelShape, hit};
+    use swisswheel_core::settings::{Category, Dir};
+
+    fn mid(b: &Box2) -> (f32, f32) {
+        ((b.left + b.right) / 2.0, (b.top + b.bottom) / 2.0)
+    }
+
+    #[test]
+    fn margin_moves_every_box_and_grows_the_window() {
+        let core = layout(true, 1.25);
+        let l = with_margin(&core, 13.0);
+        assert_eq!((l.width, l.height), (core.width + 26, core.height + 26));
+        assert_eq!(l.bar.left, core.bar.left + 13.0);
+        assert_eq!(l.tiles[4].top, core.tiles[4].top + 13.0);
+        assert_eq!(l.notice.unwrap().top, core.notice.unwrap().top + 13.0);
+        assert_eq!(l.rows[2].keycap.right, core.rows[2].keycap.right + 13.0);
+        assert_eq!(l.hint.bottom, core.hint.bottom + 13.0);
+    }
+
+    #[test]
+    fn hit_testing_in_window_pixels_skips_the_margin() {
+        let core = layout(false, 1.0);
+        let l = with_margin(&core, 10.0);
+        let convert = Some(PanelShape::of(Category::Convert));
+        for (i, tile) in core.tiles.iter().enumerate() {
+            let (x, y) = mid(tile);
+            assert_eq!(hit(&l, None, x + 10.0, y + 10.0), MenuHit::Tile(i));
+        }
+        let (x, y) = mid(&core.rows[1].forward);
+        assert_eq!(
+            hit(&l, convert, x + 10.0, y + 10.0),
+            MenuHit::Step(1, Dir::Forward)
+        );
+        // The shadow margin left of the bar and under the panel is outside.
+        let (_, y) = mid(&core.tiles[0]);
+        assert_eq!(hit(&l, convert, 5.0, y + 10.0), MenuHit::Outside);
+        let below = l.panel.bottom + 5.0;
+        assert_eq!(hit(&l, convert, 100.0, below), MenuHit::Outside);
+    }
 }

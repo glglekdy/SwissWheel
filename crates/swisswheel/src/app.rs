@@ -731,6 +731,7 @@ impl AppState {
             focus: menu.focus(),
             capturing: menu.capturing(),
             hovered: menu.hovered(),
+            accent: self.config.appearance.accent,
             notice: (!self.config_writable).then_some(CONFIG_NOTICE),
             hint: self.menu_hint.as_deref().unwrap_or(menu.hint()),
             progress: fraction(self.menu_opened_at, OPEN_ANIMATION),
@@ -834,9 +835,9 @@ impl AppState {
     }
 
     /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`,
-    /// `progress`, `menu`, `menu-settings`, `menu-tools`, or `menu-capture`
-    /// shows that UI at startup without a drag or key press, so the drawing
-    /// can be checked by eye.
+    /// `progress`, `menu`, `menu-settings`, `menu-tools`, `menu-capture`,
+    /// `menu-notifications`, or `menu-general` shows that UI at startup
+    /// without a drag or key press, so the drawing can be checked by eye.
     #[cfg(debug_assertions)]
     fn preview(&mut self, what: &str) {
         use swisswheel_core::catalog::{InputItem, Operation};
@@ -909,10 +910,12 @@ impl AppState {
                     row("b.mp4", Operation::Convert(Format::Mkv), None),
                     row("c.mp4", Operation::Convert(Format::Mkv), None),
                 ];
-                self.progress_window.update(&rows);
+                self.progress_window
+                    .update(&rows, self.config.appearance.accent);
                 self.tray.set_busy(true, "SwissWheel · preview", Some(0.4));
             }
-            "menu" | "menu-settings" | "menu-tools" | "menu-capture" => {
+            "menu" | "menu-settings" | "menu-tools" | "menu-capture" | "menu-notifications"
+            | "menu-general" => {
                 use swisswheel_core::menu::{Focus, MenuHit};
                 use swisswheel_core::settings::{CATEGORIES, Category, SettingItem};
 
@@ -927,7 +930,9 @@ impl AppState {
                 }
                 bar.place(cursor, notice);
                 bar.set_panel(panel);
-                let config = swisswheel_core::config::Config::default();
+                // Defaults, but the accent from config.toml.
+                let mut config = swisswheel_core::config::Config::default();
+                config.appearance.accent = self.config.appearance.accent;
                 let (category, focus, hovered, failed) = match what {
                     "menu-settings" => (
                         Category::Keys,
@@ -937,6 +942,15 @@ impl AppState {
                     ),
                     "menu-tools" => (Category::Tools, Some(Focus::Tabs), MenuHit::Tab(2), None),
                     "menu-capture" => (Category::Keys, Some(Focus::Row(1)), MenuHit::Panel, None),
+                    "menu-notifications" => (
+                        Category::Notifications,
+                        Some(Focus::Row(2)),
+                        MenuHit::Row(0),
+                        None,
+                    ),
+                    "menu-general" => {
+                        (Category::General, Some(Focus::Row(1)), MenuHit::Panel, None)
+                    }
                     _ => (Category::Keys, None, MenuHit::Tile(2), None),
                 };
                 let rows = crate::menubar::rows(&config, category, failed);
@@ -954,6 +968,7 @@ impl AppState {
                     focus,
                     capturing,
                     hovered,
+                    accent: config.appearance.accent,
                     notice: notice.then_some(CONFIG_NOTICE),
                     hint,
                     progress: 1.0,
@@ -1291,7 +1306,8 @@ impl AppState {
         if self.config.progress.window {
             rows.extend(download);
         }
-        self.progress_window.update(&rows);
+        self.progress_window
+            .update(&rows, self.config.appearance.accent);
         unsafe {
             // While an update or FFmpeg thread runs too: the timer notices
             // when its download starts.

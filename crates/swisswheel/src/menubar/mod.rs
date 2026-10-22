@@ -4,9 +4,11 @@
 mod render;
 mod window;
 
+use swisswheel_core::appearance::Accent;
 use swisswheel_core::config::Config;
 use swisswheel_core::menu::{Focus, MenuHit};
 use swisswheel_core::settings::{Category, Dir, SettingItem, step};
+use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
 pub use window::MenuBar;
 
@@ -21,6 +23,8 @@ pub struct RowView {
     pub forward: bool,
     /// A shortcut row: the value is drawn as a key, without ◀ / ▶.
     pub keycap: bool,
+    /// A color dot drawn before the value (the accent row).
+    pub swatch: Option<D2D1_COLOR_F>,
 }
 
 /// The rows of `category`'s tab for `config`, top to bottom.
@@ -35,6 +39,8 @@ pub fn rows(config: &Config, category: Category, failed: Option<SettingItem>) ->
             back: step(config, item, Dir::Back).is_some(),
             forward: step(config, item, Dir::Forward).is_some(),
             keycap: item.is_key(),
+            swatch: (item == SettingItem::Accent)
+                .then(|| crate::theme::rgb(config.appearance.accent.rgb(), 1.0)),
         })
         .collect()
 }
@@ -50,6 +56,7 @@ pub struct MenuView<'a> {
     /// The focused shortcut row waits for a key.
     pub capturing: bool,
     pub hovered: MenuHit,
+    pub accent: Accent,
     /// Shown above the tabs when the config file can't be saved to.
     pub notice: Option<&'a str>,
     /// The line under the rows.

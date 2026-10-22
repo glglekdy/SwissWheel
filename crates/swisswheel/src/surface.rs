@@ -12,9 +12,10 @@ use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::System::WinRT::Composition::{ICompositorDesktopInterop, ICompositorInterop};
-use windows::core::{HSTRING, Interface, PCWSTR, Result, w};
+use windows::core::{HSTRING, Interface, PCWSTR, Result};
 use windows_numerics::Vector2;
 
+use crate::fonts;
 use crate::wheel::render::{create_d3d_device, icon_font};
 
 pub struct Surface {
@@ -26,7 +27,6 @@ pub struct Surface {
     /// Blurs of whatever is behind the window, each clipped to its shape.
     glass: Vec<(SpriteVisual, CompositionRoundedRectangleGeometry)>,
     _content: SpriteVisual,
-    dwrite: IDWriteFactory,
     /// Family of the system icon font (see `wheel::glyph`).
     icon_font: PCWSTR,
     size: (u32, u32),
@@ -105,9 +105,8 @@ impl Surface {
                 .CreateCompositionSurfaceForSwapChain(&swap)?;
             content.SetBrush(&compositor.CreateSurfaceBrushWithSurface(&surface)?)?;
             children.InsertAtTop(&content)?;
-            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
             Ok(Surface {
-                icon_font: icon_font(&dwrite),
+                icon_font: icon_font(&fonts::factory()),
                 _device: device,
                 ctx,
                 swap,
@@ -115,7 +114,6 @@ impl Surface {
                 _target: target,
                 glass,
                 _content: content,
-                dwrite,
                 size: (width, height),
             })
         }
@@ -158,40 +156,6 @@ impl Surface {
 
     pub fn present(&self) -> Result<()> {
         unsafe { self.swap.Present(1, DXGI_PRESENT(0)).ok() }
-    }
-
-    /// Single-line text, centered vertically, cut with "…" when too long.
-    pub fn text_format(
-        &self,
-        family: PCWSTR,
-        size: f32,
-        weight: DWRITE_FONT_WEIGHT,
-        align: DWRITE_TEXT_ALIGNMENT,
-    ) -> Result<IDWriteTextFormat> {
-        unsafe {
-            let format = self.dwrite.CreateTextFormat(
-                family,
-                None,
-                weight,
-                DWRITE_FONT_STYLE_NORMAL,
-                DWRITE_FONT_STRETCH_NORMAL,
-                size,
-                w!("ko-kr"),
-            )?;
-            format.SetTextAlignment(align)?;
-            format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-            format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
-            let sign = self.dwrite.CreateEllipsisTrimmingSign(&format)?;
-            format.SetTrimming(
-                &DWRITE_TRIMMING {
-                    granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
-                    delimiter: 0,
-                    delimiterCount: 0,
-                },
-                &sign,
-            )?;
-            Ok(format)
-        }
     }
 }
 

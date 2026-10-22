@@ -71,6 +71,58 @@ pub fn text_format(
     format_in(collection(), size, weight, alignment)
 }
 
+/// `text_format`, cut with "…" when too long for its box.
+pub fn trimmed_format(
+    size: f32,
+    weight: DWRITE_FONT_WEIGHT,
+    alignment: DWRITE_TEXT_ALIGNMENT,
+) -> Result<IDWriteTextFormat> {
+    let format = text_format(size, weight, alignment)?;
+    unsafe {
+        let sign = factory().CreateEllipsisTrimmingSign(&format)?;
+        format.SetTrimming(
+            &DWRITE_TRIMMING {
+                granularity: DWRITE_TRIMMING_GRANULARITY_CHARACTER,
+                delimiter: 0,
+                delimiterCount: 0,
+            },
+            &sign,
+        )?;
+    }
+    Ok(format)
+}
+
+/// The system icon font `family` (see `wheel::render::icon_font`),
+/// centered like `text_format`.
+pub fn icon_format(family: PCWSTR, size: f32) -> Result<IDWriteTextFormat> {
+    unsafe {
+        let format = factory().CreateTextFormat(
+            family,
+            None,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            size,
+            w!("ko-kr"),
+        )?;
+        format.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+        format.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        format.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+        Ok(format)
+    }
+}
+
+/// Width and height of `text` laid out on one line in `format`.
+pub fn text_size(text: &str, format: &IDWriteTextFormat) -> Result<(f32, f32)> {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        let layout = factory().CreateTextLayout(&wide, format, f32::MAX, f32::MAX)?;
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        layout.GetMetrics(&mut metrics)?;
+        Ok((metrics.width, metrics.height))
+    }
+}
+
 /// `text_format` over `fonts`, or the fallback family when it is `None`.
 fn format_in(
     fonts: Option<IDWriteFontCollection1>,
