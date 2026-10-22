@@ -17,7 +17,8 @@ use windows::core::{BOOL, PCWSTR, Result, w};
 
 use crate::jobs::ProgressRow;
 use crate::surface::{Surface, draw_text, inset, rounded};
-use crate::wheel::render::{Palette, light_theme, palette, transparency_enabled};
+use crate::theme::{light_theme, transparency_enabled};
+use crate::wheel::render::{Palette, palette};
 
 /// Card layout in DIPs.
 const WIDTH: f32 = 300.0;

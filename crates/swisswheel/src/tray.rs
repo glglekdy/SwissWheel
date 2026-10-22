@@ -11,7 +11,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 };
 
 use crate::icon;
-use crate::wheel::render::taskbar_light_theme;
+use crate::theme::taskbar_light_theme;
 
 /// Callback message for tray events (`NOTIFYICON_VERSION_4` layout).
 pub const WM_APP_TRAY: u32 = WM_APP + 10;

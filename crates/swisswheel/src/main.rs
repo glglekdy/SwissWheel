@@ -20,6 +20,10 @@ mod menubar;
 mod probe;
 mod progress;
 mod surface;
+// The glass drawing isn't used until the renderers switch over; `expect`
+// flags this attribute for removal once they do.
+#[cfg_attr(not(test), expect(dead_code))]
+mod theme;
 mod tray;
 mod update;
 mod wheel;

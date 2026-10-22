@@ -19,7 +19,6 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 use windows::Win32::Graphics::Dxgi::*;
-use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
 use windows::Win32::System::WinRT::Composition::{ICompositorDesktopInterop, ICompositorInterop};
 use windows::core::{BOOL, HSTRING, Interface, PCWSTR, Result, w};
 use windows_numerics::Vector2;
@@ -27,6 +26,7 @@ use windows_numerics::Vector2;
 use super::glyph::glyph;
 use super::window::HOVER_GROW;
 use super::{PanelView, WheelView};
+use crate::theme::{light_theme, rgb, transparency_enabled};
 
 const OPEN_SCALE_FROM: f32 = 0.92; // wheel scales from 92% to 100% while opening
 
@@ -56,16 +56,6 @@ pub(crate) struct Palette {
     pub(crate) accent_top: D2D1_COLOR_F,
     pub(crate) accent_bottom: D2D1_COLOR_F,
     pub(crate) accent_text: D2D1_COLOR_F,
-}
-
-pub(crate) fn rgb(hex: u32, alpha: f32) -> D2D1_COLOR_F {
-    let c = |shift: u32| ((hex >> shift) & 0xFF) as f32 / 255.0;
-    D2D1_COLOR_F {
-        r: c(16),
-        g: c(8),
-        b: c(0),
-        a: alpha,
-    }
 }
 
 /// `alpha` fades everything in during the open animation.
@@ -115,39 +105,6 @@ pub(crate) fn palette(light: bool, glass: bool, alpha: f32) -> Palette {
             accent_text,
         }
     }
-}
-
-/// A DWORD under the user's personalization settings; `default` if unset.
-fn personalize_flag(name: PCWSTR, default: bool) -> bool {
-    let mut value = u32::from(default);
-    let mut size = size_of::<u32>() as u32;
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_CURRENT_USER,
-            w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize"),
-            name,
-            RRF_RT_REG_DWORD,
-            None,
-            Some(std::ptr::from_mut(&mut value).cast()),
-            Some(&mut size),
-        )
-    };
-    if status.is_err() { default } else { value != 0 }
-}
-
-pub(crate) fn light_theme() -> bool {
-    personalize_flag(w!("AppsUseLightTheme"), true)
-}
-
-/// The taskbar and tray are light ("Windows mode" in Settings → Colors),
-/// which is set apart from the apps' mode.
-pub(crate) fn taskbar_light_theme() -> bool {
-    personalize_flag(w!("SystemUsesLightTheme"), false)
-}
-
-/// Settings → Personalization → Colors → Transparency effects.
-pub(crate) fn transparency_enabled() -> bool {
-    personalize_flag(w!("EnableTransparency"), true)
 }
 
 pub struct Renderer {

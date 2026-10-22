@@ -12,7 +12,8 @@ use windows_numerics::Vector2;
 
 use super::MenuView;
 use crate::surface::{Surface, draw_text, inset, rounded};
-use crate::wheel::render::{Palette, light_theme, palette, transparency_enabled};
+use crate::theme::{light_theme, transparency_enabled};
+use crate::wheel::render::{Palette, palette};
 
 /// Rounding of the bar, the panel, tiles, and the selected row (DIPs).
 pub(super) const BAR_CORNER: f32 = 12.0;
