@@ -91,7 +91,7 @@
 2. 확인 창. [아니요]면 끝.
 3. `partial`을 지우고 새로 만든다. zip을 `partial\download.zip`에 받는다(상한 512MB). 받는 조각마다 파일에 쓰면서 SHA-256을 갱신한다. 진행률은 업데이터와 같은 `Progress`(0..=10000)로 공유한다.
 4. 해시가 `digest`와 다르면 `partial`을 지우고 "손상" 결과.
-5. zip에서 경로가 `bin/ffmpeg.exe`, `bin/ffprobe.exe`로 끝나는 항목과 맨 위 폴더의 `LICENSE`를 `partial\`에 푼다. 다른 항목은 무시한다. 항목 이름은 경로로 쓰지 않고 정해진 파일 이름으로만 쓴다(zip 경로 조작 방지). 두 exe 중 하나라도 없으면 "설치 실패".
+5. zip에서 경로가 `bin/ffmpeg.exe`, `bin/ffprobe.exe`로 끝나는 항목, 그리고 맨 위 폴더에 `LICENSE`가 있으면 그것을 `partial\`에 푼다. 다른 항목은 무시한다. 항목 이름은 경로로 쓰지 않고 정해진 파일 이름으로만 쓴다(zip 경로 조작 방지). 두 exe 중 하나라도 없으면 "설치 실패".
 6. `target`을 만들고(`create_dir_all`) `ffprobe.exe`, `LICENSE`, `ffmpeg.exe` 순서로 `partial`에서 `target`으로 옮긴다(`MOVEFILE_REPLACE_EXISTING`). 둘 다 옮겨지기 전에는 `locate()`가 이 폴더를 인정하지 않는다.
 7. `partial`을 지운다.
 
