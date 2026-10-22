@@ -3,6 +3,7 @@
 pub mod appearance;
 pub mod catalog;
 pub mod config;
+pub mod double_tap;
 pub mod drag;
 pub mod essentials;
 pub mod ffmpeg_release;
