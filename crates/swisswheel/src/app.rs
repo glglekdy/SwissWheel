@@ -11,6 +11,9 @@ use std::time::{Duration, Instant};
 use swisswheel_core::catalog::Operation;
 use swisswheel_core::config::{Config, Key};
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
+use swisswheel_core::essentials::{
+    self, Essential, EssentialAction, EssentialState, Installed, Latest,
+};
 use swisswheel_core::ffmpeg_release;
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession, Tile};
@@ -49,10 +52,11 @@ use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::dnd::DropTarget;
 use crate::engines::ffmpeg as ffmpeg_tools;
-use crate::ffmpeg_install;
+use crate::essentials_status;
+use crate::ffmpeg_install::{self, RemoveOutcome};
 use crate::hook::{self, Hooks, WM_APP_DRAG, WM_APP_FOREGROUND};
 use crate::jobs::{Job, JobReport, ProgressRow, Runner};
-use crate::menubar::{self, MenuBar, MenuMouse, MenuView};
+use crate::menubar::{self, DownloadView, MenuBar, MenuMouse, MenuView};
 use crate::notice::{NoticeWindow, WM_APP_NOTICE, quiet_now};
 use crate::probe;
 use crate::tray::{Tray, WM_APP_TRAY};
@@ -66,6 +70,12 @@ const WM_APP_JOB_DONE: u32 = WM_APP + 30;
 const WM_APP_UPDATE: u32 = WM_APP + 31;
 /// The FFmpeg download thread finished; its outcome is in `ffmpeg_slot`.
 const WM_APP_FFMPEG: u32 = WM_APP + 32;
+/// The download panel's check finished; its report is in `status_slot`.
+const WM_APP_ESSENTIALS: u32 = WM_APP + 35;
+/// The FFmpeg remove thread finished; its outcome is in `remove_slot`.
+const WM_APP_FFMPEG_REMOVE: u32 = WM_APP + 36;
+/// How long a successful check for the newest FFmpeg is trusted.
+const LATEST_TTL: Duration = Duration::from_secs(3600);
 /// How long a freshly updated app waits for the old one to exit.
 const AFTER_UPDATE_WAIT: Duration = Duration::from_secs(15);
 /// FFmpeg jobs that run at once (spec 4.4).
@@ -177,6 +187,19 @@ pub(crate) struct AppState {
     /// The running FFmpeg check, download, or install, if any.
     ffmpeg: Option<ffmpeg_install::Handle>,
     ffmpeg_slot: Arc<Mutex<Option<ffmpeg_install::Outcome>>>,
+    /// What the download panel shows for FFmpeg.
+    essentials: EssentialState,
+    /// The app's own FFmpeg folder, and whether one is on `PATH` too.
+    own_dir: Option<PathBuf>,
+    system_ffmpeg: bool,
+    /// When the newest release was last found (`None` after a failure).
+    latest_ok_at: Option<Instant>,
+    /// The download panel's check is running.
+    checking: bool,
+    status_slot: Arc<Mutex<Option<essentials_status::Report>>>,
+    /// The FFmpeg remove thread is running.
+    removing: bool,
+    remove_slot: Arc<Mutex<Option<RemoveOutcome>>>,
     /// Balloon fallback: the folder of the last balloon, opened when it is clicked.
     last_output: Option<PathBuf>,
     hooks_installed_at: Instant,
@@ -369,6 +392,14 @@ pub fn run() -> Result<()> {
         pending_swap: None,
         ffmpeg: None,
         ffmpeg_slot: Arc::new(Mutex::new(None)),
+        essentials: EssentialState::default(),
+        own_dir: None,
+        system_ffmpeg: false,
+        latest_ok_at: None,
+        checking: false,
+        status_slot: Arc::new(Mutex::new(None)),
+        removing: false,
+        remove_slot: Arc::new(Mutex::new(None)),
         last_output: None,
         hooks_installed_at: Instant::now(),
         taskbar_created,
@@ -449,6 +480,12 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_FFMPEG => {
             with_state(AppState::on_ffmpeg_done);
+        }
+        WM_APP_ESSENTIALS => {
+            with_state(AppState::on_essentials_checked);
+        }
+        WM_APP_FFMPEG_REMOVE => {
+            with_state(AppState::on_remove_done);
         }
         WM_APP_FOREGROUND => {
             with_state(|s| s.on_foreground(HWND(wparam.0 as *mut _)));
@@ -630,7 +667,13 @@ impl AppState {
         let shape = menu
             .focus()
             .map(|_| menu_geometry::PanelShape::of(menu.category()));
-        let hit = |x, y| menu_geometry::hit(bar.layout(), shape, x, y);
+        let buttons: Option<Vec<usize>> = menu
+            .download_focus()
+            .map(|_| menu.actions().iter().map(Vec::len).collect());
+        let hit = |x, y| match &buttons {
+            Some(buttons) => menu_geometry::hit_download(bar.layout(), Some(buttons), x, y),
+            None => menu_geometry::hit(bar.layout(), shape, x, y),
+        };
         let action = match event {
             MenuMouse::Move { x, y } => {
                 if menu.hover(hit(x, y)) {
@@ -669,10 +712,6 @@ impl AppState {
                 self.close_menu();
                 self.start_update();
             }
-            MenuAction::Notice(Tile::Download) => {
-                self.close_menu();
-                self.start_ffmpeg();
-            }
             MenuAction::Notice(Tile::Restart) => {
                 self.close_menu();
                 self.restart();
@@ -681,8 +720,15 @@ impl AppState {
                 self.close_menu();
                 self.notify(info(tile.label(), "다음 버전에서 지원 예정입니다"));
             }
-            MenuAction::OpenDownloads => self.render_menu(),
-            MenuAction::Essential(..) => {}
+            MenuAction::OpenDownloads => {
+                self.refresh_download_panel();
+                self.start_essentials_check();
+                self.render_menu();
+            }
+            MenuAction::Essential(Essential::Ffmpeg, action) => {
+                self.close_menu();
+                self.run_essential(action);
+            }
             MenuAction::Close => self.close_menu(),
             MenuAction::StartCapture => {
                 // Ends any earlier row's capture first (a click on another
@@ -834,7 +880,7 @@ impl AppState {
         let (Some(menu), Some(bar)) = (&self.menu, &mut self.menubar) else {
             return;
         };
-        let panel_open = menu.focus().is_some();
+        let panel_open = menu.panel_open();
         if panel_open != bar.panel_open() {
             bar.set_panel(panel_open);
             if panel_open {
@@ -844,9 +890,16 @@ impl AppState {
         }
         let category = menu.category();
         let rows = menubar::rows(&self.config, category, self.save_failed);
+        let essential_rows = menubar::essential_rows(std::slice::from_ref(&self.essentials));
+        let download = menu.download_focus().map(|focus| DownloadView {
+            header: essentials::header(self.checking),
+            rows: &essential_rows,
+            focus: Some(focus),
+        });
         let view = MenuView {
             selected: menu.tile(),
-            rows: panel_open.then_some(rows.as_slice()),
+            rows: menu.focus().is_some().then_some(rows.as_slice()),
+            download,
             category: settings::CATEGORIES
                 .iter()
                 .position(|&c| c == category)
@@ -958,7 +1011,7 @@ impl AppState {
 
     /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`,
     /// `progress`, `notices`, `menu`, `menu-settings`, `menu-tools`, `menu-capture`,
-    /// `menu-notifications`, or `menu-general` shows that UI at startup
+    /// `menu-notifications`, `menu-general`, or `menu-download` shows that UI at startup
     /// without a drag or key press, so the drawing can be checked by eye.
     #[cfg(debug_assertions)]
     fn preview(&mut self, what: &str) {
@@ -1013,7 +1066,7 @@ impl AppState {
             // Checks SWISSWHEEL_UPDATE_URL (a local server) as if the tile were pressed.
             "update" => self.start_update(),
             // Checks SWISSWHEEL_FFMPEG_URL (a local server) as if the tile were pressed.
-            "ffmpeg" => self.start_ffmpeg(),
+            "ffmpeg" => self.start_install(None),
             "progress" => {
                 let rows = [
                     row("긴영상.mp4", Operation::Convert(Format::Webm), Some(0.37)),
@@ -1048,7 +1101,7 @@ impl AppState {
                 self.render_preview_notices();
             }
             "menu" | "menu-settings" | "menu-tools" | "menu-capture" | "menu-notifications"
-            | "menu-general" => {
+            | "menu-general" | "menu-download" => {
                 use swisswheel_core::menu::{Focus, MenuHit};
                 use swisswheel_core::settings::{CATEGORIES, Category, SettingItem};
 
@@ -1088,9 +1141,36 @@ impl AppState {
                 };
                 let rows = crate::menubar::rows(&config, category, failed);
                 let capturing = what == "menu-capture";
+                // An own copy with an update waiting, its remove button picked.
+                let downloads = what == "menu-download";
+                let essential_rows = menubar::essential_rows(&[EssentialState {
+                    installed: Some(Installed::Own(Some("9.0.2".into()))),
+                    latest: Latest::Found("9.0.3".into()),
+                    busy: None,
+                }]);
+                let download = downloads.then(|| DownloadView {
+                    header: essentials::header(false),
+                    rows: &essential_rows,
+                    focus: Some(swisswheel_core::menu::DownloadFocus::Row {
+                        essential: 0,
+                        button: Some(1),
+                    }),
+                });
+                let (focus, hovered) = if downloads {
+                    (None, MenuHit::EssentialButton(0, 0))
+                } else {
+                    (focus, hovered)
+                };
                 let view = crate::menubar::MenuView {
-                    selected: if panel { 0 } else { 1 },
-                    rows: panel.then_some(rows.as_slice()),
+                    selected: if downloads {
+                        1
+                    } else if panel {
+                        0
+                    } else {
+                        1
+                    },
+                    rows: (panel && !downloads).then_some(rows.as_slice()),
+                    download,
                     category: CATEGORIES.iter().position(|&c| c == category).unwrap_or(0),
                     focus,
                     capturing,
@@ -1521,7 +1601,7 @@ impl AppState {
     }
 
     fn start_update(&mut self) {
-        let background = self.update.is_some() || self.ffmpeg.is_some();
+        let background = self.update.is_some() || self.ffmpeg.is_some() || self.removing;
         match release::on_tile(background, self.active_jobs) {
             TileDecision::Refuse(notice) => {
                 self.notify(info(release::TITLE, notice));
@@ -1573,27 +1653,141 @@ impl AppState {
         background_busy(
             self.update.is_some(),
             self.ffmpeg.is_some(),
+            self.removing,
             self.pending_swap.is_some(),
         )
     }
 
-    fn start_ffmpeg(&mut self) {
-        let ready = ffmpeg_tools::locate().is_some();
-        let busy = self.background_busy();
-        match ffmpeg_release::on_download_tile(ready, busy) {
+    /// Starts the download panel's check, unless one runs. The newest
+    /// release is asked for only when the last good answer is stale.
+    fn start_essentials_check(&mut self) {
+        if self.checking {
+            return;
+        }
+        let fetch = latest_fetch_due(self.latest_ok_at, Instant::now());
+        if fetch {
+            self.essentials.latest = Latest::Checking;
+        }
+        self.checking = true;
+        essentials_status::spawn(
+            self.hwnd.0 as isize,
+            WM_APP_ESSENTIALS,
+            Arc::clone(&self.status_slot),
+            fetch,
+        );
+    }
+
+    fn on_essentials_checked(&mut self) {
+        self.checking = false;
+        let Some(report) = self.status_slot.lock().unwrap().take() else {
+            return;
+        };
+        self.essentials.installed = Some(report.installed);
+        self.own_dir = report.own_dir;
+        self.system_ffmpeg = report.system;
+        match report.latest {
+            Some(Ok(tag)) => {
+                self.essentials.latest = Latest::Found(tag);
+                self.latest_ok_at = Some(Instant::now());
+            }
+            Some(Err(())) => {
+                self.essentials.latest = Latest::Failed;
+                self.latest_ok_at = None;
+            }
+            None => {}
+        }
+        self.refresh_download_panel();
+    }
+
+    /// Brings the download row's progress and buttons up to date, and
+    /// redraws the panel if it is open.
+    fn refresh_download_panel(&mut self) {
+        self.essentials.busy = self
+            .ffmpeg
+            .as_ref()
+            .map(|handle| handle.progress.fraction.load(Ordering::Relaxed) as f32 / 10000.0);
+        let Some(menu) = &mut self.menu else {
+            return;
+        };
+        menu.set_actions(vec![essentials::view(&self.essentials).1]);
+        if menu.download_focus().is_some() {
+            self.render_menu();
+        }
+    }
+
+    /// A download panel button, after the menu closed.
+    fn run_essential(&mut self, action: EssentialAction) {
+        let decision = essentials::on_action(action, self.active_jobs > 0, self.background_busy());
+        match decision {
             TileDecision::Refuse(notice) => {
                 self.notify(info(ffmpeg_release::TITLE, notice));
             }
-            TileDecision::Start => {
-                self.ffmpeg = Some(ffmpeg_install::spawn(
-                    self.hwnd.0 as isize,
-                    WM_APP_FFMPEG,
-                    Arc::clone(&self.ffmpeg_slot),
-                    None,
-                ));
-                self.update_busy();
-            }
+            TileDecision::Start => match action {
+                EssentialAction::Install | EssentialAction::InstallOwn => self.start_install(None),
+                EssentialAction::Update => self.start_install(self.own_dir.clone()),
+                EssentialAction::Remove => self.start_remove(),
+            },
         }
+    }
+
+    /// The installer's thread (its own confirmation first); `prefer` is the
+    /// folder an update replaces.
+    fn start_install(&mut self, prefer: Option<PathBuf>) {
+        self.ffmpeg = Some(ffmpeg_install::spawn(
+            self.hwnd.0 as isize,
+            WM_APP_FFMPEG,
+            Arc::clone(&self.ffmpeg_slot),
+            prefer,
+        ));
+        self.update_busy();
+    }
+
+    fn start_remove(&mut self) {
+        let Some(dir) = &self.own_dir else {
+            self.notify(warning_notice(
+                ffmpeg_release::TITLE,
+                essentials::text::REMOVE_FAILED,
+            ));
+            return;
+        };
+        let version = match &self.essentials.installed {
+            Some(Installed::Own(version)) => version.as_deref(),
+            _ => None,
+        };
+        let prompt = essentials::remove_prompt(version, dir, self.system_ffmpeg);
+        self.removing = true;
+        ffmpeg_install::spawn_remove(
+            self.hwnd.0 as isize,
+            WM_APP_FFMPEG_REMOVE,
+            Arc::clone(&self.remove_slot),
+            prompt,
+        );
+    }
+
+    fn on_remove_done(&mut self) {
+        self.removing = false;
+        let title = ffmpeg_release::TITLE;
+        let outcome = self.remove_slot.lock().unwrap().take();
+        match outcome {
+            Some(RemoveOutcome::Removed) => {
+                self.notify(info(title, essentials::text::REMOVED));
+            }
+            Some(RemoveOutcome::Failed) => {
+                self.notify(warning_notice(title, essentials::text::REMOVE_FAILED));
+            }
+            Some(RemoveOutcome::Declined) | None => {}
+        }
+        self.after_essentials_changed();
+    }
+
+    /// FFmpeg came, went, or was replaced: conversions look for it again and
+    /// the panel reads what is there now.
+    fn after_essentials_changed(&mut self) {
+        if let Some(runner) = &self.runner {
+            runner.forget_tools();
+        }
+        self.start_essentials_check();
+        self.refresh_download_panel();
     }
 
     fn on_ffmpeg_done(&mut self) {
@@ -1615,6 +1809,7 @@ impl AppState {
             self.notify(notice);
         }
         self.update_busy();
+        self.after_essentials_changed();
     }
 
     /// Starts a fresh copy that waits for this one to exit, then closes
@@ -1719,6 +1914,14 @@ impl AppState {
             } else {
                 let _ = KillTimer(Some(self.hwnd), TIMER_PROGRESS);
             }
+        }
+        // The download row's percentage, while its panel is open.
+        if self
+            .menu
+            .as_ref()
+            .is_some_and(|m| m.download_focus().is_some())
+        {
+            self.refresh_download_panel();
         }
     }
 
@@ -1900,8 +2103,14 @@ fn previewing(preview: Option<String>) -> bool {
 
 /// An update or FFmpeg thread runs, or a verified update waits to swap in
 /// (which restarts the app): the download and restart tiles hold off.
-fn background_busy(update: bool, ffmpeg: bool, pending_swap: bool) -> bool {
-    update || ffmpeg || pending_swap
+fn background_busy(update: bool, ffmpeg: bool, removing: bool, pending_swap: bool) -> bool {
+    update || ffmpeg || removing || pending_swap
+}
+
+/// Whether to ask for the newest FFmpeg again: never found, or found more
+/// than `LATEST_TTL` ago (a failure clears `last_success`).
+fn latest_fetch_due(last_success: Option<Instant>, now: Instant) -> bool {
+    last_success.is_none_or(|at| now.duration_since(at) >= LATEST_TTL)
 }
 
 /// An app notice (ⓘ, 5 s).
@@ -1982,10 +2191,26 @@ mod tests {
     #[test]
     fn a_waiting_update_keeps_downloads_and_restarts_off() {
         // The swap restarts the app, which would cut a download short.
-        assert!(background_busy(false, false, true));
-        assert!(background_busy(true, false, false));
-        assert!(background_busy(false, true, false));
-        assert!(!background_busy(false, false, false));
+        assert!(background_busy(false, false, false, true));
+        assert!(background_busy(true, false, false, false));
+        assert!(background_busy(false, true, false, false));
+        assert!(!background_busy(false, false, false, false));
+    }
+
+    #[test]
+    fn a_removal_keeps_other_background_work_off() {
+        assert!(background_busy(false, false, true, false));
+    }
+
+    #[test]
+    fn latest_is_fetched_again_after_an_hour_or_a_failure() {
+        let now = Instant::now();
+        assert!(latest_fetch_due(None, now));
+        assert!(!latest_fetch_due(
+            Some(now - Duration::from_secs(3599)),
+            now
+        ));
+        assert!(latest_fetch_due(Some(now - Duration::from_secs(3600)), now));
     }
 
     #[test]

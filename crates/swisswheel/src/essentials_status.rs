@@ -100,7 +100,6 @@ pub fn read_version(ffmpeg: &Path) -> Option<String> {
 /// Checks on a new thread (the app's folders, `PATH`, and, if
 /// `fetch_latest`, the releases endpoint), stores the report in `slot`, and
 /// posts `msg` to `hwnd`.
-#[allow(dead_code)] // wired in Task 6
 pub fn spawn(hwnd: isize, msg: u32, slot: Arc<Mutex<Option<Report>>>, fetch_latest: bool) {
     std::thread::spawn(move || {
         let endpoint = fetch_latest.then(crate::ffmpeg_install::endpoint);
@@ -201,7 +200,10 @@ mod tests {
         let Some(tools) = crate::engines::ffmpeg::locate() else {
             return; // the media tests need FFmpeg; this one only checks it
         };
-        let out = Command::new(&tools.ffmpeg).arg("-version").output().unwrap();
+        let out = Command::new(&tools.ffmpeg)
+            .arg("-version")
+            .output()
+            .unwrap();
         let first = String::from_utf8_lossy(&out.stdout);
         let expected = parse_ffmpeg_version(first.lines().next().unwrap_or(""));
         assert_eq!(read_version(&tools.ffmpeg), expected);

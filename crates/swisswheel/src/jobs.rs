@@ -256,7 +256,6 @@ impl Runner {
 impl Runner {
     /// Drops the FFmpeg found earlier (it was removed or replaced), so the
     /// next media job looks again.
-    #[allow(dead_code)] // wired in Task 6
     pub fn forget_tools(&self) {
         *self.shared.tools.lock().unwrap() = None;
     }

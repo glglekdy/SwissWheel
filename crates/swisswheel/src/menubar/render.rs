@@ -1,15 +1,15 @@
 //! Draws the desktop menu: glass tiles (icon above, label below) on a glass
 //! bar, and the settings panel under it (spec 2.4).
 
-use swisswheel_core::menu::{Focus, MenuHit, TILES, Tile};
-use swisswheel_core::menu_geometry::{Box2, DROP, MenuLayout};
+use swisswheel_core::menu::{DownloadFocus, Focus, MenuHit, TILES, Tile};
+use swisswheel_core::menu_geometry::{Box2, DROP, MenuLayout, essential_button};
 use swisswheel_core::settings::CATEGORIES;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::core::Result;
 
-use super::{MenuView, RowView};
+use super::{DownloadView, MenuView, RowView};
 use crate::fonts;
 use crate::surface::{Surface, draw_text, inset, rounded};
 use crate::theme::{Piece, Theme, glass_layer, glass_piece, outer_shadow, rounded_shape};
@@ -69,7 +69,8 @@ pub(super) fn draw(
     let dy = -DROP * scale * (1.0 - view.progress);
     let bar = rect(layout.bar, dy);
     surface.set_glass(0, theme.glass.then_some(bar), BAR_CORNER * scale)?;
-    let panel = view.rows.map(|_| rect(layout.panel, 0.0));
+    let panel_open = view.rows.is_some() || view.download.is_some();
+    let panel = panel_open.then(|| rect(layout.panel, 0.0));
     surface.set_glass(1, panel.filter(|_| theme.glass), PANEL_CORNER * scale)?;
 
     let icon = fonts::icon_format(surface.icon_font(), 34.0 * scale)?;
@@ -130,9 +131,13 @@ pub(super) fn draw(
             );
         }
 
-        if let (Some(rows), Some(panel)) = (view.rows, panel) {
+        if let Some(panel) = panel {
             let theme = Theme::new(theme.light, theme.glass, view.accent, view.panel_progress);
-            draw_panel(surface, view, rows, layout, panel, &theme, scale)?;
+            if let Some(rows) = view.rows {
+                draw_panel(surface, view, rows, layout, panel, &theme, scale)?;
+            } else if let Some(download) = &view.download {
+                draw_download_panel(surface, view, download, layout, panel, &theme, scale)?;
+            }
         }
         ctx.EndDraw(None, None)?;
     }
@@ -175,22 +180,7 @@ fn draw_panel(
     unsafe {
         let brush = |color: &D2D1_COLOR_F| ctx.CreateSolidColorBrush(color, None);
         let (text, subtext) = (brush(&theme.text)?, brush(&theme.subtext)?);
-        let shape = rounded_shape(ctx, panel, PANEL_CORNER * scale)?;
-        outer_shadow(ctx, &shape, theme, scale)?;
-        glass_layer(ctx, &shape, panel, theme, scale)?;
-        if let (Some(notice), Some(b)) = (view.notice, layout.notice) {
-            let r = rect(b, 0.0);
-            draw_text(
-                ctx,
-                notice,
-                &small,
-                D2D_RECT_F {
-                    left: r.left + pad,
-                    ..r
-                },
-                &subtext,
-            );
-        }
+        panel_backdrop(surface, view, layout, panel, theme, &small, scale)?;
 
         // Tabs: a segmented control, the selected tab a pill in the groove;
         // with the keyboard on the tabs the pill takes an accent rim and label.
@@ -312,6 +302,176 @@ fn draw_panel(
                     scale,
                 )?,
                 None => draw_text(ctx, &row.value, &value, value_box, &text),
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The panel's glass, shadow, and the config notice above its first line.
+fn panel_backdrop(
+    surface: &Surface,
+    view: &MenuView,
+    layout: &MenuLayout,
+    panel: D2D_RECT_F,
+    theme: &Theme,
+    small: &IDWriteTextFormat,
+    scale: f32,
+) -> Result<()> {
+    let ctx = surface.ctx();
+    unsafe {
+        let shape = rounded_shape(ctx, panel, PANEL_CORNER * scale)?;
+        outer_shadow(ctx, &shape, theme, scale)?;
+        glass_layer(ctx, &shape, panel, theme, scale)?;
+        if let (Some(notice), Some(b)) = (view.notice, layout.notice) {
+            let r = rect(b, 0.0);
+            draw_text(
+                ctx,
+                notice,
+                small,
+                D2D_RECT_F {
+                    left: r.left + 12.0 * scale,
+                    ..r
+                },
+                &ctx.CreateSolidColorBrush(&theme.subtext, None)?,
+            );
+        }
+    }
+    Ok(())
+}
+
+/// The download panel (download panel spec 2.2): a header line, then one
+/// row per essential with its name, status, and buttons from the right.
+fn draw_download_panel(
+    surface: &Surface,
+    view: &MenuView,
+    download: &DownloadView,
+    layout: &MenuLayout,
+    panel: D2D_RECT_F,
+    theme: &Theme,
+    scale: f32,
+) -> Result<()> {
+    let ctx = surface.ctx();
+    let name = fonts::trimmed_format(
+        13.0 * scale,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        DWRITE_TEXT_ALIGNMENT_LEADING,
+    )?;
+    let small = fonts::trimmed_format(
+        12.0 * scale,
+        DWRITE_FONT_WEIGHT_NORMAL,
+        DWRITE_TEXT_ALIGNMENT_LEADING,
+    )?;
+    let button = fonts::trimmed_format(
+        12.0 * scale,
+        DWRITE_FONT_WEIGHT_SEMI_BOLD,
+        DWRITE_TEXT_ALIGNMENT_CENTER,
+    )?;
+    let pad = 12.0 * scale;
+    let gap = 8.0 * scale;
+    unsafe {
+        let brush = |color: &D2D1_COLOR_F| ctx.CreateSolidColorBrush(color, None);
+        let (text, subtext) = (brush(&theme.text)?, brush(&theme.subtext)?);
+        let (accent, line) = (brush(&theme.accent)?, brush(&theme.line)?);
+        panel_backdrop(surface, view, layout, panel, theme, &small, scale)?;
+        let header = rect(layout.download_header, 0.0);
+        draw_text(
+            ctx,
+            &download.header,
+            &small,
+            D2D_RECT_F {
+                left: header.left + pad,
+                ..header
+            },
+            &subtext,
+        );
+
+        for (i, (row, boxes)) in download.rows.iter().zip(&layout.rows).enumerate() {
+            let r = rect(boxes.row, 0.0);
+            let focus = match download.focus {
+                Some(DownloadFocus::Row { essential, button }) if essential == i => Some(button),
+                _ => None,
+            };
+            let hovered = matches!(
+                view.hovered,
+                MenuHit::EssentialRow(j) | MenuHit::EssentialButton(j, _) if j == i
+            );
+            if focus.is_some() {
+                let shape = rounded_shape(ctx, r, ROW_CORNER * scale)?;
+                glass_piece(ctx, &shape, r, theme, Piece::Selected, scale)?;
+            } else if hovered {
+                ctx.FillRoundedRectangle(&rounded(r, ROW_CORNER * scale), &line);
+            }
+            let count = row.buttons.len();
+            // Text stops where the leftmost button starts.
+            let text_right =
+                essential_button(layout, i, count, 0).map_or(r.right - pad, |b| b.left - gap);
+            let label_right = r.left + pad + 70.0 * scale;
+            draw_text(
+                ctx,
+                row.label,
+                &name,
+                D2D_RECT_F {
+                    left: r.left + pad,
+                    right: label_right,
+                    ..r
+                },
+                &text,
+            );
+            let purpose_right = label_right + 80.0 * scale;
+            draw_text(
+                ctx,
+                row.purpose,
+                &small,
+                D2D_RECT_F {
+                    left: label_right,
+                    right: purpose_right,
+                    ..r
+                },
+                &subtext,
+            );
+            let status = D2D_RECT_F {
+                left: purpose_right,
+                right: text_right,
+                ..r
+            };
+            draw_text(ctx, &row.status, &small, status, &text);
+            if let Some(fraction) = row.progress {
+                // A thin bar under the status text.
+                let bottom = r.bottom - 6.0 * scale;
+                let track = D2D_RECT_F {
+                    top: bottom - 2.0 * scale,
+                    bottom,
+                    ..status
+                };
+                ctx.FillRectangle(&track, &line);
+                let filled = D2D_RECT_F {
+                    right: track.left + (track.right - track.left) * fraction.clamp(0.0, 1.0),
+                    ..track
+                };
+                ctx.FillRectangle(&filled, &accent);
+            }
+            for (b, label) in row.buttons.iter().enumerate() {
+                let Some(boxed) = essential_button(layout, i, count, b) else {
+                    continue;
+                };
+                let cap = inset(rect(boxed, 0.0), 4.0 * scale);
+                let shape = rounded_shape(ctx, cap, KEYCAP_CORNER * scale)?;
+                glass_piece(ctx, &shape, cap, theme, Piece::Keycap, scale)?;
+                let selected = focus == Some(Some(b));
+                if selected {
+                    let rim = inset(cap, FOCUS_RIM * scale / 2.0);
+                    let rim = rounded(rim, (KEYCAP_CORNER - FOCUS_RIM / 2.0) * scale);
+                    ctx.DrawRoundedRectangle(&rim, &accent, FOCUS_RIM * scale, None);
+                }
+                let color = if selected {
+                    &accent
+                } else if view.hovered == MenuHit::EssentialButton(i, b) {
+                    &text
+                } else {
+                    &subtext
+                };
+                draw_text(ctx, label, &button, cap, color);
             }
         }
     }

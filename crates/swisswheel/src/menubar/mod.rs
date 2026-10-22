@@ -6,7 +6,8 @@ mod window;
 
 use swisswheel_core::appearance::Accent;
 use swisswheel_core::config::Config;
-use swisswheel_core::menu::{Focus, MenuHit};
+use swisswheel_core::essentials::{ESSENTIALS, EssentialState, view};
+use swisswheel_core::menu::{DownloadFocus, Focus, MenuHit};
 use swisswheel_core::settings::{Category, Dir, SettingItem, step};
 use windows::Win32::Graphics::Direct2D::Common::D2D1_COLOR_F;
 
@@ -45,11 +46,49 @@ pub fn rows(config: &Config, category: Category, failed: Option<SettingItem>) ->
         .collect()
 }
 
+/// One download panel row as drawn.
+pub struct EssentialRowView {
+    pub label: &'static str,
+    pub purpose: &'static str,
+    pub status: String,
+    /// Left to right.
+    pub buttons: Vec<&'static str>,
+    /// A download into the app's folder, 0.0 → 1.0.
+    pub progress: Option<f32>,
+}
+
+/// The download panel's rows, one per entry of `ESSENTIALS`.
+pub fn essential_rows(states: &[EssentialState]) -> Vec<EssentialRowView> {
+    ESSENTIALS
+        .iter()
+        .zip(states)
+        .map(|(essential, state)| {
+            let (status, actions) = view(state);
+            EssentialRowView {
+                label: essential.label(),
+                purpose: essential.purpose(),
+                status,
+                buttons: actions.iter().map(|a| a.label()).collect(),
+                progress: state.busy,
+            }
+        })
+        .collect()
+}
+
+/// The open download panel.
+pub struct DownloadView<'a> {
+    pub header: String,
+    pub rows: &'a [EssentialRowView],
+    pub focus: Option<DownloadFocus>,
+}
+
 /// Everything the renderer needs for one frame.
 pub struct MenuView<'a> {
     pub selected: usize,
-    /// The selected tab's rows while the panel is open.
+    /// The selected tab's rows while the settings panel is open.
     pub rows: Option<&'a [RowView]>,
+    /// While the download panel is open.
+    pub download: Option<DownloadView<'a>>,
     /// Index into `CATEGORIES`.
     pub category: usize,
     pub focus: Option<Focus>,
@@ -71,4 +110,31 @@ pub enum MenuMouse {
     Leave,
     Click { x: f32, y: f32 },
     Wheel { x: f32, y: f32, delta: i16 },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use swisswheel_core::essentials::{EssentialState, Installed, Latest};
+
+    #[test]
+    fn essential_rows_carry_the_view() {
+        let state = EssentialState {
+            installed: Some(Installed::Own(Some("9.0.2".into()))),
+            latest: Latest::Found("9.0.3".into()),
+            busy: None,
+        };
+        let rows = essential_rows(&[state]);
+        assert_eq!(
+            (rows[0].label, rows[0].purpose, rows[0].status.as_str()),
+            ("FFmpeg", "영상·오디오", "9.0.2 · 9.0.3 있음")
+        );
+        assert_eq!(rows[0].buttons, ["업데이트", "제거"]);
+        assert_eq!(rows[0].progress, None);
+        let busy = EssentialState {
+            busy: Some(0.5),
+            ..EssentialState::default()
+        };
+        assert_eq!(essential_rows(&[busy])[0].progress, Some(0.5));
+    }
 }

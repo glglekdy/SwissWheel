@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::update::{TileDecision, parse_checksum};
+use crate::update::parse_checksum;
 
 pub const ENDPOINT: &str = "https://api.github.com/repos/GyanD/codexffmpeg/releases/latest";
 /// The build that has `ffmpeg.exe` and `ffprobe.exe` and little else.
@@ -79,21 +79,8 @@ pub fn prompt_body(tag: &str, size: u64, dir: &Path) -> String {
     )
 }
 
-/// The download tile was pressed. An FFmpeg the app can already use wins:
-/// there is nothing to download either way.
-pub fn on_download_tile(ready: bool, busy: bool) -> TileDecision {
-    if ready {
-        TileDecision::Refuse(text::READY)
-    } else if busy {
-        TileDecision::Refuse(text::RUNNING)
-    } else {
-        TileDecision::Start
-    }
-}
-
 /// Notification bodies (all titled [`TITLE`]).
 pub mod text {
-    pub const READY: &str = "다운로드 완료 · FFmpeg가 이미 준비되어 있습니다";
     pub const RUNNING: &str = "이미 업데이트나 다운로드를 진행하는 중입니다";
     pub const CHECK_FAILED: &str = "FFmpeg 정보를 확인할 수 없습니다";
     pub const NO_ASSET: &str = "받을 FFmpeg 파일을 찾을 수 없습니다";
@@ -109,7 +96,6 @@ pub mod text {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::update::TileDecision;
     use std::path::Path;
 
     const HEX: &str = "60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba";
@@ -174,16 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn download_tile() {
-        assert_eq!(
-            on_download_tile(true, true),
-            TileDecision::Refuse(text::READY)
-        );
-        assert_eq!(
-            on_download_tile(false, true),
-            TileDecision::Refuse(text::RUNNING)
-        );
-        assert_eq!(on_download_tile(false, false), TileDecision::Start);
+    fn installed_text() {
         assert_eq!(text::installed("9.0.2"), "FFmpeg 9.0.2 설정을 마쳤습니다");
     }
 }

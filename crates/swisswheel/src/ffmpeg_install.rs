@@ -348,7 +348,6 @@ pub fn spawn(
 
 /// Spawns the remove thread: confirms `prompt`, removes from
 /// `install_dirs()`, stores the outcome in `slot`, and posts `msg`.
-#[allow(dead_code)] // wired in Task 6
 pub fn spawn_remove(
     hwnd: isize,
     msg: u32,
