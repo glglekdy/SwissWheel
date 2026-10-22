@@ -38,6 +38,11 @@ pub enum DragEvent {
     /// renaming an icon). Otherwise the same as `KeyDown`.
     DesktopKeyDown(u16),
     KeyUp(u16),
+    /// The menu shortcut (left Ctrl twice, `double_tap`) went off, in any
+    /// window; `fullscreen`: a full-screen window (a game, a video) is in front.
+    MenuShortcut {
+        fullscreen: bool,
+    },
     /// The app closed the wheel because no file drag arrived in time.
     EnterTimedOut,
     /// The app closed the wheel (drop, cancel, or release outside).
@@ -209,6 +214,7 @@ impl DragTracker {
                 self.capture = false;
                 pass
             }
+            DragEvent::MenuShortcut { fullscreen } => self.on_menu_shortcut(fullscreen),
             DragEvent::KeyDown(vk) => self.on_key_down(vk, false),
             DragEvent::DesktopKeyDown(vk) => self.on_key_down(vk, true),
             DragEvent::KeyUp(vk) => {
@@ -271,14 +277,7 @@ impl DragTracker {
             if command.is_some() || (self.wheel == Wheel::Open && vk == self.keys.open) {
                 // Key repeat of the open key while the wheel is up is swallowed too.
                 (true, command)
-            } else if desktop
-                && vk == self.keys.open
-                && !repeat
-                && !self.modifier_held()
-                && self.menu_enabled
-                && self.wheel == Wheel::Closed
-                && self.button != Button::Dragging
-            {
+            } else if desktop && vk == self.keys.open && !repeat && self.menu_may_open() {
                 self.menu = true;
                 (true, Some(DragCommand::OpenMenu))
             } else {
@@ -290,6 +289,32 @@ impl DragTracker {
         }
         self.set_swallowed(vk, swallow);
         Decision { swallow, command }
+    }
+
+    /// Opens the menu, or closes it (as the open key would). Nothing to
+    /// swallow: the keys already went to the app, and Ctrl alone types nothing.
+    fn on_menu_shortcut(&mut self, fullscreen: bool) -> Decision {
+        let command = if self.menu {
+            // While a key is being bound, Ctrl is the key, not a shortcut.
+            (!self.capture).then_some(DragCommand::MenuKey(MenuKey::Open))
+        } else if !fullscreen && self.menu_may_open() {
+            self.menu = true;
+            Some(DragCommand::OpenMenu)
+        } else {
+            None
+        };
+        Decision {
+            swallow: false,
+            command,
+        }
+    }
+
+    /// Nothing else has the keys: no drag, no wheel, no modifier held.
+    fn menu_may_open(&self) -> bool {
+        !self.modifier_held()
+            && self.menu_enabled
+            && self.wheel == Wheel::Closed
+            && self.button != Button::Dragging
     }
 
     /// Ctrl, Alt, Shift, or Win is down: the open key is part of a shortcut
@@ -761,5 +786,62 @@ mod tests {
         t.on_event(DragEvent::KeyUp(SPACE));
         assert!(t.menu_open());
         assert_eq!(t.on_event(DragEvent::KeyDown(0x41)), pass());
+    }
+
+    fn shortcut() -> DragEvent {
+        DragEvent::MenuShortcut { fullscreen: false }
+    }
+
+    #[test]
+    fn menu_shortcut_opens_and_closes_the_menu() {
+        let mut t = tracker();
+        assert_eq!(
+            t.on_event(shortcut()),
+            Decision {
+                swallow: false,
+                command: Some(DragCommand::OpenMenu)
+            }
+        );
+        assert!(t.menu_open());
+        assert_eq!(
+            t.on_event(shortcut()),
+            Decision {
+                swallow: false,
+                command: Some(DragCommand::MenuKey(MenuKey::Open))
+            }
+        );
+        assert!(t.menu_open()); // only the app closes it
+    }
+
+    #[test]
+    fn menu_shortcut_is_not_for_the_menu_in_full_screen() {
+        let mut t = tracker();
+        assert_eq!(
+            t.on_event(DragEvent::MenuShortcut { fullscreen: true }),
+            pass()
+        );
+        assert!(!t.menu_open());
+    }
+
+    #[test]
+    fn menu_shortcut_leaves_drags_and_the_wheel_alone() {
+        let mut t = dragging(); // Ctrl while dragging picks copy over move
+        assert_eq!(t.on_event(shortcut()), pass());
+        t.on_event(DragEvent::KeyDown(SPACE));
+        assert!(t.wheel_open());
+        assert_eq!(t.on_event(shortcut()), pass());
+        let mut t = tracker();
+        t.set_menu_enabled(false);
+        assert_eq!(t.on_event(shortcut()), pass());
+        let mut t = tracker();
+        t.on_event(DragEvent::KeyDown(0xA0)); // LShift held
+        assert_eq!(t.on_event(shortcut()), pass());
+    }
+
+    #[test]
+    fn menu_shortcut_waits_while_a_key_is_being_bound() {
+        let mut t = menu_open();
+        t.set_capture(true);
+        assert_eq!(t.on_event(shortcut()), pass());
     }
 }

@@ -3,9 +3,13 @@
 
 use std::cell::{Cell, RefCell};
 
+use swisswheel_core::double_tap::{self, DoubleTap};
 use swisswheel_core::drag::{DragCommand, DragEvent, DragTracker, KeyBindings};
 use swisswheel_core::menu::MenuKey;
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTONULL, MONITORINFO, MonitorFromWindow,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Accessibility::{HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -20,6 +24,8 @@ pub const WM_APP_FOREGROUND: u32 = WM_APP + 21;
 thread_local! {
     static TRACKER: RefCell<Option<DragTracker>> = const { RefCell::new(None) };
     static TARGET: Cell<HWND> = Cell::new(HWND::default());
+    static MENU_TAP: RefCell<DoubleTap> =
+        RefCell::new(DoubleTap::new(double_tap::LEFT_CTRL, double_tap::WINDOW_MS));
 }
 
 pub struct Hooks {
@@ -257,11 +263,48 @@ fn feed(event: DragEvent) -> bool {
     decision.swallow
 }
 
+fn with_menu_tap<T>(f: impl FnOnce(&mut DoubleTap) -> T) -> Option<T> {
+    MENU_TAP.with(|t| t.try_borrow_mut().ok().map(|mut t| f(&mut t)))
+}
+
+/// Whether `hwnd` covers its whole monitor, taskbar included, as a game or
+/// a full-screen video does. A maximized window doesn't: its frame reaches
+/// past the monitor's edges, and the taskbar's part stays uncovered.
+fn is_fullscreen(hwnd: HWND) -> bool {
+    if hwnd.is_invalid() {
+        return false;
+    }
+    unsafe {
+        let mut window = RECT::default();
+        let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONULL);
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        !monitor.is_invalid()
+            && GetWindowRect(hwnd, &mut window).is_ok()
+            && GetMonitorInfoW(monitor, &mut info).as_bool()
+            && window == info.rcMonitor
+    }
+}
+
 unsafe extern "system" fn mouse_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if code == HC_ACTION as i32 {
         let info = unsafe { &*(lparam.0 as *const MSLLHOOKSTRUCT) };
         let (x, y) = (info.pt.x, info.pt.y);
-        let event = match wparam.0 as u32 {
+        let message = wparam.0 as u32;
+        if matches!(
+            message,
+            WM_LBUTTONDOWN
+                | WM_RBUTTONDOWN
+                | WM_MBUTTONDOWN
+                | WM_XBUTTONDOWN
+                | WM_MOUSEWHEEL
+                | WM_MOUSEHWHEEL
+        ) {
+            with_menu_tap(DoubleTap::interrupt); // Ctrl+click, Ctrl+scroll
+        }
+        let event = match message {
             WM_LBUTTONDOWN => Some(DragEvent::ButtonDown { x, y }),
             WM_MOUSEMOVE => Some(DragEvent::Move { x, y }),
             WM_LBUTTONUP => Some(DragEvent::ButtonUp),
@@ -286,9 +329,22 @@ unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARA
             WM_KEYUP | WM_SYSKEYUP => Some(DragEvent::KeyUp(vk)),
             _ => None,
         };
-        if let Some(event) = event
-            && feed(event)
-        {
+        let swallow = event.is_some_and(feed);
+        let tapped = match event {
+            Some(DragEvent::KeyUp(_)) => with_menu_tap(|t| t.key_up(vk, info.time)) == Some(true),
+            Some(_) => {
+                with_menu_tap(|t| t.key_down(vk, info.time));
+                false
+            }
+            None => false,
+        };
+        if tapped {
+            let front = unsafe { GetForegroundWindow() };
+            feed(DragEvent::MenuShortcut {
+                fullscreen: !is_desktop(front) && is_fullscreen(front),
+            });
+        }
+        if swallow {
             return LRESULT(1);
         }
     }
@@ -305,6 +361,46 @@ mod tests {
         assert!(desktop_check("WorkerW", true, "SysListView32"));
         assert!(!desktop_check("WorkerW", false, "SysListView32")); // a wallpaper WorkerW
         assert!(!desktop_check("CabinetWClass", true, "DirectUIHWND")); // Explorer window
+    }
+
+    #[test]
+    fn a_window_over_the_whole_monitor_is_fullscreen() {
+        use windows::Win32::Graphics::Gdi::{MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint};
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        let m = unsafe {
+            let primary = MonitorFromPoint(Default::default(), MONITOR_DEFAULTTOPRIMARY);
+            assert!(GetMonitorInfoW(primary, &mut info).as_bool());
+            info.rcMonitor
+        };
+        let popup = |l: i32, t: i32, r: i32, b: i32| unsafe {
+            CreateWindowExW(
+                WS_EX_TOOLWINDOW,
+                w!("STATIC"),
+                PCWSTR::null(),
+                WS_POPUP, // hidden: the rect is all that counts
+                l,
+                t,
+                r - l,
+                b - t,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let full = popup(m.left, m.top, m.right, m.bottom);
+        let smaller = popup(m.left, m.top, m.right, m.bottom - 48);
+        assert!(is_fullscreen(full));
+        assert!(!is_fullscreen(smaller));
+        assert!(!is_fullscreen(HWND::default()));
+        unsafe {
+            let _ = DestroyWindow(full);
+            let _ = DestroyWindow(smaller);
+        }
     }
 
     #[test]
