@@ -11,6 +11,7 @@ embed-resource = "3"
 [dependencies]
 swisswheel-core = { path = "../swisswheel-core" }
 image = "0.25"
+jpeg-decoder = { version = "0.3", default-features = false }
 jpeg-encoder = "0.6"
 webp = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }

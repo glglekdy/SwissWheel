@@ -103,15 +103,67 @@ pub fn run(
 /// Decodes by content (a misnamed file still works) and applies EXIF orientation.
 fn decode(input: &Path) -> Result<DynamicImage, EngineError> {
     let read = |e: &dyn std::fmt::Display| EngineError::Read(format!("{}: {e}", input.display()));
-    let reader = ImageReader::open(input)
-        .map_err(|e| read(&e))?
+    let bytes = std::fs::read(input).map_err(|e| read(&e))?;
+    let reader = ImageReader::new(std::io::Cursor::new(&bytes))
         .with_guessed_format()
         .map_err(|e| read(&e))?;
+    let jpeg_split = reader.format() == Some(ImageFormat::Jpeg) && has_split_scans(&bytes);
     let mut decoder = reader.into_decoder().map_err(|e| read(&e))?;
     let orientation = decoder.orientation().map_err(|e| read(&e))?;
-    let mut img = DynamicImage::from_decoder(decoder).map_err(|e| read(&e))?;
+    let mut img = if jpeg_split {
+        decode_split_scans(&bytes).map_err(|e| read(&e))?
+    } else {
+        DynamicImage::from_decoder(decoder).map_err(|e| read(&e))?
+    };
     img.apply_orientation(orientation);
     Ok(img)
+}
+
+/// Whether a sequential JPEG stores its channels in separate scans, as this
+/// app's JPGs did before they became progressive. The image crate's decoder
+/// reads such files as luma only, so the colors come out green.
+fn has_split_scans(jpeg: &[u8]) -> bool {
+    let mut frame_channels = None;
+    let mut i = 2; // past SOI
+    loop {
+        let Some(&[0xFF, marker]) = jpeg.get(i..i + 2) else {
+            return false;
+        };
+        if marker == 0xFF {
+            i += 1; // fill byte
+            continue;
+        }
+        let Some(&[hi, lo]) = jpeg.get(i + 2..i + 4) else {
+            return false;
+        };
+        let end = i + 2 + usize::from(u16::from_be_bytes([hi, lo]));
+        let Some(segment) = jpeg.get(i + 4..end) else {
+            return false;
+        };
+        match marker {
+            // Baseline and extended sequential; progressive files decode fine.
+            0xC0 | 0xC1 => frame_channels = segment.get(5).copied(),
+            0xDA => {
+                return frame_channels
+                    .zip(segment.first())
+                    .is_some_and(|(f, s)| *s < f);
+            }
+            _ => {}
+        }
+        i = end;
+    }
+}
+
+fn decode_split_scans(jpeg: &[u8]) -> Result<DynamicImage, String> {
+    let mut decoder = jpeg_decoder::Decoder::new(jpeg);
+    let pixels = decoder.decode().map_err(|e| e.to_string())?;
+    let info = decoder.info().ok_or("JPG 정보 없음")?;
+    if info.pixel_format != jpeg_decoder::PixelFormat::RGB24 {
+        return Err(format!("{:?} JPG", info.pixel_format));
+    }
+    RgbImage::from_raw(info.width.into(), info.height.into(), pixels)
+        .map(DynamicImage::ImageRgb8)
+        .ok_or_else(|| "JPG 크기 불일치".to_string())
 }
 
 fn encode(
@@ -162,6 +214,9 @@ fn encode(
 
 /// Optimized Huffman tables and 4:2:0 chroma, as most JPEG writers do; the
 /// image crate's own encoder has neither and writes 30-45% larger files.
+/// Progressive, because with optimized tables a baseline file gets one scan
+/// per channel, which the image crate's decoder reads as green; two scans
+/// (DC, then all of AC) cost the least over baseline.
 fn write_jpg(img: &RgbImage, quality: u8, out: &mut impl Write) -> Result<(), String> {
     // JPEG itself caps both sides at 65535 pixels.
     let (Ok(w), Ok(h)) = (u16::try_from(img.width()), u16::try_from(img.height())) else {
@@ -173,6 +228,7 @@ fn write_jpg(img: &RgbImage, quality: u8, out: &mut impl Write) -> Result<(), St
     };
     let mut encoder = jpeg_encoder::Encoder::new(out, quality);
     encoder.set_optimized_huffman_tables(true);
+    encoder.set_progressive_scans(2);
     encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
     encoder
         .encode(img.as_raw(), w, h, jpeg_encoder::ColorType::Rgb)
@@ -449,6 +505,70 @@ pub(crate) mod tests {
             baseline.len()
         );
         assert_eq!(open(&out).dimensions(), (480, 320));
+    }
+
+    /// Mean per-channel difference between two same-sized images.
+    fn mean_error(a: &::image::RgbImage, b: &::image::RgbImage) -> f64 {
+        let sum: u64 = a
+            .as_raw()
+            .iter()
+            .zip(b.as_raw())
+            .map(|(x, y)| u64::from(x.abs_diff(*y)))
+            .sum();
+        sum as f64 / a.as_raw().len() as f64
+    }
+
+    fn gradient(w: u32, h: u32) -> ::image::RgbImage {
+        ::image::RgbImage::from_fn(w, h, |x, y| {
+            ::image::Rgb([(x * 255 / w) as u8, 200, (y * 255 / h) as u8])
+        })
+    }
+
+    #[test]
+    fn jpg_output_reads_back_in_color() {
+        // Optimized tables made the encoder write one scan per channel, which
+        // the image crate's decoder reads as luma only: the colors came back
+        // green the next time the file was converted or shrunk.
+        let dir = tempfile::tempdir().unwrap();
+        let pixels = gradient(301, 200);
+        let src = dir.path().join("g.png");
+        pixels.save(&src).unwrap();
+        let out = dir.path().join("g.jpg.tmp");
+        run(
+            &Operation::Convert(Format::Jpg),
+            None,
+            &src,
+            &out,
+            &Quality::default(),
+        )
+        .unwrap();
+        let err = mean_error(&pixels, &open(&out).to_rgb8());
+        assert!(err < 5.0, "mean error {err:.1}");
+    }
+
+    #[test]
+    fn shrinks_jpgs_from_earlier_versions_in_color() {
+        // Earlier versions wrote baseline JPGs with one scan per channel.
+        let dir = tempfile::tempdir().unwrap();
+        let pixels = gradient(300, 200);
+        let src = dir.path().join("old.jpg");
+        let mut encoder = jpeg_encoder::Encoder::new_file(&src, 90).unwrap();
+        encoder.set_optimized_huffman_tables(true);
+        encoder.set_sampling_factor(jpeg_encoder::SamplingFactor::F_2_2);
+        encoder
+            .encode(pixels.as_raw(), 300, 200, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        let out = dir.path().join("old.png.tmp");
+        run(
+            &Operation::Convert(Format::Png),
+            None,
+            &src,
+            &out,
+            &Quality::default(),
+        )
+        .unwrap();
+        let err = mean_error(&pixels, &open(&out).to_rgb8());
+        assert!(err < 5.0, "mean error {err:.1}");
     }
 
     #[test]
