@@ -3,7 +3,7 @@
 pub mod http;
 pub mod swap;
 #[cfg(test)]
-mod test_server;
+pub(crate) mod test_server;
 
 use std::path::Path;
 use std::sync::atomic::{AtomicU32, Ordering};

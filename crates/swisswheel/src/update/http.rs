@@ -2,6 +2,7 @@
 //! proxy and certificate store.
 
 use std::ffi::c_void;
+use std::io::Write;
 
 use windows::Win32::Networking::WinHttp::{
     ERROR_WINHTTP_HEADER_NOT_FOUND, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_FLAG_SECURE,
@@ -26,7 +27,13 @@ pub enum HttpError {
     TooLarge,
     #[error("네트워크 오류: {0}")]
     Net(#[from] windows_core::Error),
+    /// The sink refused the body (e.g. the disk is full).
+    #[error("쓰기 오류: {0}")]
+    Io(#[from] std::io::Error),
 }
+
+/// Bytes read from WinHTTP at a time.
+const CHUNK: usize = 64 << 10;
 
 /// GET `url`, following redirects; `progress(received, total)` after each chunk
 /// (`total` from Content-Length, `None` if absent). Fails past `limit` bytes.
@@ -35,6 +42,19 @@ pub fn get(
     limit: usize,
     progress: &mut dyn FnMut(u64, Option<u64>),
 ) -> Result<Vec<u8>, HttpError> {
+    let mut body = Vec::new();
+    get_to(url, limit, &mut body, progress)?;
+    Ok(body)
+}
+
+/// [`get`], writing the body into `sink` as it arrives instead of holding
+/// it; returns the bytes received.
+pub fn get_to(
+    url: &str,
+    limit: usize,
+    sink: &mut dyn Write,
+    progress: &mut dyn FnMut(u64, Option<u64>),
+) -> Result<u64, HttpError> {
     let target = Target::parse(url)?;
     let agent = HSTRING::from(format!("SwissWheel/{}", env!("CARGO_PKG_VERSION")));
     unsafe {
@@ -77,32 +97,28 @@ pub fn get(
         if total.is_some_and(|t| t > limit as u64) {
             return Err(HttpError::TooLarge);
         }
-        let mut body = Vec::with_capacity(total.unwrap_or(0) as usize);
+        let mut buf = vec![0u8; CHUNK];
+        let mut received = 0u64;
         loop {
             let mut available = 0u32;
             WinHttpQueryDataAvailable(request.0, &mut available)?;
             if available == 0 {
                 break;
             }
-            if body.len() + available as usize > limit {
+            if received + u64::from(available) > limit as u64 {
                 return Err(HttpError::TooLarge);
             }
-            let start = body.len();
-            body.resize(start + available as usize, 0);
+            let want = (available as usize).min(CHUNK);
             let mut read = 0u32;
-            WinHttpReadData(
-                request.0,
-                body[start..].as_mut_ptr().cast(),
-                available,
-                &mut read,
-            )?;
-            body.truncate(start + read as usize);
-            progress(body.len() as u64, total);
+            WinHttpReadData(request.0, buf.as_mut_ptr().cast(), want as u32, &mut read)?;
+            sink.write_all(&buf[..read as usize])?;
+            received += u64::from(read);
+            progress(received, total);
         }
-        if total.is_some_and(|t| (body.len() as u64) < t) {
+        if total.is_some_and(|t| received < t) {
             return Err(HttpError::Status(0));
         }
-        Ok(body)
+        Ok(received)
     }
 }
 
@@ -205,6 +221,44 @@ mod tests {
         let (result, seen) = fetch(&format!("{}/big", server.base), 1 << 20);
         assert_eq!(result.unwrap(), body);
         assert_eq!(seen.last(), Some(&(102400, Some(102400))));
+    }
+
+    #[test]
+    fn get_to_streams_into_the_sink() {
+        let body: Vec<u8> = (0..102400u32).map(|i| (i * 7) as u8).collect();
+        let server = TestServer::start(vec![("/big", Reply::Ok(body.clone()))]);
+        let mut sink = Vec::new();
+        let mut last = None;
+        let n = get_to(
+            &format!("{}/big", server.base),
+            1 << 20,
+            &mut sink,
+            &mut |g, t| last = Some((g, t)),
+        )
+        .unwrap();
+        assert_eq!((n, sink), (102400, body));
+        assert_eq!(last, Some((102400, Some(102400))));
+    }
+
+    #[test]
+    fn sink_error_stops_the_download() {
+        struct Full;
+        impl std::io::Write for Full {
+            fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+                Err(std::io::Error::other("disk full"))
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let server = TestServer::start(vec![("/x", Reply::Ok(vec![1; 4096]))]);
+        let result = get_to(
+            &format!("{}/x", server.base),
+            1 << 20,
+            &mut Full,
+            &mut |_, _| {},
+        );
+        assert!(matches!(result, Err(HttpError::Io(_))), "{result:?}");
     }
 
     #[test]
