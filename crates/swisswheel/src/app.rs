@@ -120,6 +120,9 @@ pub(crate) struct AppState {
     menu_panel_at: Instant,
     /// The key prompt card while a shortcut row waits for a key.
     capture_notice: Option<NoticeId>,
+    /// The last key result card, closed when the next result is posted so
+    /// repeated rejections never stack.
+    capture_result: Option<NoticeId>,
     /// Foreground watch while the menu is open (it closes when another
     /// window comes forward).
     foreground_hook: Option<HWINEVENTHOOK>,
@@ -335,6 +338,7 @@ pub fn run() -> Result<()> {
         menu_opened_at: Instant::now(),
         menu_panel_at: Instant::now(),
         capture_notice: None,
+        capture_result: None,
         foreground_hook: None,
         notice_window,
         notices,
@@ -679,7 +683,8 @@ impl AppState {
             }
             MenuAction::Close => self.close_menu(),
             MenuAction::StartCapture => {
-                // A click on another row's key: that row gets its own card.
+                // Ends any earlier row's capture first (a click on another
+                // row's key), then arms this row with its own card.
                 self.disarm_capture();
                 if let Some(item) = self.menu.as_ref().and_then(MenuSession::capture_item) {
                     self.arm_capture(item);
@@ -695,7 +700,7 @@ impl AppState {
                     None => {
                         // Posted first: if it pushes the prompt past the
                         // card limit, arming posts the prompt again.
-                        self.notify(key_result("이 키는 쓸 수 없습니다", ""));
+                        self.post_key_result("이 키는 쓸 수 없습니다", "");
                         // Keeps waiting on the same card, its timer restarted.
                         if let Some(menu) = &mut self.menu {
                             menu.rearm();
@@ -714,7 +719,7 @@ impl AppState {
                                 other.label(),
                                 settings::key_label(k)
                             );
-                            self.notify(key_result("두 단축키를 맞바꿨습니다", &body));
+                            self.post_key_result("두 단축키를 맞바꿨습니다", &body);
                         }
                     }
                 }
@@ -742,6 +747,14 @@ impl AppState {
             // Gone (clicked away, or dropped while quiet): a new card.
             _ => self.capture_notice = self.notify(key_prompt(item)),
         }
+    }
+
+    /// Shows a key result card in place of the previous one, if still up.
+    fn post_key_result(&mut self, title: &str, body: &str) {
+        if let Some(id) = self.capture_result.take() {
+            self.notices.dismiss(id, Instant::now());
+        }
+        self.capture_result = self.notify(key_result(title, body));
     }
 
     /// Stops waiting for a key and closes the key prompt card.
@@ -1084,8 +1097,11 @@ impl AppState {
                 };
                 bar.show();
                 bar.render(&view);
-                if capturing {
-                    self.notify(key_prompt(SettingItem::CycleKey));
+                // The prompt names the row the preview shows waiting.
+                if let (true, Some(Focus::Row(i))) = (capturing, focus)
+                    && let Some(&item) = category.items().get(i)
+                {
+                    self.notify(key_prompt(item));
                 }
             }
             other => log_error!("SWISSWHEEL_PREVIEW: 알 수 없는 값 {other}"),
@@ -1106,36 +1122,28 @@ impl AppState {
         if notices.cards(now).is_empty() {
             let folder = || Some(NoticeAction::OpenFolder(std::env::temp_dir()));
             let cards = [
-                (
-                    2,
-                    NoticeKind::KeyPrompt,
-                    "바꿀 키를 누르세요",
-                    "휠 열기 키 · 다른 곳을 클릭하면 취소",
-                    Some(NoticeAction::CancelCapture),
-                ),
+                (2, key_prompt(SettingItem::OpenKey)),
                 (
                     1,
-                    NoticeKind::Failed,
-                    "1개 파일을 변환하지 못했습니다",
-                    // Three lines' worth: the second ends in "…".
-                    "여행 브이로그 2026 최종 편집본 진짜최종.mp4: 지원하지 않는 오디오 코덱입니다 (pcm_s24le)\n성공 1개",
-                    folder(),
+                    Notice {
+                        kind: NoticeKind::Failed,
+                        title: "1개 파일을 변환하지 못했습니다".into(),
+                        // Three lines' worth: the second ends in "…".
+                        body: "여행 브이로그 2026 최종 편집본 진짜최종.mp4: 지원하지 않는 오디오 코덱입니다 (pcm_s24le)\n성공 1개".into(),
+                        action: folder(),
+                    },
                 ),
                 (
                     0,
-                    NoticeKind::Done,
-                    "2개 파일을 변환했습니다",
-                    "photo.jpg 외 1개 · JPG, GIF",
-                    folder(),
+                    Notice {
+                        kind: NoticeKind::Done,
+                        title: "2개 파일을 변환했습니다".into(),
+                        body: "photo.jpg 외 1개 · JPG, GIF".into(),
+                        action: folder(),
+                    },
                 ),
             ];
-            for (ago, kind, title, body, action) in cards {
-                let notice = Notice {
-                    kind,
-                    title: title.into(),
-                    body: body.into(),
-                    action,
-                };
+            for (ago, notice) in cards {
                 let at = now.checked_sub(Duration::from_secs(ago)).unwrap_or(now);
                 notices.post(notice, at);
             }
