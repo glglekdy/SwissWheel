@@ -6,19 +6,29 @@ use crate::settings::{CATEGORIES, Category, Dir, SettingItem};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tile {
     Settings,
+    Download,
     Plugins,
     Update,
+    Restart,
 }
 
 /// The bar's tiles, left to right.
-pub const TILES: [Tile; 3] = [Tile::Settings, Tile::Plugins, Tile::Update];
+pub const TILES: [Tile; 5] = [
+    Tile::Settings,
+    Tile::Download,
+    Tile::Plugins,
+    Tile::Update,
+    Tile::Restart,
+];
 
 impl Tile {
     pub fn label(self) -> &'static str {
         match self {
             Tile::Settings => "설정",
+            Tile::Download => "다운로드",
             Tile::Plugins => "플러그인",
             Tile::Update => "업데이트",
+            Tile::Restart => "재시작",
         }
     }
 }
@@ -362,20 +372,41 @@ mod tests {
         let mut m = MenuSession::new();
         assert_eq!((m.tile(), m.focus()), (0, None));
         assert_eq!(m.key(MenuKey::Left), MenuAction::None);
-        assert_eq!(m.key(MenuKey::Right), MenuAction::Redraw);
-        assert_eq!(m.key(MenuKey::Right), MenuAction::Redraw);
+        for _ in 0..4 {
+            assert_eq!(m.key(MenuKey::Right), MenuAction::Redraw);
+        }
         assert_eq!(m.key(MenuKey::Right), MenuAction::None);
-        assert_eq!(m.tile(), 2);
+        assert_eq!(m.tile(), 4);
         assert_eq!(m.hint(), "");
+    }
+
+    #[test]
+    fn tile_order_and_labels() {
+        assert_eq!(
+            TILES,
+            [
+                Tile::Settings,
+                Tile::Download,
+                Tile::Plugins,
+                Tile::Update,
+                Tile::Restart
+            ]
+        );
+        assert_eq!(Tile::Download.label(), "다운로드");
+        assert_eq!(Tile::Restart.label(), "재시작");
     }
 
     #[test]
     fn enter_or_down_runs_the_tile() {
         let mut m = MenuSession::new();
         m.key(MenuKey::Right);
+        assert_eq!(m.key(MenuKey::Enter), MenuAction::Notice(Tile::Download));
+        m.key(MenuKey::Right);
         assert_eq!(m.key(MenuKey::Enter), MenuAction::Notice(Tile::Plugins));
         m.key(MenuKey::Right);
         assert_eq!(m.key(MenuKey::Down), MenuAction::Notice(Tile::Update));
+        m.key(MenuKey::Right);
+        assert_eq!(m.key(MenuKey::Enter), MenuAction::Notice(Tile::Restart));
         let mut m = MenuSession::new();
         assert_eq!(m.key(MenuKey::Down), MenuAction::Redraw);
         assert_eq!(m.focus(), Some(Focus::Tabs));

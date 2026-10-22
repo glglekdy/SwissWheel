@@ -34,8 +34,10 @@ const GLYPH_WARNING: &str = "\u{E7BA}"; // Warning
 fn glyph(tile: Tile) -> &'static str {
     match tile {
         Tile::Settings => "\u{E713}", // Settings
+        Tile::Download => "\u{E896}", // Download
         Tile::Plugins => "\u{EA86}",  // Puzzle
         Tile::Update => "\u{E895}",   // Sync
+        Tile::Restart => "\u{E72C}",  // Refresh
     }
 }
 

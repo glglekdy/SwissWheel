@@ -219,9 +219,9 @@ mod tests {
     #[test]
     fn bar_and_panel_share_width() {
         let l = layout(false, 1.0);
-        assert_eq!(l.width, 368);
-        assert_eq!(l.bar.right - l.bar.left, 368.0);
-        assert_eq!(l.panel.right - l.panel.left, 368.0);
+        assert_eq!(l.width, 608);
+        assert_eq!(l.bar.right - l.bar.left, 608.0);
+        assert_eq!(l.panel.right - l.panel.left, 608.0);
         assert_eq!(l.height as f32, l.panel.bottom);
         assert_eq!(l.panel.top, l.bar.bottom + 8.0);
     }
@@ -232,8 +232,8 @@ mod tests {
         assert_eq!(l.panel.bottom - l.panel.top, 8.0 * 2.0 + 5.0 * 36.0);
         assert_eq!(l.rows.len(), 3);
         assert_eq!(l.tabs[0].top, l.panel.top + 8.0);
-        assert_eq!((l.tabs[0].left, l.tabs[3].right), (8.0, 360.0));
-        assert_eq!(l.tabs[1].left - l.tabs[0].left, 88.0);
+        assert_eq!((l.tabs[0].left, l.tabs[3].right), (8.0, 600.0));
+        assert_eq!(l.tabs[1].left - l.tabs[0].left, 148.0);
         assert_eq!(l.rows[0].row.top, l.tabs[0].bottom);
         assert_eq!(l.hint.top, l.rows[2].row.bottom);
         assert_eq!(
@@ -251,7 +251,7 @@ mod tests {
             right: 1920,
             bottom: 1040,
         };
-        assert_eq!(window_origin(work, &l, 1.0), ((1920 - 368) / 2, 16 - 8));
+        assert_eq!(window_origin(work, &l, 1.0), ((1920 - 608) / 2, 16 - 8));
     }
 
     #[test]
@@ -344,7 +344,7 @@ mod tests {
     fn hit_scales_with_dpi() {
         let l1 = layout(false, 1.0);
         let l2 = layout(false, 1.25);
-        assert_eq!(l2.width, (368.0f32 * 1.25).ceil() as i32);
+        assert_eq!(l2.width, (608.0f32 * 1.25).ceil() as i32);
         let b = &l2.tiles[2];
         assert_eq!(hit(&l2, None, b.left + 1.0, b.top + 1.0), MenuHit::Tile(2));
         assert_eq!(l2.tiles[2].left, l1.tiles[2].left * 1.25);
