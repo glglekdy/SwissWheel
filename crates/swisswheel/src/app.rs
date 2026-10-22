@@ -681,6 +681,8 @@ impl AppState {
                 self.close_menu();
                 self.notify(info(tile.label(), "다음 버전에서 지원 예정입니다"));
             }
+            MenuAction::OpenDownloads => self.render_menu(),
+            MenuAction::Essential(..) => {}
             MenuAction::Close => self.close_menu(),
             MenuAction::StartCapture => {
                 // Ends any earlier row's capture first (a click on another

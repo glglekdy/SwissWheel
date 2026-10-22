@@ -1,6 +1,7 @@
 //! The desktop menu (spec 2.2, 2.3): which tile or settings row is selected,
 //! and what each key press or click on the bar asks the app to do.
 
+use crate::essentials::{ESSENTIALS, Essential, EssentialAction};
 use crate::settings::{CATEGORIES, Category, Dir, SettingItem};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,6 +58,10 @@ pub enum MenuHit {
     Step(usize, Dir),
     /// The key shown on a shortcut row; clicking it waits for a key.
     KeyCap(usize),
+    /// A row of the download panel, away from its buttons.
+    EssentialRow(usize),
+    /// A row's button, counted from the left among the buttons it shows.
+    EssentialButton(usize, usize),
     /// Inside the bar or panel but on nothing that reacts (margins, the
     /// notice).
     Panel,
@@ -71,6 +76,10 @@ pub enum MenuAction {
     Change(SettingItem, Dir),
     /// A tile whose feature isn't there yet.
     Notice(Tile),
+    /// The download panel just opened: the app checks what is installed.
+    OpenDownloads,
+    /// A download panel button: the app confirms and runs it.
+    Essential(Essential, EssentialAction),
     Close,
     /// Wait for a key for the selected shortcut row: the app has the hook
     /// hand over the next key press.
@@ -89,6 +98,17 @@ pub enum Focus {
     Row(usize),
 }
 
+/// Where the keyboard is in the open download panel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DownloadFocus {
+    Header,
+    /// `button` counts from the left; `None` while the row shows none.
+    Row {
+        essential: usize,
+        button: Option<usize>,
+    },
+}
+
 #[derive(Debug)]
 pub struct MenuSession {
     tile: usize,
@@ -99,6 +119,10 @@ pub struct MenuSession {
     /// Waiting for a key for the focused shortcut row.
     capturing: bool,
     hovered: MenuHit,
+    /// `None` while the download panel is closed.
+    download: Option<DownloadFocus>,
+    /// Each download row's buttons, from the app (`set_actions`).
+    actions: Vec<Vec<EssentialAction>>,
 }
 
 impl Default for MenuSession {
@@ -115,6 +139,8 @@ impl MenuSession {
             panel: None,
             capturing: false,
             hovered: MenuHit::Outside,
+            download: None,
+            actions: vec![Vec::new(); ESSENTIALS.len()],
         }
     }
 
@@ -128,6 +154,35 @@ impl MenuSession {
 
     pub fn focus(&self) -> Option<Focus> {
         self.panel
+    }
+
+    pub fn download_focus(&self) -> Option<DownloadFocus> {
+        self.download
+    }
+
+    /// The settings or the download panel is open.
+    pub fn panel_open(&self) -> bool {
+        self.panel.is_some() || self.download.is_some()
+    }
+
+    pub fn actions(&self) -> &[Vec<EssentialAction>] {
+        &self.actions
+    }
+
+    /// The download rows' buttons changed (a check came back, a download
+    /// started or ended). A selected button past the new end moves back to
+    /// the last; a row that gains buttons selects its first.
+    pub fn set_actions(&mut self, actions: Vec<Vec<EssentialAction>>) {
+        self.actions = actions;
+        if let Some(DownloadFocus::Row { essential, button }) = self.download {
+            let count = self.actions.get(essential).map_or(0, Vec::len);
+            let button = match (button, count) {
+                (_, 0) => None,
+                (None, _) => Some(0),
+                (Some(b), n) => Some(b.min(n - 1)),
+            };
+            self.download = Some(DownloadFocus::Row { essential, button });
+        }
     }
 
     pub fn capturing(&self) -> bool {
@@ -148,6 +203,9 @@ impl MenuSession {
     pub fn key(&mut self, key: MenuKey) -> MenuAction {
         if self.capturing {
             return MenuAction::None; // the hook sends the key as MenuCapture
+        }
+        if let Some(focus) = self.download.filter(|_| key != MenuKey::Open) {
+            return self.download_key(key, focus);
         }
         match (key, self.panel) {
             (MenuKey::Open, _) => MenuAction::Close,
@@ -195,6 +253,90 @@ impl MenuSession {
         }
     }
 
+    /// Spec 2.3 of the download panel design.
+    fn download_key(&mut self, key: MenuKey, focus: DownloadFocus) -> MenuAction {
+        use DownloadFocus::{Header, Row};
+        match (key, focus) {
+            (MenuKey::Down | MenuKey::Enter, Header) => self.enter_row(0),
+            (MenuKey::Up | MenuKey::Escape, Header) => {
+                self.download = None;
+                MenuAction::Redraw
+            }
+            (MenuKey::Up, Row { essential: 0, .. }) | (MenuKey::Escape, Row { .. }) => {
+                self.download = Some(Header);
+                MenuAction::Redraw
+            }
+            (MenuKey::Up, Row { essential, .. }) => self.enter_row(essential - 1),
+            (MenuKey::Down, Row { essential, .. }) => self.enter_row(essential + 1),
+            (
+                MenuKey::Left,
+                Row {
+                    essential,
+                    button: Some(b),
+                },
+            ) if b > 0 => self.select_button(essential, b - 1),
+            (
+                MenuKey::Right,
+                Row {
+                    essential,
+                    button: Some(b),
+                },
+            ) => self.select_button(essential, b + 1),
+            (
+                MenuKey::Enter,
+                Row {
+                    essential,
+                    button: Some(b),
+                },
+            ) => self.run_button(essential, b),
+            _ => MenuAction::None,
+        }
+    }
+
+    /// Puts the keyboard on a download row, on its first button.
+    fn enter_row(&mut self, essential: usize) -> MenuAction {
+        if essential >= ESSENTIALS.len() {
+            return MenuAction::None;
+        }
+        let button = self
+            .actions
+            .get(essential)
+            .filter(|a| !a.is_empty())
+            .map(|_| 0);
+        let focus = Some(DownloadFocus::Row { essential, button });
+        if self.download == focus {
+            return MenuAction::None;
+        }
+        self.download = focus;
+        MenuAction::Redraw
+    }
+
+    fn button(&self, essential: usize, button: usize) -> Option<EssentialAction> {
+        self.actions.get(essential)?.get(button).copied()
+    }
+
+    fn select_button(&mut self, essential: usize, button: usize) -> MenuAction {
+        if self.button(essential, button).is_none() {
+            return MenuAction::None;
+        }
+        self.download = Some(DownloadFocus::Row {
+            essential,
+            button: Some(button),
+        });
+        MenuAction::Redraw
+    }
+
+    fn run_button(&mut self, essential: usize, button: usize) -> MenuAction {
+        let Some(action) = self.button(essential, button) else {
+            return MenuAction::None;
+        };
+        self.download = Some(DownloadFocus::Row {
+            essential,
+            button: Some(button),
+        });
+        MenuAction::Essential(ESSENTIALS[essential], action)
+    }
+
     /// `true` if the bar needs redrawing. Hovering a tab only highlights it;
     /// hovering a tile selects it, except while waiting for a key.
     pub fn hover(&mut self, hit: MenuHit) -> bool {
@@ -229,7 +371,10 @@ impl MenuSession {
 
     fn click_idle(&mut self, hit: MenuHit) -> MenuAction {
         let panel_open = self.panel.is_some();
+        let downloads_open = self.download.is_some();
         match hit {
+            MenuHit::EssentialRow(i) if downloads_open => self.enter_row(i),
+            MenuHit::EssentialButton(i, b) if downloads_open => self.run_button(i, b),
             MenuHit::Tile(i) => {
                 self.select_tile(i);
                 self.activate()
@@ -316,6 +461,9 @@ impl MenuSession {
             if TILES[i] != Tile::Settings {
                 self.panel = None;
             }
+            if TILES[i] != Tile::Download {
+                self.download = None;
+            }
         }
     }
 
@@ -344,6 +492,11 @@ impl MenuSession {
             Tile::Settings => {
                 self.panel = Some(Focus::Tabs);
                 MenuAction::Redraw
+            }
+            Tile::Download if self.download.is_some() => MenuAction::None,
+            Tile::Download => {
+                self.download = Some(DownloadFocus::Header);
+                MenuAction::OpenDownloads
             }
             tile => MenuAction::Notice(tile),
         }
@@ -393,7 +546,8 @@ mod tests {
     fn enter_or_down_runs_the_tile() {
         let mut m = MenuSession::new();
         m.key(MenuKey::Right);
-        assert_eq!(m.key(MenuKey::Enter), MenuAction::Notice(Tile::Download));
+        assert_eq!(m.key(MenuKey::Enter), MenuAction::OpenDownloads);
+        m.key(MenuKey::Up); // back on the bar
         m.key(MenuKey::Right);
         assert_eq!(m.key(MenuKey::Enter), MenuAction::Notice(Tile::Plugins));
         m.key(MenuKey::Right);
@@ -561,5 +715,132 @@ mod tests {
         assert!(m.hover(MenuHit::Tile(1)));
         assert_eq!(m.focus(), None); // another tile closes the panel
         assert_eq!(m.click(MenuHit::Outside), MenuAction::Close);
+    }
+
+    fn downloads(actions: Vec<Vec<EssentialAction>>) -> MenuSession {
+        let mut m = MenuSession::new();
+        m.key(MenuKey::Right);
+        assert_eq!(m.key(MenuKey::Enter), MenuAction::OpenDownloads);
+        m.set_actions(actions);
+        m
+    }
+
+    fn row(button: Option<usize>) -> Option<DownloadFocus> {
+        Some(DownloadFocus::Row {
+            essential: 0,
+            button,
+        })
+    }
+
+    #[test]
+    fn download_tile_opens_its_panel_on_the_header() {
+        use EssentialAction::*;
+        let mut m = downloads(vec![vec![Install]]);
+        assert_eq!(m.download_focus(), Some(DownloadFocus::Header));
+        assert!(m.panel_open() && m.focus().is_none());
+        assert_eq!(m.key(MenuKey::Enter), MenuAction::Redraw); // header → row
+        assert_eq!(m.download_focus(), row(Some(0)));
+        let mut n = MenuSession::new();
+        n.key(MenuKey::Right);
+        assert_eq!(n.key(MenuKey::Down), MenuAction::OpenDownloads);
+        assert_eq!(n.click(MenuHit::Tile(1)), MenuAction::None); // already open
+    }
+
+    #[test]
+    fn rows_and_buttons_move_and_run() {
+        use EssentialAction::*;
+        let mut m = downloads(vec![vec![Update, Remove]]);
+        m.key(MenuKey::Down);
+        assert_eq!(m.download_focus(), row(Some(0)));
+        assert_eq!(m.key(MenuKey::Down), MenuAction::None); // one row
+        assert_eq!(m.key(MenuKey::Left), MenuAction::None);
+        assert_eq!(m.key(MenuKey::Right), MenuAction::Redraw);
+        assert_eq!(m.key(MenuKey::Right), MenuAction::None);
+        assert_eq!(
+            m.key(MenuKey::Enter),
+            MenuAction::Essential(Essential::Ffmpeg, Remove)
+        );
+        assert_eq!(m.key(MenuKey::Escape), MenuAction::Redraw);
+        assert_eq!(m.download_focus(), Some(DownloadFocus::Header));
+        assert_eq!(m.key(MenuKey::Left), MenuAction::None);
+        m.key(MenuKey::Down);
+        assert_eq!(m.key(MenuKey::Up), MenuAction::Redraw); // first row → header
+        assert_eq!(m.download_focus(), Some(DownloadFocus::Header));
+        assert_eq!(m.key(MenuKey::Up), MenuAction::Redraw);
+        assert!(!m.panel_open());
+        assert_eq!(m.key(MenuKey::Open), MenuAction::Close);
+    }
+
+    #[test]
+    fn escape_on_the_header_closes_the_panel() {
+        let mut m = downloads(vec![vec![]]);
+        assert_eq!(m.key(MenuKey::Escape), MenuAction::Redraw);
+        assert!(!m.panel_open());
+        assert_eq!(m.key(MenuKey::Escape), MenuAction::Close);
+    }
+
+    #[test]
+    fn actions_shrink_pulls_the_button_back() {
+        use EssentialAction::*;
+        let mut m = downloads(vec![vec![Update, Remove]]);
+        m.key(MenuKey::Down);
+        m.key(MenuKey::Right);
+        m.set_actions(vec![vec![Remove]]);
+        assert_eq!(m.download_focus(), row(Some(0)));
+        m.set_actions(vec![vec![]]);
+        assert_eq!(m.download_focus(), row(None));
+        assert_eq!(m.key(MenuKey::Enter), MenuAction::None);
+        assert_eq!(m.key(MenuKey::Right), MenuAction::None);
+        m.set_actions(vec![vec![Install]]); // buttons came back: the first is picked
+        assert_eq!(m.download_focus(), row(Some(0)));
+        assert_eq!(m.actions(), [vec![Install]]);
+    }
+
+    #[test]
+    fn set_tool_actions_leaves_settings_alone() {
+        let mut m = panel(); // the settings panel
+        m.set_actions(vec![vec![EssentialAction::Install]]);
+        assert_eq!(m.focus(), Some(Focus::Tabs));
+        assert_eq!(m.download_focus(), None);
+    }
+
+    #[test]
+    fn moving_to_another_tile_closes_the_download_panel() {
+        let mut m = downloads(vec![vec![EssentialAction::Install]]);
+        m.key(MenuKey::Down);
+        m.hover(MenuHit::Tile(0));
+        assert_eq!(m.download_focus(), None);
+        assert!(!m.panel_open());
+        let mut m = downloads(vec![vec![]]);
+        assert_eq!(m.key(MenuKey::Up), MenuAction::Redraw);
+        assert_eq!(m.key(MenuKey::Right), MenuAction::Redraw); // back on the bar
+        assert_eq!(m.download_focus(), None);
+    }
+
+    #[test]
+    fn clicks_on_rows_and_buttons() {
+        use EssentialAction::*;
+        let mut m = downloads(vec![vec![Update, Remove]]);
+        assert_eq!(m.click(MenuHit::EssentialRow(0)), MenuAction::Redraw);
+        assert_eq!(m.download_focus(), row(Some(0)));
+        assert_eq!(
+            m.click(MenuHit::EssentialButton(0, 1)),
+            MenuAction::Essential(Essential::Ffmpeg, Remove)
+        );
+        assert_eq!(m.download_focus(), row(Some(1)));
+        assert_eq!(m.click(MenuHit::EssentialButton(0, 5)), MenuAction::None);
+        assert_eq!(m.click(MenuHit::EssentialRow(3)), MenuAction::None);
+        assert_eq!(
+            m.scroll(MenuHit::EssentialRow(0), Dir::Forward),
+            MenuAction::None
+        );
+        assert_eq!(m.click(MenuHit::Outside), MenuAction::Close);
+    }
+
+    #[test]
+    fn rows_and_buttons_mean_nothing_without_the_download_panel() {
+        let mut m = panel();
+        assert_eq!(m.click(MenuHit::EssentialButton(0, 0)), MenuAction::None);
+        assert_eq!(m.focus(), Some(Focus::Tabs));
     }
 }
