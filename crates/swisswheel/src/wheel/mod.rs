@@ -4,6 +4,7 @@ mod glyph;
 pub(crate) mod render;
 mod window;
 
+use swisswheel_core::appearance::Accent;
 use swisswheel_core::catalog::Operation;
 use swisswheel_core::geometry::{Hit, Side};
 use swisswheel_core::options::Choice;
@@ -20,6 +21,8 @@ pub struct WheelView<'a> {
     pub hovered: Hit,
     /// Open animation, 0.0 → 1.0.
     pub progress: f32,
+    /// Fills the hovered tile and row.
+    pub accent: Accent,
     /// The option panel beside the wheel, when open (spec 2.5).
     pub panel: Option<PanelView<'a>>,
 }

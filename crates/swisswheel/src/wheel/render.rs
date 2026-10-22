@@ -2,6 +2,7 @@
 //! per-pixel transparency: at the bottom a host-backdrop (acrylic blur) disc,
 //! on top a Direct2D swap chain with the tint, sectors, and labels.
 
+use swisswheel_core::appearance::Accent;
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::geometry::{
     CANCEL_RADIUS, OUTER_RADIUS, PANEL_HEADER, PANEL_PAD, PANEL_ROW, RING_CAPACITY, panel_rect,
@@ -26,31 +27,31 @@ use windows_numerics::Vector2;
 use super::glyph::glyph;
 use super::window::HOVER_GROW;
 use super::{PanelView, WheelView};
-use crate::theme::{light_theme, rgb, transparency_enabled};
+use crate::fonts;
+use crate::theme::{Piece, Theme, glass_layer, glass_piece, rgb};
 
 const OPEN_SCALE_FROM: f32 = 0.92; // wheel scales from 92% to 100% while opening
 
 /// Gap between neighboring tiles and the rounding of their corners (DIPs).
 const TILE_GAP: f32 = 4.0;
-const TILE_CORNER: f32 = 6.0;
+const TILE_CORNER: f32 = 9.0;
 /// The hub (center circle) sits this far inside the cancel radius.
 const HUB_INSET: f32 = 6.0;
 /// Rounding of the option panel and of its rows (DIPs).
-pub(super) const PANEL_CORNER: f32 = 10.0;
-const ROW_CORNER: f32 = 8.0;
+pub(super) const PANEL_CORNER: f32 = 16.0;
+const ROW_CORNER: f32 = 11.0;
+/// Marks the default choice in the option panel.
+const BADGE: &str = "기본";
 
+/// The old flat colors, still used by the menu bar and the progress card.
 pub(crate) struct Palette {
     /// Glass: a light translucent tint over the blur. Solid: an opaque disc.
     pub(crate) disc: D2D1_COLOR_F,
-    /// 1 px highlight just inside the disc edge, faint line just outside it.
+    /// 1 px highlight just inside the edge.
     pub(crate) rim: D2D1_COLOR_F,
-    pub(crate) outline: D2D1_COLOR_F,
-    /// Tiles shade from top to bottom and cast a 1 px drop shadow.
+    /// Tiles shade from top to bottom.
     pub(crate) tile_top: D2D1_COLOR_F,
     pub(crate) tile_bottom: D2D1_COLOR_F,
-    pub(crate) shadow: D2D1_COLOR_F,
-    pub(crate) hub: D2D1_COLOR_F,
-    pub(crate) hub_ring: D2D1_COLOR_F,
     pub(crate) text: D2D1_COLOR_F,
     pub(crate) subtext: D2D1_COLOR_F,
     pub(crate) accent_top: D2D1_COLOR_F,
@@ -72,12 +73,8 @@ pub(crate) fn palette(light: bool, glass: bool, alpha: f32) -> Palette {
                 rgb(0xE6E6EA, alpha)
             },
             rim: rgb(0xFFFFFF, a(0.90)),
-            outline: rgb(0x000000, a(0.10)),
             tile_top: rgb(0xFFFFFF, a(0.96)),
             tile_bottom: rgb(0xEFEFF2, a(0.96)),
-            shadow: rgb(0x000000, a(0.10)),
-            hub: rgb(0xFFFFFF, alpha),
-            hub_ring: rgb(0xD6D6DB, alpha),
             text: rgb(0x2B2B2E, alpha),
             subtext: rgb(0x7A7A80, alpha),
             accent_top,
@@ -92,12 +89,8 @@ pub(crate) fn palette(light: bool, glass: bool, alpha: f32) -> Palette {
                 rgb(0x242428, alpha)
             },
             rim: rgb(0xFFFFFF, a(0.14)),
-            outline: rgb(0x000000, a(0.35)),
             tile_top: rgb(0x4A4A50, a(0.92)),
             tile_bottom: rgb(0x3C3C42, a(0.92)),
-            shadow: rgb(0x000000, a(0.35)),
-            hub: rgb(0x3E3E44, alpha),
-            hub_ring: rgb(0x55555C, alpha),
             text: rgb(0xF0F0F2, alpha),
             subtext: rgb(0xA8A8AE, alpha),
             accent_top,
@@ -121,10 +114,9 @@ pub struct Renderer {
     panel_backdrop: SpriteVisual,
     panel_clip: CompositionRoundedRectangleGeometry,
     _content: SpriteVisual,
-    dwrite: IDWriteFactory,
     /// Family of the system icon font (see `glyph`).
     icon_font: PCWSTR,
-    /// Round line joins: stroking a tile with its own fill rounds its corners.
+    /// Round line joins: widening a tile's core by its corner rounds them.
     round: ID2D1StrokeStyle1,
     size: (u32, u32),
 }
@@ -210,8 +202,7 @@ impl Renderer {
             children.InsertAtBottom(&panel_backdrop)?;
             children.InsertAtTop(&content)?;
 
-            let dwrite: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-            let icon_font = icon_font(&dwrite);
+            let icon_font = icon_font(&fonts::factory());
             let round = factory.CreateStrokeStyle(
                 &D2D1_STROKE_STYLE_PROPERTIES1 {
                     startCap: D2D1_CAP_STYLE_ROUND,
@@ -237,7 +228,6 @@ impl Renderer {
                 panel_backdrop,
                 panel_clip,
                 _content: content,
-                dwrite,
                 icon_font,
                 round,
                 size: (width, height),
@@ -277,13 +267,11 @@ impl Renderer {
         let eased = 1.0 - (1.0 - view.progress.clamp(0.0, 1.0)).powi(3);
         let grow = OPEN_SCALE_FROM + (1.0 - OPEN_SCALE_FROM) * eased;
         // With transparency effects off the host backdrop draws nothing useful,
-        // so fall back to an opaque disc.
-        let glass = glass_supported && transparency_enabled();
-        let light = light_theme();
-        let colors = palette(light, glass, eased);
+        // so the theme falls back to an opaque disc.
+        let theme = Theme::current(glass_supported, view.accent, eased);
         let n = view.items.len();
         let disc = OUTER_RADIUS * scale * grow;
-        self.backdrop.SetIsVisible(glass)?;
+        self.backdrop.SetIsVisible(theme.glass)?;
         self.backdrop.SetOpacity(eased)?;
         self.backdrop_clip.SetCenter(Vector2 { X: cx, Y: cy })?;
         self.backdrop_clip.SetRadius(Vector2 { X: disc, Y: disc })?;
@@ -298,20 +286,13 @@ impl Renderer {
             }));
             let brush = |color: &D2D1_COLOR_F| ctx.CreateSolidColorBrush(color, None);
 
-            // Base disc with a light edge inside and a faint line outside.
-            ctx.FillEllipse(&ellipse_at(cx, cy, disc), &brush(&colors.disc)?);
-            ctx.DrawEllipse(
-                &ellipse_at(cx, cy, disc + 0.5 * scale),
-                &brush(&colors.outline)?,
+            glass_layer(
+                ctx,
+                &self.circle(cx, cy, disc)?,
+                square(cx, cy, disc),
+                &theme,
                 scale,
-                None,
-            );
-            ctx.DrawEllipse(
-                &ellipse_at(cx, cy, disc - 0.5 * scale),
-                &brush(&colors.rim)?,
-                scale,
-                None,
-            );
+            )?;
 
             // Icon above, small label below; two rings make for shorter tiles.
             let (icon_size, label_size, icon_dy, label_dy) = if n > RING_CAPACITY {
@@ -319,41 +300,33 @@ impl Renderer {
             } else {
                 (22.0, 10.5, -7.0, 13.0)
             };
-            let icon_format =
-                self.font_format(self.icon_font, icon_size * scale, DWRITE_FONT_WEIGHT_NORMAL)?;
-            let label_format =
-                self.text_format(label_size * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
-            let shadow = brush(&colors.shadow)?;
-            for (i, op) in view.items.iter().enumerate() {
+            let icon_format = self.icon_format(icon_size * scale)?;
+            let label_format = fonts::text_format(
+                label_size * scale,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?;
+            let text = brush(&theme.text)?;
+            let on_accent = brush(&rgb(0xFFFFFF, eased))?;
+            // The hovered tile last: it grows over its neighbors' edges.
+            let order = (0..n)
+                .filter(|&i| view.hovered != Hit::Item(i))
+                .chain((0..n).filter(|&i| view.hovered == Hit::Item(i)));
+            for i in order {
+                let op = &view.items[i];
                 let s = sector(n, i, scale);
                 let hovered = view.hovered == Hit::Item(i);
                 let inner = s.inner_radius * grow;
                 let outer =
                     (s.outer_radius + if hovered { HOVER_GROW * scale } else { 0.0 }) * grow;
                 let tile = Tile::new(inner, outer, s.start_deg, s.end_deg, scale);
-
-                // Drop shadow: the same tile, 1 px lower.
-                self.fill_tile(
-                    &self.tile_path(cx, cy + 1.2 * scale, &tile)?,
-                    &tile,
-                    &shadow,
-                )?;
-                let (top, bottom) = if hovered {
-                    (&colors.accent_top, &colors.accent_bottom)
-                } else {
-                    (&colors.tile_top, &colors.tile_bottom)
-                };
-                let (y0, y1) = tile.vertical_extent(cy);
-                let fill = self.vertical_gradient(cx, y0, y1, top, bottom)?;
-                self.fill_tile(&self.tile_path(cx, cy, &tile)?, &tile, &fill)?;
+                let shape = self.tile_shape(cx, cy, &tile)?;
+                let piece = if hovered { Piece::Accent } else { Piece::Plain };
+                glass_piece(ctx, &shape, shape.GetBounds(None)?, &theme, piece, scale)?;
 
                 let mid = (s.start_deg + s.end_deg) / 2.0;
                 let (x, y) = polar_at(cx, cy, (inner + outer) / 2.0, mid);
-                let text = brush(if hovered {
-                    &colors.accent_text
-                } else {
-                    &colors.text
-                })?;
+                let text = if hovered { &on_accent } else { &text };
                 self.draw_text(
                     glyph(op).encode_utf8(&mut [0; 4]),
                     &icon_format,
@@ -361,7 +334,7 @@ impl Renderer {
                     y + icon_dy * scale,
                     (icon_size + 8.0) * scale,
                     (icon_size + 8.0) * scale,
-                    &text,
+                    text,
                 );
                 self.draw_text(
                     op.label(),
@@ -370,22 +343,30 @@ impl Renderer {
                     y + label_dy * scale,
                     76.0 * scale,
                     (label_size + 6.0) * scale,
-                    &text,
+                    text,
                 );
             }
 
-            // Hub: a raised circle with what is being dragged and the wheel's name.
+            // Hub: a glass piece with what is being dragged and the wheel's name.
             let hub = (CANCEL_RADIUS - HUB_INSET) * scale * grow;
-            ctx.FillEllipse(&ellipse_at(cx, cy + 1.2 * scale, hub), &shadow);
-            ctx.FillEllipse(&ellipse_at(cx, cy, hub), &brush(&colors.hub)?);
-            ctx.DrawEllipse(
-                &ellipse_at(cx, cy, hub - 0.5 * scale),
-                &brush(&colors.hub_ring)?,
+            glass_piece(
+                ctx,
+                &self.circle(cx, cy, hub)?,
+                square(cx, cy, hub),
+                &theme,
+                Piece::Plain,
                 scale,
-                None,
-            );
-            let detail_format = self.text_format(13.0 * scale, DWRITE_FONT_WEIGHT_BOLD)?;
-            let title_format = self.text_format(10.5 * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD)?;
+            )?;
+            let detail_format = fonts::text_format(
+                14.0 * scale,
+                DWRITE_FONT_WEIGHT_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?;
+            let title_format = fonts::text_format(
+                10.5 * scale,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?;
             let width = 2.0 * hub - 8.0 * scale;
             if view.detail.is_empty() {
                 self.draw_text(
@@ -395,7 +376,7 @@ impl Renderer {
                     cy,
                     width,
                     22.0 * scale,
-                    &brush(&colors.text)?,
+                    &text,
                 );
             } else {
                 self.draw_text(
@@ -405,7 +386,7 @@ impl Renderer {
                     cy - 6.0 * scale,
                     width,
                     20.0 * scale,
-                    &brush(&colors.text)?,
+                    &text,
                 );
                 self.draw_text(
                     view.title,
@@ -414,12 +395,12 @@ impl Renderer {
                     cy + 11.0 * scale,
                     width,
                     16.0 * scale,
-                    &brush(&colors.subtext)?,
+                    &brush(&theme.subtext)?,
                 );
             }
 
             match &view.panel {
-                Some(panel) => self.draw_panel(panel, scale, light, glass, eased, (cx, cy))?,
+                Some(panel) => self.draw_panel(panel, scale, &theme, view.accent, (cx, cy))?,
                 None => self.panel_backdrop.SetIsVisible(false)?,
             }
 
@@ -429,19 +410,18 @@ impl Renderer {
         Ok(())
     }
 
-    /// The option panel beside the wheel (spec 2.5): a glass card with a
-    /// title and one rounded row per choice, the hovered row in the accent.
+    /// The option panel beside the wheel (spec 2.5): a glass layer with a
+    /// title and one row per choice, the hovered row an accent piece.
     fn draw_panel(
         &self,
         panel: &PanelView,
         scale: f32,
-        light: bool,
-        glass: bool,
-        wheel_fade: f32,
+        wheel: &Theme,
+        accent: Accent,
         (cx, cy): (f32, f32),
     ) -> Result<()> {
-        let fade = (1.0 - (1.0 - panel.progress.clamp(0.0, 1.0)).powi(3)).min(wheel_fade);
-        let colors = palette(light, glass, fade);
+        let fade = (1.0 - (1.0 - panel.progress.clamp(0.0, 1.0)).powi(3)).min(wheel.alpha);
+        let theme = Theme::new(wheel.light, wheel.glass, accent, fade);
         let r = panel_rect(panel.side, panel.choices.len(), scale);
         let rect = D2D_RECT_F {
             left: cx + r.left,
@@ -459,56 +439,38 @@ impl Renderer {
             X: corner,
             Y: corner,
         })?;
-        self.panel_backdrop.SetIsVisible(glass)?;
+        self.panel_backdrop.SetIsVisible(theme.glass)?;
         self.panel_backdrop.SetOpacity(fade)?;
 
         let ctx = &self.ctx;
         let brush = |color: &D2D1_COLOR_F| unsafe { ctx.CreateSolidColorBrush(color, None) };
-        let rounded = |rect: D2D_RECT_F, radius: f32| D2D1_ROUNDED_RECT {
-            rect,
-            radiusX: radius,
-            radiusY: radius,
-        };
-        let inset = |rect: D2D_RECT_F, d: f32| D2D_RECT_F {
-            left: rect.left + d,
-            top: rect.top + d,
-            right: rect.right - d,
-            bottom: rect.bottom - d,
-        };
-        unsafe {
-            ctx.FillRoundedRectangle(&rounded(rect, corner), &brush(&colors.disc)?);
-            ctx.DrawRoundedRectangle(
-                &rounded(inset(rect, -0.5 * scale), corner),
-                &brush(&colors.outline)?,
-                scale,
-                None,
-            );
-            ctx.DrawRoundedRectangle(
-                &rounded(inset(rect, 0.5 * scale), corner),
-                &brush(&colors.rim)?,
-                scale,
-                None,
-            );
-        }
+        glass_layer(ctx, &self.rounded(rect, corner)?, rect, &theme, scale)?;
 
         let pad = 12.0 * scale;
-        let title_format = self.aligned_format(
+        let title_format = fonts::text_format(
             10.5 * scale,
             DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_TEXT_ALIGNMENT_LEADING,
         )?;
-        let label_format = self.aligned_format(
+        let label_format = fonts::text_format(
             13.0 * scale,
             DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_TEXT_ALIGNMENT_LEADING,
         )?;
-        let detail_format = self.aligned_format(
+        let detail_format = fonts::text_format(
             10.5 * scale,
             DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_TEXT_ALIGNMENT_TRAILING,
         )?;
+        let badge_format = fonts::text_format(
+            10.0 * scale,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_TEXT_ALIGNMENT_CENTER,
+        )?;
         let width = rect.right - rect.left - 2.0 * pad;
         let mid_x = (rect.left + rect.right) / 2.0;
+        let (text, subtext) = (brush(&theme.text)?, brush(&theme.subtext)?);
+        let on_accent = brush(&rgb(0xFFFFFF, fade))?;
         self.draw_text(
             panel.title,
             &title_format,
@@ -516,10 +478,9 @@ impl Renderer {
             rect.top + PANEL_HEADER * scale / 2.0 + 2.0 * scale,
             width,
             PANEL_HEADER * scale,
-            &brush(&colors.subtext)?,
+            &subtext,
         );
 
-        let shadow = brush(&colors.shadow)?;
         for (i, choice) in panel.choices.iter().enumerate() {
             let top = rect.top + (PANEL_HEADER + i as f32 * PANEL_ROW) * scale;
             let row = D2D_RECT_F {
@@ -529,33 +490,18 @@ impl Renderer {
                 bottom: top + (PANEL_ROW - 2.0) * scale,
             };
             let hovered = panel.hovered == Some(i);
-            let (fill_top, fill_bottom, text, subtext) = if hovered {
-                (
-                    &colors.accent_top,
-                    &colors.accent_bottom,
-                    &colors.accent_text,
-                    &colors.accent_text,
-                )
-            } else {
-                (
-                    &colors.tile_top,
-                    &colors.tile_bottom,
-                    &colors.text,
-                    &colors.subtext,
-                )
-            };
-            let lowered = D2D_RECT_F {
-                top: row.top + 1.2 * scale,
-                bottom: row.bottom + 1.2 * scale,
-                ..row
-            };
-            let fill = self.vertical_gradient(mid_x, row.top, row.bottom, fill_top, fill_bottom)?;
-            unsafe {
-                ctx.FillRoundedRectangle(&rounded(lowered, ROW_CORNER * scale), &shadow);
-                ctx.FillRoundedRectangle(&rounded(row, ROW_CORNER * scale), &fill);
+            if hovered {
+                let shape = self.rounded(row, ROW_CORNER * scale)?;
+                glass_piece(ctx, &shape, row, &theme, Piece::Accent, scale)?;
             }
+            let (text, subtext) = if hovered {
+                (&on_accent, &on_accent)
+            } else {
+                (&text, &subtext)
+            };
             let row_mid_y = (row.top + row.bottom) / 2.0;
-            let row_width = row.right - row.left - 2.0 * 10.0 * scale;
+            let inner = 10.0 * scale;
+            let row_width = row.right - row.left - 2.0 * inner;
             self.draw_text(
                 choice.label,
                 &label_format,
@@ -563,102 +509,52 @@ impl Renderer {
                 row_mid_y,
                 row_width,
                 row.bottom - row.top,
-                &brush(text)?,
+                text,
             );
-            let detail = if i == panel.default {
-                format!("{} · 기본", choice.detail)
-            } else {
-                choice.detail.to_string()
-            };
             self.draw_text(
-                &detail,
+                choice.detail,
                 &detail_format,
                 mid_x,
                 row_mid_y,
                 row_width,
                 row.bottom - row.top,
-                &brush(subtext)?,
+                subtext,
             );
-        }
-        Ok(())
-    }
-
-    /// Fills a tile path and strokes it with the same brush using round joins;
-    /// the stroke's half-width is exactly the inset `Tile` left for it, so the
-    /// result is the tile with rounded corners.
-    fn fill_tile(&self, path: &ID2D1PathGeometry1, tile: &Tile, brush: &ID2D1Brush) -> Result<()> {
-        unsafe {
-            self.ctx.FillGeometry(path, brush, None);
-            if tile.corner > 0.0 {
-                self.ctx
-                    .DrawGeometry(path, brush, 2.0 * tile.corner, &self.round);
+            if i == panel.default {
+                // A small pill right after the label.
+                let (label_width, _) = text_size(choice.label, &label_format)?;
+                let (badge_width, badge_height) = text_size(BADGE, &badge_format)?;
+                let (w, h) = (badge_width + 12.0 * scale, badge_height + 3.0 * scale);
+                let left = row.left + inner + label_width + 6.0 * scale;
+                let pill = D2D_RECT_F {
+                    left,
+                    top: row_mid_y - h / 2.0,
+                    right: left + w,
+                    bottom: row_mid_y + h / 2.0,
+                };
+                let shape = self.rounded(pill, h / 2.0)?;
+                glass_piece(ctx, &shape, pill, &theme, Piece::Plain, scale)?;
+                self.draw_text(
+                    BADGE,
+                    &badge_format,
+                    left + w / 2.0,
+                    row_mid_y,
+                    w,
+                    h,
+                    subtext,
+                );
             }
         }
         Ok(())
     }
 
-    fn vertical_gradient(
-        &self,
-        x: f32,
-        y0: f32,
-        y1: f32,
-        top: &D2D1_COLOR_F,
-        bottom: &D2D1_COLOR_F,
-    ) -> Result<ID2D1Brush> {
+    /// The system icon font (see `icon_font`), centered like `fonts::text_format`.
+    fn icon_format(&self, size: f32) -> Result<IDWriteTextFormat> {
         unsafe {
-            let stops = [
-                D2D1_GRADIENT_STOP {
-                    position: 0.0,
-                    color: *top,
-                },
-                D2D1_GRADIENT_STOP {
-                    position: 1.0,
-                    color: *bottom,
-                },
-            ];
-            // The device context's own overload takes color spaces; use the
-            // classic render-target one.
-            let rt: &ID2D1RenderTarget = &self.ctx;
-            let collection =
-                rt.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)?;
-            let props = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES {
-                startPoint: point((x, y0)),
-                endPoint: point((x, y1)),
-            };
-            self.ctx
-                .CreateLinearGradientBrush(&props, None, &collection)?
-                .cast()
-        }
-    }
-
-    fn text_format(&self, size: f32, weight: DWRITE_FONT_WEIGHT) -> Result<IDWriteTextFormat> {
-        // Hangul falls back to the system's Korean UI font automatically.
-        self.font_format(w!("Segoe UI Variable Text"), size, weight)
-    }
-
-    /// `text_format` aligned to one side of its box instead of centered.
-    fn aligned_format(
-        &self,
-        size: f32,
-        weight: DWRITE_FONT_WEIGHT,
-        alignment: DWRITE_TEXT_ALIGNMENT,
-    ) -> Result<IDWriteTextFormat> {
-        let format = self.text_format(size, weight)?;
-        unsafe { format.SetTextAlignment(alignment)? };
-        Ok(format)
-    }
-
-    fn font_format(
-        &self,
-        family: PCWSTR,
-        size: f32,
-        weight: DWRITE_FONT_WEIGHT,
-    ) -> Result<IDWriteTextFormat> {
-        unsafe {
-            let format = self.dwrite.CreateTextFormat(
-                family,
+            let format = fonts::factory().CreateTextFormat(
+                self.icon_font,
                 None,
-                weight,
+                DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
                 size,
@@ -702,7 +598,59 @@ impl Renderer {
         }
     }
 
-    /// The tile's core shape centered at (`cx`, `cy`); see `fill_tile`.
+    fn circle(&self, cx: f32, cy: f32, r: f32) -> Result<ID2D1Geometry> {
+        unsafe {
+            self.factory
+                .CreateEllipseGeometry(&ellipse_at(cx, cy, r))?
+                .cast()
+        }
+    }
+
+    fn rounded(&self, rect: D2D_RECT_F, radius: f32) -> Result<ID2D1Geometry> {
+        unsafe {
+            self.factory
+                .CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
+                    rect,
+                    radiusX: radius,
+                    radiusY: radius,
+                })?
+                .cast()
+        }
+    }
+
+    /// The finished tile: its core path grown by `corner` with round joins
+    /// (the core plus its widened outline), so it has rounded corners.
+    fn tile_shape(&self, cx: f32, cy: f32, tile: &Tile) -> Result<ID2D1Geometry> {
+        let core = self.tile_path(cx, cy, tile)?;
+        if tile.corner <= 0.0 {
+            return core.cast();
+        }
+        unsafe {
+            let outline = self.factory.CreatePathGeometry()?;
+            let sink = outline.Open()?;
+            core.Widen(
+                2.0 * tile.corner,
+                &self.round,
+                None,
+                D2D1_DEFAULT_FLATTENING_TOLERANCE,
+                &sink,
+            )?;
+            sink.Close()?;
+            let shape = self.factory.CreatePathGeometry()?;
+            let sink = shape.Open()?;
+            core.CombineWithGeometry(
+                &outline,
+                D2D1_COMBINE_MODE_UNION,
+                None,
+                D2D1_DEFAULT_FLATTENING_TOLERANCE,
+                &sink,
+            )?;
+            sink.Close()?;
+            shape.cast()
+        }
+    }
+
+    /// The tile's core shape centered at (`cx`, `cy`); see `tile_shape`.
     fn tile_path(&self, cx: f32, cy: f32, tile: &Tile) -> Result<ID2D1PathGeometry1> {
         unsafe {
             let path = self.factory.CreatePathGeometry()?;
@@ -750,7 +698,7 @@ impl Renderer {
 }
 
 /// One sector drawn as a separate rounded tile. The core shape is the sector
-/// shrunk by `TILE_GAP / 2 + corner` on every side; stroking it with round
+/// shrunk by `TILE_GAP / 2 + corner` on every side; widening it with round
 /// joins at half-width `corner` grows it back to a `TILE_GAP / 2` margin with
 /// rounded corners.
 struct Tile {
@@ -792,20 +740,6 @@ impl Tile {
             let mid = (self.start + self.end) / 2.0; // too narrow: collapse to a point
             (mid, mid)
         }
-    }
-
-    /// Top and bottom y of the finished tile around a center at `cy`, for its gradient.
-    fn vertical_extent(&self, cy: f32) -> (f32, f32) {
-        let (mut y0, mut y1) = (f32::MAX, f32::MIN);
-        for k in 0..=8 {
-            let deg = self.start + (self.end - self.start) * k as f32 / 8.0;
-            for r in [self.outer + self.corner, self.inner - self.corner] {
-                let y = polar_at(0.0, cy, r, deg).1;
-                y0 = y0.min(y);
-                y1 = y1.max(y);
-            }
-        }
-        (y0, y1)
     }
 }
 
@@ -866,6 +800,27 @@ fn polar_at(cx: f32, cy: f32, r: f32, deg: f32) -> (f32, f32) {
 /// Direct2D points are `windows_numerics::Vector2` in windows 0.61.
 fn point((x, y): (f32, f32)) -> Vector2 {
     Vector2 { X: x, Y: y }
+}
+
+/// The bounds of the circle of radius `r` around (`cx`, `cy`).
+fn square(cx: f32, cy: f32, r: f32) -> D2D_RECT_F {
+    D2D_RECT_F {
+        left: cx - r,
+        top: cy - r,
+        right: cx + r,
+        bottom: cy + r,
+    }
+}
+
+/// Width and height of `text` laid out on one line in `format`.
+fn text_size(text: &str, format: &IDWriteTextFormat) -> Result<(f32, f32)> {
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    unsafe {
+        let layout = fonts::factory().CreateTextLayout(&wide, format, f32::MAX, f32::MAX)?;
+        let mut metrics = DWRITE_TEXT_METRICS::default();
+        layout.GetMetrics(&mut metrics)?;
+        Ok((metrics.width, metrics.height))
+    }
 }
 
 fn ellipse_at(cx: f32, cy: f32, r: f32) -> D2D1_ELLIPSE {

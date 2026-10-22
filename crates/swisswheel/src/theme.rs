@@ -152,8 +152,12 @@ impl Theme {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Piece {
     Plain,
+    // Not drawn with until the menu switches over; `expect` flags these
+    // attributes for removal once it does.
+    #[cfg_attr(not(test), expect(dead_code))]
     Selected,
     Accent,
+    #[cfg_attr(not(test), expect(dead_code))]
     Keycap,
 }
 
@@ -238,6 +242,7 @@ pub fn glass_piece(
 
 /// A soft shadow around a floating window's shape (menu, cards), offset
 /// downward. Masked to the outside of `shape` so it never darkens the glass.
+#[cfg_attr(not(test), expect(dead_code))] // until the menu and cards use it
 pub fn outer_shadow(
     ctx: &ID2D1DeviceContext,
     shape: &ID2D1Geometry,

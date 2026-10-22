@@ -827,6 +827,7 @@ impl AppState {
             items: session.items(),
             hovered: session.hovered(),
             progress,
+            accent: self.config.appearance.accent,
             panel,
         };
         self.wheel.render(&view);
