@@ -7,6 +7,7 @@ mod autostart;
 mod config_file;
 mod dnd;
 mod engines;
+mod essentials_status;
 mod ffmpeg_install;
 mod fonts;
 mod fsutil;
