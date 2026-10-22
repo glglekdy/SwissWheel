@@ -18,7 +18,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     IDYES, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MB_YESNO, MessageBoxW,
     PostMessageW,
 };
-use windows::core::{HSTRING, w};
+use windows::core::HSTRING;
 
 const JSON_LIMIT: usize = 1 << 20;
 const SHA_LIMIT: usize = 1024;
@@ -156,21 +156,35 @@ pub fn endpoint() -> String {
     ENDPOINT.to_string()
 }
 
-/// Windows' own message box, shown from the update thread (never the UI
+/// Windows' own message box, shown from a background thread (never the UI
 /// thread: its modal loop would starve the hooks' messages).
-pub struct MessageBoxUi;
+pub struct MessageBoxUi {
+    pub title: &'static str,
+}
 
 impl Ui for MessageBoxUi {
     fn confirm(&self, body: &str) -> bool {
         let flags = MB_YESNO | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND;
         unsafe {
-            MessageBoxW(None, &HSTRING::from(body), w!("SwissWheel 업데이트"), flags) == IDYES
+            MessageBoxW(
+                None,
+                &HSTRING::from(body),
+                &HSTRING::from(self.title),
+                flags,
+            ) == IDYES
         }
     }
 
     fn inform(&self, body: &str) {
         let flags = MB_OK | MB_ICONINFORMATION | MB_TOPMOST | MB_SETFOREGROUND;
-        unsafe { MessageBoxW(None, &HSTRING::from(body), w!("SwissWheel 업데이트"), flags) };
+        unsafe {
+            MessageBoxW(
+                None,
+                &HSTRING::from(body),
+                &HSTRING::from(self.title),
+                flags,
+            )
+        };
     }
 }
 
@@ -187,7 +201,12 @@ pub fn spawn(hwnd: isize, msg: u32, slot: Arc<Mutex<Option<Outcome>>>) -> Handle
     let shared = Arc::clone(&progress);
     std::thread::spawn(move || {
         let outcome = match std::env::current_exe() {
-            Ok(exe) => run(&endpoint(), current(), &exe, &MessageBoxUi, &shared),
+            Ok(exe) => {
+                let ui = MessageBoxUi {
+                    title: "SwissWheel 업데이트",
+                };
+                run(&endpoint(), current(), &exe, &ui, &shared)
+            }
             Err(e) => {
                 log_error!("업데이트: 실행 파일 위치를 알 수 없습니다: {e}");
                 Outcome::CheckFailed
