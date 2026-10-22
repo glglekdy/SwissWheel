@@ -189,10 +189,12 @@ impl Notices {
             closing_since: None,
             morph_since: morph.then_some(now),
         });
-        // The oldest cards beyond the cap start fading right away.
-        let live: Vec<usize> = (0..self.cards.len())
+        // The oldest cards beyond the cap start fading right away. A key
+        // prompt goes last: capture keeps waiting, so its card must stay.
+        let mut live: Vec<usize> = (0..self.cards.len())
             .filter(|&i| self.cards[i].closing_start(now).is_none())
             .collect();
+        live.sort_by_key(|&i| self.cards[i].notice.kind == NoticeKind::KeyPrompt);
         let excess = live.len().saturating_sub(MAX_CARDS);
         for &i in &live[..excess] {
             self.cards[i].closing_since = Some(now);
@@ -406,6 +408,31 @@ mod tests {
         n.tick(t0 + ms(151));
         let ids: Vec<_> = n.cards(t0 + ms(151)).iter().map(|c| c.id).collect();
         assert_eq!(ids, vec![d, c, b]);
+    }
+
+    #[test]
+    fn the_cap_evicts_the_oldest_card_that_is_not_the_key_prompt() {
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        let prompt = n.post(note(NoticeKind::KeyPrompt, "바꿀 키를 누르세요"), t0);
+        let a = n.post(done("A"), t0 + ms(1));
+        let b = n.post(done("B"), t0 + ms(2));
+        let c = n.post(done("C"), t0 + ms(3));
+        let now = t0 + ms(3);
+        let live: Vec<_> = n
+            .cards(now)
+            .iter()
+            .filter(|c| c.closing.is_none())
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(live, vec![c, b, prompt]);
+        let closing: Vec<_> = n
+            .cards(now)
+            .iter()
+            .filter(|c| c.closing.is_some())
+            .map(|c| c.id)
+            .collect();
+        assert_eq!(closing, vec![a]);
     }
 
     #[test]
