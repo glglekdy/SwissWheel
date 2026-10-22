@@ -4,6 +4,7 @@ pub mod appearance;
 pub mod catalog;
 pub mod config;
 pub mod drag;
+pub mod essentials;
 pub mod ffmpeg_release;
 pub mod format;
 pub mod geometry;
