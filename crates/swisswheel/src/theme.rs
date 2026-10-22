@@ -198,9 +198,12 @@ pub fn glass_piece(
     };
     let body = solid(ctx, rgb(0x000000, body * theme.alpha))?;
     let edge = solid(ctx, rgb(0x000000, edge * theme.alpha))?;
-    offset(ctx, 3.0 * scale, || unsafe {
-        ctx.FillGeometry(shape, &body, None);
-        ctx.DrawGeometry(shape, &edge, 6.0 * scale, None);
+    // Onto the base only: under the translucent piece it would dim its tint.
+    masked(ctx, &outside(shape)?, || {
+        offset(ctx, 3.0 * scale, || unsafe {
+            ctx.FillGeometry(shape, &body, None);
+            ctx.DrawGeometry(shape, &edge, 6.0 * scale, None);
+        });
     });
 
     let fill = match piece {
@@ -241,25 +244,8 @@ pub fn outer_shadow(
     theme: &Theme,
     scale: f32,
 ) -> Result<()> {
-    // Everything but the shape: a huge rectangle with the shape as its hole.
-    let outside: ID2D1Geometry = unsafe {
-        let factory = shape.GetFactory()?;
-        let far = 1.0e6;
-        let everything = factory.CreateRectangleGeometry(&D2D_RECT_F {
-            left: -far,
-            top: -far,
-            right: far,
-            bottom: far,
-        })?;
-        factory
-            .CreateGeometryGroup(
-                D2D1_FILL_MODE_ALTERNATE,
-                &[Some(everything.cast()?), Some(shape.clone())],
-            )?
-            .cast()?
-    };
     let brush = solid(ctx, rgb(0x000000, 0.04 * theme.alpha))?;
-    masked(ctx, &outside, || {
+    masked(ctx, &outside(shape)?, || {
         offset(ctx, 4.0 * scale, || {
             for width in [16.0, 10.0, 4.0] {
                 unsafe { ctx.DrawGeometry(shape, &brush, width * scale, None) };
@@ -338,6 +324,26 @@ fn masked(ctx: &ID2D1DeviceContext, mask: &ID2D1Geometry, draw: impl FnOnce()) {
     drop(ManuallyDrop::into_inner(params.geometricMask));
     draw();
     unsafe { ctx.PopLayer() };
+}
+
+/// Everything but `shape`: a huge rectangle with the shape as its hole.
+fn outside(shape: &ID2D1Geometry) -> Result<ID2D1Geometry> {
+    unsafe {
+        let factory = shape.GetFactory()?;
+        let far = 1.0e6;
+        let everything = factory.CreateRectangleGeometry(&D2D_RECT_F {
+            left: -far,
+            top: -far,
+            right: far,
+            bottom: far,
+        })?;
+        factory
+            .CreateGeometryGroup(
+                D2D1_FILL_MODE_ALTERNATE,
+                &[Some(everything.cast()?), Some(shape.clone())],
+            )?
+            .cast()
+    }
 }
 
 /// Runs `draw` shifted down by `dy` in the shape's own coordinates.
@@ -431,11 +437,11 @@ mod tests {
         assert_eq!(hex(half.failure), (0xE5484D, 0.5));
     }
 
-    /// Every routine on a real device context; D2D reports misused layers or
-    /// brushes from `EndDraw`.
-    #[test]
-    fn draws_on_a_device_context() -> Result<()> {
-        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+    /// A device context drawing to a `width`×`height` bitmap.
+    fn canvas(
+        width: u32,
+        height: u32,
+    ) -> Result<(ID2D1Factory1, ID2D1DeviceContext, ID2D1Bitmap1)> {
         use windows::Win32::Graphics::Dxgi::IDXGIDevice;
         unsafe {
             let device: IDXGIDevice = crate::wheel::render::create_d3d_device()?.cast()?;
@@ -444,35 +450,73 @@ mod tests {
             let ctx = factory
                 .CreateDevice(&device)?
                 .CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE)?;
-            let props = D2D1_BITMAP_PROPERTIES1 {
-                pixelFormat: D2D1_PIXEL_FORMAT {
-                    format: DXGI_FORMAT_B8G8R8A8_UNORM,
-                    alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
-                },
-                dpiX: 96.0,
-                dpiY: 96.0,
-                bitmapOptions: D2D1_BITMAP_OPTIONS_TARGET,
-                ..Default::default()
-            };
-            let size = D2D_SIZE_U {
-                width: 200,
-                height: 120,
-            };
-            ctx.SetTarget(&ctx.CreateBitmap(size, None, 0, &props)?);
-            let rect = D2D_RECT_F {
-                left: 20.0,
-                top: 20.0,
-                right: 180.0,
-                bottom: 100.0,
-            };
-            let shape: ID2D1Geometry = factory
+            let target = ctx.CreateBitmap(
+                D2D_SIZE_U { width, height },
+                None,
+                0,
+                &bitmap_props(D2D1_BITMAP_OPTIONS_TARGET),
+            )?;
+            ctx.SetTarget(&target);
+            Ok((factory, ctx, target))
+        }
+    }
+
+    fn bitmap_props(options: D2D1_BITMAP_OPTIONS) -> D2D1_BITMAP_PROPERTIES1 {
+        use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM;
+        D2D1_BITMAP_PROPERTIES1 {
+            pixelFormat: D2D1_PIXEL_FORMAT {
+                format: DXGI_FORMAT_B8G8R8A8_UNORM,
+                alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
+            },
+            dpiX: 96.0,
+            dpiY: 96.0,
+            bitmapOptions: options,
+            ..Default::default()
+        }
+    }
+
+    /// The red channel of the pixel at `(x, y)`, after `EndDraw`.
+    fn red_at(ctx: &ID2D1DeviceContext, target: &ID2D1Bitmap1, x: u32, y: u32) -> Result<u8> {
+        unsafe {
+            let read = ctx.CreateBitmap(
+                target.GetPixelSize(),
+                None,
+                0,
+                &bitmap_props(D2D1_BITMAP_OPTIONS_CPU_READ | D2D1_BITMAP_OPTIONS_CANNOT_DRAW),
+            )?;
+            read.CopyFromBitmap(None, target, None)?;
+            let map = read.Map(D2D1_MAP_OPTIONS_READ)?;
+            let red = *map.bits.add((y * map.pitch + x * 4 + 2) as usize); // BGRA
+            read.Unmap()?;
+            Ok(red)
+        }
+    }
+
+    fn rounded(factory: &ID2D1Factory1, rect: D2D_RECT_F, corner: f32) -> Result<ID2D1Geometry> {
+        unsafe {
+            factory
                 .CreateRoundedRectangleGeometry(&D2D1_ROUNDED_RECT {
                     rect,
-                    radiusX: 16.0,
-                    radiusY: 16.0,
+                    radiusX: corner,
+                    radiusY: corner,
                 })?
-                .cast()?;
+                .cast()
+        }
+    }
 
+    /// Every routine on a real device context; D2D reports misused layers or
+    /// brushes from `EndDraw`.
+    #[test]
+    fn draws_on_a_device_context() -> Result<()> {
+        let (factory, ctx, _target) = canvas(200, 120)?;
+        let rect = D2D_RECT_F {
+            left: 20.0,
+            top: 20.0,
+            right: 180.0,
+            bottom: 100.0,
+        };
+        let shape = rounded(&factory, rect, 16.0)?;
+        unsafe {
             ctx.BeginDraw();
             ctx.SetTransform(&Matrix3x2::translation(0.5, 0.5));
             for theme in [
@@ -488,5 +532,43 @@ mod tests {
             }
             ctx.EndDraw(None, None)
         }
+    }
+
+    /// The short shadow falls below the piece onto the base, never under the
+    /// translucent piece itself.
+    #[test]
+    fn piece_shadow_stays_outside_the_piece() -> Result<()> {
+        let (factory, ctx, target) = canvas(120, 120)?;
+        let rect = D2D_RECT_F {
+            left: 20.0,
+            top: 20.0,
+            right: 100.0,
+            bottom: 100.0,
+        };
+        let theme = Theme::new(false, true, Accent::Blue, 1.0);
+        let base = 0x2A;
+        unsafe {
+            ctx.BeginDraw();
+            ctx.Clear(Some(&rgb(0x2A2A2E, 1.0)));
+            glass_piece(
+                &ctx,
+                &rounded(&factory, rect, 9.0)?,
+                rect,
+                &theme,
+                Piece::Plain,
+                1.0,
+            )?;
+            ctx.EndDraw(None, None)?;
+        }
+        // Below the sheen, inside the glow: just the base under white α .08.
+        let lifted = base as f32 + (255.0 - base as f32) * 0.08;
+        let inside = red_at(&ctx, &target, 60, 88)?;
+        assert!(
+            (f32::from(inside) - lifted).abs() <= 2.0,
+            "inside {inside}, expected ≈{lifted}"
+        );
+        // The 3 DIP strip just below the piece is shadowed.
+        assert!(red_at(&ctx, &target, 60, 102)? < base);
+        Ok(())
     }
 }
