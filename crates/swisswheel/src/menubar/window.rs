@@ -285,6 +285,8 @@ fn with_margin(l: &MenuLayout, margin: f32) -> MenuLayout {
                 keycap: at(r.keycap),
             })
             .collect(),
+        download_header: at(l.download_header),
+        button_slots: l.button_slots.iter().map(|slots| slots.map(at)).collect(),
     }
 }
 
@@ -390,6 +392,8 @@ mod tests {
         assert_eq!(l.notice.unwrap().top, core.notice.unwrap().top + 13.0);
         assert_eq!(l.rows[2].keycap.right, core.rows[2].keycap.right + 13.0);
         assert_eq!(l.panel.bottom, core.panel.bottom + 13.0);
+        assert_eq!(l.download_header.left, core.download_header.left + 13.0);
+        assert_eq!(l.button_slots[2][1].top, core.button_slots[2][1].top + 13.0);
     }
 
     #[test]

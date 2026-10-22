@@ -3,6 +3,7 @@
 //!
 //! Constants are in DIPs (scale 1.0); callers pass the monitor's DPI scale.
 
+use crate::essentials::MAX_BUTTONS;
 use crate::geometry::Rect;
 use crate::menu::{MenuHit, TILES};
 use crate::settings::{CATEGORIES, Category, Dir, MAX_ROWS};
@@ -17,6 +18,9 @@ pub const ROW: f32 = 36.0;
 pub const PANEL_PAD: f32 = 8.0;
 pub const STEP_BUTTON: f32 = 28.0;
 pub const VALUE_WIDTH: f32 = 88.0;
+/// A download panel button, and the gap between two.
+pub const BUTTON: f32 = 88.0;
+pub const BUTTON_GAP: f32 = 8.0;
 /// The bar slides down this far while opening; the window has room above it.
 pub const DROP: f32 = 8.0;
 
@@ -58,6 +62,10 @@ pub struct MenuLayout {
     pub tabs: [Box2; CATEGORIES.len()],
     /// `MAX_ROWS` rows; a tab with fewer leaves the rest empty.
     pub rows: Vec<RowBoxes>,
+    /// The download panel's top line, where the settings tabs are.
+    pub download_header: Box2,
+    /// Per row, where download buttons go; `[0]` is at the right end.
+    pub button_slots: Vec<[Box2; MAX_BUTTONS]>,
 }
 
 /// Which rows of the open panel react: the selected tab's.
@@ -117,7 +125,7 @@ pub fn layout(notice: bool, scale: f32) -> MenuLayout {
         right: panel.left + s(PANEL_PAD + (i + 1) as f32 * tab_width),
         ..tab_line
     });
-    let rows = (0..MAX_ROWS)
+    let rows: Vec<RowBoxes> = (0..MAX_ROWS)
         .map(|i| {
             let row = line(first + 1 + i);
             let forward = Box2 {
@@ -143,6 +151,19 @@ pub fn layout(notice: bool, scale: f32) -> MenuLayout {
             }
         })
         .collect();
+    let button_slots = rows
+        .iter()
+        .map(|r| {
+            std::array::from_fn(|slot| {
+                let right = r.row.right - s(slot as f32 * (BUTTON + BUTTON_GAP));
+                Box2 {
+                    left: right - s(BUTTON),
+                    right,
+                    ..r.row
+                }
+            })
+        })
+        .collect();
     MenuLayout {
         width: bar.right.ceil() as i32,
         height: panel.bottom.ceil() as i32,
@@ -152,7 +173,22 @@ pub fn layout(notice: bool, scale: f32) -> MenuLayout {
         notice: notice.then(|| line(0)),
         tabs,
         rows,
+        download_header: tab_line,
+        button_slots,
     }
+}
+
+/// The `button`th (from the left) of a row's `count` buttons.
+pub fn essential_button(
+    layout: &MenuLayout,
+    row: usize,
+    count: usize,
+    button: usize,
+) -> Option<Box2> {
+    if button >= count || count > MAX_BUTTONS {
+        return None;
+    }
+    Some(layout.button_slots.get(row)?[count - 1 - button])
 }
 
 /// Top-left of the window on screen: centered in the work area, with the bar
@@ -165,11 +201,8 @@ pub fn window_origin(work_area: Rect, layout: &MenuLayout, scale: f32) -> (i32, 
 
 /// What is at (`x`, `y`). `panel` is `None` while the panel is closed.
 pub fn hit(layout: &MenuLayout, panel: Option<PanelShape>, x: f32, y: f32) -> MenuHit {
-    if let Some(i) = layout.tiles.iter().position(|t| t.contains(x, y)) {
-        return MenuHit::Tile(i);
-    }
-    if layout.bar.contains(x, y) {
-        return MenuHit::Panel;
+    if let Some(hit) = hit_bar(layout, x, y) {
+        return hit;
     }
     let Some(shape) = panel.filter(|_| layout.panel.contains(x, y)) else {
         return MenuHit::Outside;
@@ -192,6 +225,36 @@ pub fn hit(layout: &MenuLayout, panel: Option<PanelShape>, x: f32, y: f32) -> Me
         }
     }
     MenuHit::Panel
+}
+
+/// What is at (`x`, `y`) with the download panel open; `buttons[i]` is how
+/// many buttons row `i` shows. `None` while the panel is closed.
+pub fn hit_download(layout: &MenuLayout, buttons: Option<&[usize]>, x: f32, y: f32) -> MenuHit {
+    if let Some(hit) = hit_bar(layout, x, y) {
+        return hit;
+    }
+    let Some(buttons) = buttons.filter(|_| layout.panel.contains(x, y)) else {
+        return MenuHit::Outside;
+    };
+    for (row, &count) in buttons.iter().enumerate() {
+        let on =
+            |b: usize| essential_button(layout, row, count, b).is_some_and(|r| r.contains(x, y));
+        if let Some(b) = (0..count).find(|&b| on(b)) {
+            return MenuHit::EssentialButton(row, b);
+        }
+        if layout.rows.get(row).is_some_and(|r| r.row.contains(x, y)) {
+            return MenuHit::EssentialRow(row);
+        }
+    }
+    MenuHit::Panel
+}
+
+/// A tile, or the bar around them.
+fn hit_bar(layout: &MenuLayout, x: f32, y: f32) -> Option<MenuHit> {
+    if let Some(i) = layout.tiles.iter().position(|t| t.contains(x, y)) {
+        return Some(MenuHit::Tile(i));
+    }
+    layout.bar.contains(x, y).then_some(MenuHit::Panel)
 }
 
 #[cfg(test)]
@@ -368,5 +431,53 @@ mod tests {
         assert_eq!(hit(&l2, None, b.left + 1.0, b.top + 1.0), MenuHit::Tile(2));
         assert_eq!(l2.tiles[2].left, l1.tiles[2].left * 1.25);
         assert_eq!(l2.tabs[4].right, l1.tabs[4].right * 1.25);
+    }
+
+    #[test]
+    fn buttons_fill_rows_from_the_right() {
+        let l = layout(false, 1.0);
+        let row = l.rows[0].row;
+        let only = essential_button(&l, 0, 1, 0).unwrap();
+        assert_eq!((only.right, only.right - only.left), (row.right, BUTTON));
+        let (a, b) = (
+            essential_button(&l, 0, 2, 0).unwrap(),
+            essential_button(&l, 0, 2, 1).unwrap(),
+        );
+        assert_eq!(b, only);
+        assert_eq!(a.right, b.left - BUTTON_GAP);
+        assert_eq!((a.top, a.bottom), (row.top, row.bottom));
+        assert!(essential_button(&l, 0, 2, 2).is_none());
+        assert!(essential_button(&l, 0, 3, 0).is_none()); // more than MAX_BUTTONS
+        assert!(essential_button(&l, 9, 1, 0).is_none());
+        let header = Box2 {
+            left: l.panel.left + PANEL_PAD,
+            right: l.panel.right - PANEL_PAD,
+            ..l.tabs[0]
+        };
+        assert_eq!(l.download_header, header);
+    }
+
+    #[test]
+    fn hit_on_the_download_panel() {
+        let l = layout(false, 1.25);
+        let (x, y) = mid(&essential_button(&l, 0, 2, 1).unwrap());
+        assert_eq!(
+            hit_download(&l, Some(&[2]), x, y),
+            MenuHit::EssentialButton(0, 1)
+        );
+        assert_eq!(
+            hit_download(&l, Some(&[1]), x, y),
+            MenuHit::EssentialButton(0, 0)
+        );
+        let (x, y) = (l.rows[0].row.left + 4.0, mid(&l.rows[0].row).1);
+        assert_eq!(hit_download(&l, Some(&[1]), x, y), MenuHit::EssentialRow(0));
+        let (x, y) = mid(&l.rows[1].row); // no second essential
+        assert_eq!(hit_download(&l, Some(&[1]), x, y), MenuHit::Panel);
+        let (x, y) = mid(&l.download_header);
+        assert_eq!(hit_download(&l, Some(&[1]), x, y), MenuHit::Panel);
+        let (x, y) = mid(&l.tiles[1]);
+        assert_eq!(hit_download(&l, Some(&[1]), x, y), MenuHit::Tile(1));
+        let (x, y) = mid(&l.rows[0].row);
+        assert_eq!(hit_download(&l, None, x, y), MenuHit::Outside);
     }
 }
