@@ -11,6 +11,7 @@ use std::time::{Duration, Instant};
 use swisswheel_core::catalog::Operation;
 use swisswheel_core::config::{Config, Key};
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
+use swisswheel_core::ffmpeg_release;
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession, Tile};
 use swisswheel_core::menu_geometry;
@@ -43,6 +44,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::dnd::DropTarget;
+use crate::engines::ffmpeg as ffmpeg_tools;
+use crate::ffmpeg_install;
 use crate::hook::{self, Hooks, WM_APP_DRAG, WM_APP_FOREGROUND};
 use crate::jobs::{Job, JobReport, ProgressRow, Runner};
 use crate::menubar::{self, MenuBar, MenuMouse, MenuView};
@@ -57,6 +60,8 @@ const ID_MENU_EXIT: usize = 1;
 const WM_APP_JOB_DONE: u32 = WM_APP + 30;
 /// The update thread finished; its outcome is in `update_slot`.
 const WM_APP_UPDATE: u32 = WM_APP + 31;
+/// The FFmpeg download thread finished; its outcome is in `ffmpeg_slot`.
+const WM_APP_FFMPEG: u32 = WM_APP + 32;
 /// How long a freshly updated app waits for the old one to exit.
 const AFTER_UPDATE_WAIT: Duration = Duration::from_secs(15);
 /// FFmpeg jobs that run at once (spec 4.4).
@@ -138,6 +143,9 @@ pub(crate) struct AppState {
     update_slot: Arc<Mutex<Option<Outcome>>>,
     /// A verified download waiting for the running jobs to finish.
     pending_swap: Option<Version>,
+    /// The running FFmpeg check, download, or install, if any.
+    ffmpeg: Option<ffmpeg_install::Handle>,
+    ffmpeg_slot: Arc<Mutex<Option<ffmpeg_install::Outcome>>>,
     /// First output of the last finished job, opened when its balloon is clicked.
     last_output: Option<PathBuf>,
     hooks_installed_at: Instant,
@@ -196,6 +204,7 @@ pub fn run() -> Result<()> {
     if let Ok(exe) = std::env::current_exe() {
         swap::cleanup(&exe);
     }
+    ffmpeg_install::cleanup(&ffmpeg_tools::install_dirs());
     if after_update.is_some() {
         tray.notify(release::TITLE, &text::updated(update::current()));
     }
@@ -290,6 +299,8 @@ pub fn run() -> Result<()> {
         update: None,
         update_slot: Arc::new(Mutex::new(None)),
         pending_swap: None,
+        ffmpeg: None,
+        ffmpeg_slot: Arc::new(Mutex::new(None)),
         last_output: None,
         hooks_installed_at: Instant::now(),
         taskbar_created,
@@ -360,6 +371,9 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_UPDATE => {
             with_state(AppState::on_update_done);
+        }
+        WM_APP_FFMPEG => {
+            with_state(AppState::on_ffmpeg_done);
         }
         WM_APP_FOREGROUND => {
             with_state(|s| s.on_foreground(HWND(wparam.0 as *mut _)));
@@ -571,6 +585,10 @@ impl AppState {
             MenuAction::Notice(Tile::Update) => {
                 self.close_menu();
                 self.start_update();
+            }
+            MenuAction::Notice(Tile::Download) => {
+                self.close_menu();
+                self.start_ffmpeg();
             }
             MenuAction::Notice(tile) => {
                 self.close_menu();
@@ -849,6 +867,8 @@ impl AppState {
             }
             // Checks SWISSWHEEL_UPDATE_URL (a local server) as if the tile were pressed.
             "update" => self.start_update(),
+            // Checks SWISSWHEEL_FFMPEG_URL (a local server) as if the tile were pressed.
+            "ffmpeg" => self.start_ffmpeg(),
             "progress" => {
                 let row = |file: &str, op, fraction| crate::jobs::ProgressRow {
                     title: swisswheel_core::summary::progress_title(file, &op),
@@ -1084,7 +1104,8 @@ impl AppState {
     }
 
     fn start_update(&mut self) {
-        match release::on_tile(self.update.is_some(), self.active_jobs) {
+        let background = self.update.is_some() || self.ffmpeg.is_some();
+        match release::on_tile(background, self.active_jobs) {
             TileDecision::Refuse(notice) => self.tray.notify(release::TITLE, notice),
             TileDecision::Start => {
                 self.update = Some(update::spawn(
@@ -1122,6 +1143,40 @@ impl AppState {
         self.update_busy();
     }
 
+    fn start_ffmpeg(&mut self) {
+        let ready = ffmpeg_tools::locate().is_some();
+        let busy = self.update.is_some() || self.ffmpeg.is_some();
+        match ffmpeg_release::on_download_tile(ready, busy) {
+            TileDecision::Refuse(notice) => self.tray.notify(ffmpeg_release::TITLE, notice),
+            TileDecision::Start => {
+                self.ffmpeg = Some(ffmpeg_install::spawn(
+                    self.hwnd.0 as isize,
+                    WM_APP_FFMPEG,
+                    Arc::clone(&self.ffmpeg_slot),
+                ));
+                self.update_busy();
+            }
+        }
+    }
+
+    fn on_ffmpeg_done(&mut self) {
+        use ffmpeg_install::Outcome as O;
+        use ffmpeg_release::text as t;
+        self.ffmpeg = None;
+        let outcome = self.ffmpeg_slot.lock().unwrap().take();
+        let title = ffmpeg_release::TITLE;
+        match outcome {
+            None | Some(O::Declined) => {}
+            Some(O::Installed { tag }) => self.tray.notify(title, &t::installed(&tag)),
+            Some(O::CheckFailed) => self.tray.warn(title, t::CHECK_FAILED),
+            Some(O::MissingAsset) => self.tray.warn(title, t::NO_ASSET),
+            Some(O::DownloadFailed) => self.tray.warn(title, t::DOWNLOAD_FAILED),
+            Some(O::Corrupt) => self.tray.warn(title, t::CORRUPT),
+            Some(O::InstallFailed) => self.tray.warn(title, t::INSTALL_FAILED),
+        }
+        self.update_busy();
+    }
+
     /// Puts the verified download in place and starts it; this app then
     /// closes normally (posted: closing inside `with_state` would re-enter it).
     fn apply_swap(&mut self, version: Version) {
@@ -1144,15 +1199,29 @@ impl AppState {
     /// Tray tooltip and icon; the progress timer runs only while jobs do.
     fn update_busy(&mut self) {
         let active = self.active_jobs > 0;
-        // The download's row, once the user said yes.
-        let download = self.update.as_ref().and_then(|handle| {
+        // The update's or FFmpeg's download row, once the user said yes (one
+        // runs at a time), and what the tooltip says is downloading.
+        let update_row = self.update.as_ref().and_then(|handle| {
             let version = (*handle.progress.version.lock().unwrap())?;
             let fraction = handle.progress.fraction.load(Ordering::Relaxed) as f32 / 10000.0;
-            Some(ProgressRow {
+            let row = ProgressRow {
                 title: format!("SwissWheel v{version} · 업데이트"),
                 fraction: Some(fraction),
-            })
+            };
+            Some((row, "업데이트"))
         });
+        let ffmpeg_row = self.ffmpeg.as_ref().and_then(|handle| {
+            let tag = handle.progress.tag.lock().unwrap().clone()?;
+            let fraction = handle.progress.fraction.load(Ordering::Relaxed) as f32 / 10000.0;
+            let row = ProgressRow {
+                title: format!("FFmpeg {tag} · 다운로드"),
+                fraction: Some(fraction),
+            };
+            Some((row, "FFmpeg"))
+        });
+        let (download, what) = update_row
+            .or(ffmpeg_row)
+            .map_or((None, ""), |(row, what)| (Some(row), what));
         let progress = if active {
             self.runner.as_ref().and_then(Runner::progress)
         } else {
@@ -1162,7 +1231,7 @@ impl AppState {
         let ring = progress.filter(|_| busy && self.config.progress.tray_ring);
         let tooltip = match (&download, progress) {
             (Some(_), Some(p)) if !active => {
-                format!("SwissWheel · 업데이트 받는 중 · {}%", (p * 100.0).round())
+                format!("SwissWheel · {what} 받는 중 · {}%", (p * 100.0).round())
             }
             _ => busy_tooltip(self.active_jobs, progress),
         };
@@ -1176,8 +1245,9 @@ impl AppState {
         }
         self.progress_window.update(&rows);
         unsafe {
-            // While an update runs too: the timer notices when its download starts.
-            if busy || self.update.is_some() {
+            // While an update or FFmpeg thread runs too: the timer notices
+            // when its download starts.
+            if busy || self.update.is_some() || self.ffmpeg.is_some() {
                 SetTimer(Some(self.hwnd), TIMER_PROGRESS, PROGRESS_INTERVAL_MS, None);
             } else {
                 let _ = KillTimer(Some(self.hwnd), TIMER_PROGRESS);

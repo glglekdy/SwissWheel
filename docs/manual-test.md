@@ -56,6 +56,11 @@
 | M46 | exe를 쓸 수 없는 폴더(예: `C:\Program Files\SwissWheel`)에 두고 M40 반복 | 확인 창 "…이 위치에서는 자동으로 바꿀 수 없어 다운로드 페이지를 엽니다." 뒤 브라우저에 릴리스 페이지 |
 | M48 | `SWISSWHEEL_PREVIEW` 없이 `SWISSWHEEL_UPDATE_URL`만 넣고 실행. 긴 영상 변환을 시작하기 전에 메뉴 → 업데이트 → 확인 창은 그대로 두고 변환 시작 → "예" | "변환이 끝나면 업데이트합니다" 알림. 변환 완료 알림이 보인 뒤 약 4초 지나서 재시작 |
 | M47 | (저장소 공개 뒤) `v0.1.1` 태그를 올려 릴리스가 생기면, 릴리스 빌드 v0.1.0에서 메뉴 → 업데이트 | v0.1.1로 바뀌어 다시 켜지고 완료 알림 |
+| M49 | PATH에서 FFmpeg를 빼고 exe 폴더의 `ffmpeg\`를 지운 뒤 메뉴 → 다운로드 → [예] | 확인 창에 버전·크기·설치 위치. 진행 창에 "FFmpeg <버전> · 다운로드" 줄, "FFmpeg <버전> 설정을 마쳤습니다" 알림. `ffmpeg\`에 `ffmpeg.exe`·`ffprobe.exe`·`LICENSE`만 있음. 앱을 다시 켜지 않고 MP4 → MP3가 됨 |
+| M50 | M49 직후 다시 메뉴 → 다운로드. FFmpeg를 PATH에만 두고도 반복 | 둘 다 "다운로드 완료 · FFmpeg가 이미 준비되어 있습니다", 로그에 FFmpeg 확인 요청 없음 |
+| M51 | M49를 받는 도중 트레이 → 종료 → 다시 실행 | 1~2초 안에 종료. 다시 켜면 `ffmpeg.partial` 없음, `ffmpeg\` 없음 |
+| M52 | 디버그 빌드 + `SWISSWHEEL_PREVIEW=ffmpeg`, `SWISSWHEEL_FFMPEG_URL`이 digest를 틀리게 적은 로컬 JSON을 가리킴 → [예] | "받은 FFmpeg 파일이 손상되었습니다" 알림. `ffmpeg\`·`ffmpeg.partial` 없음 |
+| M53 | exe를 쓸 수 없는 폴더(예: `C:\Program Files\SwissWheel`)에 두고 M49 | 확인 창의 설치 위치가 `%LOCALAPPDATA%\SwissWheel\ffmpeg`. 그곳에 설치되고 변환이 됨 |
 
 ## 결과 기록
 

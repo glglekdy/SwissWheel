@@ -27,7 +27,7 @@ Quit from the tray icon's right-click menu. Settings can be changed in the menu'
 - Progress: while jobs run, a small card above the tray lists each file with a progress bar, and a ring around the tray icon fills up. Either can be turned off in the settings panel or `config.toml` (`[progress] window`, `tray_ring`). Quitting cancels running video work and cleans up.
 - Desktop menu and settings panel: wheel keys (press to bind), the shrink ratio and video compression strength used when you drop on the tool itself, start with Windows, JPG/WebP quality, MP3 bitrate, and the progress displays, all applied live.
 
-Video and audio need FFmpeg: put `ffmpeg.exe` and `ffprobe.exe` in an `ffmpeg` folder next to `swisswheel.exe`, or have them on `PATH` (the installer will include them from the next version).
+Video and audio need FFmpeg: choose **다운로드** in the desktop menu to fetch the latest essentials build from [GyanD/codexffmpeg](https://github.com/GyanD/codexffmpeg/releases) and set it up (checked against GitHub's SHA-256; it goes in an `ffmpeg` folder next to `swisswheel.exe`, or `%LOCALAPPDATA%\SwissWheel\ffmpeg` when that folder can't be written). If FFmpeg is already usable it just says so. You can also put `ffmpeg.exe` and `ffprobe.exe` in either folder yourself, or have them on `PATH`.
 
 Shown but not yet implemented (they say "다음 버전에서 지원 예정입니다"): the actions wheel (share, copy, cut, copy path, terminal), and the menu's plugin tile.
 
