@@ -58,7 +58,7 @@ pub enum MenuHit {
     /// The key shown on a shortcut row; clicking it waits for a key.
     KeyCap(usize),
     /// Inside the bar or panel but on nothing that reacts (margins, the
-    /// notice, the hint line).
+    /// notice).
     Panel,
     Outside,
 }
@@ -138,17 +138,11 @@ impl MenuSession {
         self.hovered
     }
 
-    /// The hint line under the rows.
-    pub fn hint(&self) -> &'static str {
-        match self.panel {
-            _ if self.capturing => "바꿀 키를 누르세요 · 다른 곳 클릭 시 취소",
-            None => "",
-            Some(Focus::Tabs) => "←/→ 카테고리 · ↓ 항목",
-            Some(Focus::Row(i)) if self.item(i).is_some_and(SettingItem::is_key) => {
-                "Enter로 키 변경"
-            }
-            Some(Focus::Row(_)) => "←/→로 값 변경",
-        }
+    /// The shortcut row waiting for a key, if any.
+    pub fn capture_item(&self) -> Option<SettingItem> {
+        self.focused_row()
+            .and_then(|i| self.item(i))
+            .filter(|_| self.capturing)
     }
 
     pub fn key(&mut self, key: MenuKey) -> MenuAction {
@@ -377,7 +371,6 @@ mod tests {
         }
         assert_eq!(m.key(MenuKey::Right), MenuAction::None);
         assert_eq!(m.tile(), 4);
-        assert_eq!(m.hint(), "");
     }
 
     #[test]
@@ -419,7 +412,6 @@ mod tests {
             (m.focus(), m.category()),
             (Some(Focus::Tabs), Category::Keys)
         );
-        assert_eq!(m.hint(), "←/→ 카테고리 · ↓ 항목");
     }
 
     #[test]
@@ -442,7 +434,6 @@ mod tests {
         assert_eq!(m.key(MenuKey::Down), MenuAction::Redraw);
         assert_eq!(m.key(MenuKey::Down), MenuAction::None);
         assert_eq!(m.focus(), Some(Focus::Row(1)));
-        assert_eq!(m.hint(), "←/→로 값 변경");
         assert_eq!(
             m.key(MenuKey::Right),
             MenuAction::Change(SettingItem::CompressVideo, Dir::Forward)
@@ -479,11 +470,11 @@ mod tests {
     fn key_rows_capture_on_enter_and_ignore_left_right() {
         let mut m = panel();
         m.key(MenuKey::Down);
-        assert_eq!(m.hint(), "Enter로 키 변경");
         assert_eq!(m.key(MenuKey::Right), MenuAction::None);
+        assert_eq!(m.capture_item(), None);
         assert_eq!(m.key(MenuKey::Enter), MenuAction::StartCapture);
         assert!(m.capturing());
-        assert_eq!(m.hint(), "바꿀 키를 누르세요 · 다른 곳 클릭 시 취소");
+        assert_eq!(m.capture_item(), Some(SettingItem::OpenKey));
         assert_eq!(m.key(MenuKey::Open), MenuAction::None); // the hook sends MenuCapture instead
         assert_eq!(
             m.capture(0x74),

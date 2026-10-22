@@ -216,7 +216,8 @@ impl Notices {
         }
     }
 
-    /// The cursor is over `id` (pausing only that card) or over none.
+    /// The cursor is over `id` (pausing only that card) or over none. A key
+    /// prompt doesn't pause: its bar shows the capture timeout, which runs on.
     pub fn hover(&mut self, id: Option<NoticeId>, now: Instant) {
         if self.hovered == id {
             return;
@@ -231,7 +232,9 @@ impl Notices {
             && let Some(card) = self.cards.iter_mut().find(|c| c.id == id)
             && card.closing_start(now).is_none()
         {
-            card.paused_at = Some(now);
+            if card.notice.kind != NoticeKind::KeyPrompt {
+                card.paused_at = Some(now);
+            }
             self.hovered = Some(id);
         }
     }
@@ -346,17 +349,21 @@ impl Notices {
             .collect()
     }
 
-    /// Restart a live card's timer as if posted at `now`, without a new appear animation.
-    pub fn restart(&mut self, id: NoticeId, now: Instant) {
-        if let Some(card) = self.cards.iter_mut().find(|c| c.id == id)
-            && card.closing_start(now).is_none()
-        {
-            card.paused_at = None;
-            card.paused_total = now.saturating_duration_since(card.posted);
-            if self.hovered == Some(id) {
-                self.hovered = None;
-            }
+    /// Restart a live card's timer as if posted at `now`, without a new appear
+    /// animation. `false` when the card is gone or fading out.
+    pub fn restart(&mut self, id: NoticeId, now: Instant) -> bool {
+        let Some(card) = self.cards.iter_mut().find(|c| c.id == id) else {
+            return false;
+        };
+        if card.closing_start(now).is_some() {
+            return false;
         }
+        card.paused_at = None;
+        card.paused_total = now.saturating_duration_since(card.posted);
+        if self.hovered == Some(id) {
+            self.hovered = None;
+        }
+        true
     }
 }
 
@@ -444,6 +451,21 @@ mod tests {
         assert_eq!(n.cards(t0 + ms(14900))[0].closing, None);
         n.tick(t0 + ms(15200));
         assert!(n.cards(t0 + ms(15200)).is_empty());
+    }
+
+    #[test]
+    fn hover_does_not_pause_key_prompt() {
+        // Its bar shows the capture timeout, which hovering doesn't stop.
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        let id = n.post(note(NoticeKind::KeyPrompt, "key"), t0);
+        n.hover(Some(id), t0 + ms(1000));
+        let r = n.cards(t0 + ms(2500))[0].remaining;
+        assert!((r - 0.5).abs() < 0.01, "got {r}");
+        assert!(n.next_wake(t0 + ms(2500)).is_some());
+        let t = t0 + ms(5200);
+        n.tick(t);
+        assert!(n.cards(t).is_empty());
     }
 
     #[test]
@@ -569,7 +591,7 @@ mod tests {
         let t0 = Instant::now();
         let mut n = Notices::new();
         let id = n.post(note(NoticeKind::KeyPrompt, "key"), t0);
-        n.restart(id, t0 + Duration::from_secs(4));
+        assert!(n.restart(id, t0 + Duration::from_secs(4)));
         let t = t0 + ms(8900);
         n.tick(t);
         let c = &n.cards(t)[0];
@@ -578,6 +600,9 @@ mod tests {
         let t = t0 + ms(9100);
         n.tick(t);
         assert!(n.cards(t)[0].closing.is_some());
+        // Gone or fading: the caller posts a new card instead.
+        assert!(!n.restart(id, t));
+        assert!(!n.restart(999, t));
     }
 
     #[test]

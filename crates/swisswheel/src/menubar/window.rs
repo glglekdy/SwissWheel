@@ -285,7 +285,6 @@ fn with_margin(l: &MenuLayout, margin: f32) -> MenuLayout {
                 keycap: at(r.keycap),
             })
             .collect(),
-        hint: at(l.hint),
     }
 }
 
@@ -390,7 +389,7 @@ mod tests {
         assert_eq!(l.tiles[4].top, core.tiles[4].top + 13.0);
         assert_eq!(l.notice.unwrap().top, core.notice.unwrap().top + 13.0);
         assert_eq!(l.rows[2].keycap.right, core.rows[2].keycap.right + 13.0);
-        assert_eq!(l.hint.bottom, core.hint.bottom + 13.0);
+        assert_eq!(l.panel.bottom, core.panel.bottom + 13.0);
     }
 
     #[test]

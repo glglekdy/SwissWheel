@@ -2,7 +2,7 @@
 //! bar, and the settings panel under it (spec 2.4).
 
 use swisswheel_core::menu::{Focus, MenuHit, TILES, Tile};
-use swisswheel_core::menu_geometry::{Box2, DROP, MenuLayout, PANEL_PAD};
+use swisswheel_core::menu_geometry::{Box2, DROP, MenuLayout};
 use swisswheel_core::settings::CATEGORIES;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
@@ -24,6 +24,8 @@ const KEYCAP_CORNER: f32 = 7.0;
 const GROOVE_CORNER: f32 = 12.0;
 const PILL_CORNER: f32 = 9.0;
 const PILL_INSET: f32 = 3.0;
+/// The accent rim on the selected tab while the keyboard is on the tabs.
+const FOCUS_RIM: f32 = 1.5;
 /// The accent row's color dot and its gap to the value.
 const SWATCH: f32 = 10.0;
 const SWATCH_GAP: f32 = 6.0;
@@ -190,7 +192,10 @@ fn draw_panel(
             );
         }
 
-        // Tabs: a segmented control, the selected tab a pill in the groove.
+        // Tabs: a segmented control, the selected tab a pill in the groove;
+        // with the keyboard on the tabs the pill takes an accent rim and label.
+        let tabs_focused = view.focus == Some(Focus::Tabs);
+        let accent = brush(&theme.accent)?;
         let groove = D2D_RECT_F {
             right: layout.tabs[CATEGORIES.len() - 1].right,
             ..rect(layout.tabs[0], 0.0)
@@ -206,8 +211,15 @@ fn draw_panel(
                 let pill = inset(r, PILL_INSET * scale);
                 let shape = rounded_shape(ctx, pill, PILL_CORNER * scale)?;
                 glass_piece(ctx, &shape, pill, theme, Piece::Tab, scale)?;
+                if tabs_focused {
+                    let rim = inset(pill, FOCUS_RIM * scale / 2.0);
+                    let rim = rounded(rim, (PILL_CORNER - FOCUS_RIM / 2.0) * scale);
+                    ctx.DrawRoundedRectangle(&rim, &accent, FOCUS_RIM * scale, None);
+                }
             }
-            let color = if selected || view.hovered == MenuHit::Tab(i) {
+            let color = if selected && tabs_focused {
+                &accent
+            } else if selected || view.hovered == MenuHit::Tab(i) {
                 &text
             } else {
                 &subtext
@@ -302,25 +314,6 @@ fn draw_panel(
                 None => draw_text(ctx, &row.value, &value, value_box, &text),
             }
         }
-
-        let hint = rect(layout.hint, 0.0);
-        let line = D2D_RECT_F {
-            left: panel.left + PANEL_PAD * scale,
-            top: hint.top - 0.5 * scale,
-            right: panel.right - PANEL_PAD * scale,
-            bottom: hint.top + 0.5 * scale,
-        };
-        ctx.FillRectangle(&line, &brush(&theme.line)?);
-        draw_text(
-            ctx,
-            view.hint,
-            &small,
-            D2D_RECT_F {
-                left: hint.left + pad,
-                ..hint
-            },
-            &subtext,
-        );
     }
     Ok(())
 }

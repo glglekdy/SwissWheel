@@ -59,8 +59,6 @@ pub struct MenuView<'a> {
     pub accent: Accent,
     /// Shown above the tabs when the config file can't be saved to.
     pub notice: Option<&'a str>,
-    /// The line under the rows.
-    pub hint: &'a str,
     /// Bar open animation and panel fade, 0.0 → 1.0.
     pub progress: f32,
     pub panel_progress: f32,

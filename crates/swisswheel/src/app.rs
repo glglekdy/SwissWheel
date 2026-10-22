@@ -118,9 +118,8 @@ pub(crate) struct AppState {
     menu: Option<MenuSession>,
     menu_opened_at: Instant,
     menu_panel_at: Instant,
-    /// The outcome of the last key binding ("…는 이제 Tab입니다"), shown
-    /// in the hint line until the next menu input.
-    menu_hint: Option<String>,
+    /// The key prompt card while a shortcut row waits for a key.
+    capture_notice: Option<NoticeId>,
     /// Foreground watch while the menu is open (it closes when another
     /// window comes forward).
     foreground_hook: Option<HWINEVENTHOOK>,
@@ -335,7 +334,7 @@ pub fn run() -> Result<()> {
         menu: None,
         menu_opened_at: Instant::now(),
         menu_panel_at: Instant::now(),
-        menu_hint: None,
+        capture_notice: None,
         foreground_hook: None,
         notice_window,
         notices,
@@ -536,7 +535,6 @@ impl AppState {
             DragCommand::OpenMenu => self.open_menu(),
             DragCommand::MenuKey(key) => match &mut self.menu {
                 Some(menu) => {
-                    self.menu_hint = None;
                     let action = menu.key(key);
                     self.on_menu_action(action);
                 }
@@ -544,7 +542,6 @@ impl AppState {
             },
             DragCommand::MenuCapture(vk) => match &mut self.menu {
                 Some(menu) => {
-                    self.menu_hint = None;
                     let action = menu.capture(vk);
                     self.on_menu_action(action);
                 }
@@ -602,9 +599,8 @@ impl AppState {
         }
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_MENU_ANIMATION);
-            let _ = KillTimer(Some(self.hwnd), TIMER_MENU_CAPTURE);
         }
-        self.menu_hint = None;
+        self.disarm_capture();
         if let Some(bar) = &mut self.menubar {
             bar.hide();
             bar.set_panel(false);
@@ -631,9 +627,6 @@ impl AppState {
             .focus()
             .map(|_| menu_geometry::PanelShape::of(menu.category()));
         let hit = |x, y| menu_geometry::hit(bar.layout(), shape, x, y);
-        if matches!(event, MenuMouse::Click { .. } | MenuMouse::Wheel { .. }) {
-            self.menu_hint = None;
-        }
         let action = match event {
             MenuMouse::Move { x, y } => {
                 if menu.hover(hit(x, y)) {
@@ -686,7 +679,11 @@ impl AppState {
             }
             MenuAction::Close => self.close_menu(),
             MenuAction::StartCapture => {
-                self.arm_capture();
+                // A click on another row's key: that row gets its own card.
+                self.disarm_capture();
+                if let Some(item) = self.menu.as_ref().and_then(MenuSession::capture_item) {
+                    self.arm_capture(item);
+                }
                 self.render_menu();
             }
             MenuAction::CancelCapture => {
@@ -694,23 +691,31 @@ impl AppState {
                 self.render_menu();
             }
             MenuAction::Bind(item, vk) => {
-                self.disarm_capture();
                 match Key::from_vk(vk) {
                     None => {
+                        // Posted first: if it pushes the prompt past the
+                        // card limit, arming posts the prompt again.
+                        self.notify(key_result("이 키는 쓸 수 없습니다", ""));
+                        // Keeps waiting on the same card, its timer restarted.
                         if let Some(menu) = &mut self.menu {
                             menu.rearm();
                         }
-                        self.arm_capture();
-                        self.menu_hint = Some("이 키는 쓸 수 없습니다".to_string());
+                        self.arm_capture(item);
                     }
                     Some(key) => {
+                        self.disarm_capture();
                         let bound = settings::bind(&self.config, item, key);
                         if bound.config != self.config {
                             self.apply_config(bound.config, item);
                         }
-                        self.menu_hint = bound.swapped.map(|(other, k)| {
-                            format!("{}는 이제 {}입니다", other.label(), settings::key_label(k))
-                        });
+                        if let Some((other, k)) = bound.swapped {
+                            let body = format!(
+                                "{}는 이제 {}입니다",
+                                other.label(),
+                                settings::key_label(k)
+                            );
+                            self.notify(key_result("두 단축키를 맞바꿨습니다", &body));
+                        }
                     }
                 }
                 self.render_menu();
@@ -718,8 +723,10 @@ impl AppState {
         }
     }
 
-    /// Has the hook hand over the next key press, for up to `CAPTURE_TIMEOUT`.
-    fn arm_capture(&self) {
+    /// Has the hook hand over the next key press for `item`, for up to
+    /// `CAPTURE_TIMEOUT`, and shows the key prompt card. Armed again after a
+    /// rejected key, the same card restarts its bar with the timeout.
+    fn arm_capture(&mut self, item: SettingItem) {
         hook::set_capture(true);
         unsafe {
             SetTimer(
@@ -729,12 +736,23 @@ impl AppState {
                 None,
             )
         };
+        let now = Instant::now();
+        match self.capture_notice {
+            Some(id) if self.notices.restart(id, now) => self.render_notices(),
+            // Gone (clicked away, or dropped while quiet): a new card.
+            _ => self.capture_notice = self.notify(key_prompt(item)),
+        }
     }
 
-    fn disarm_capture(&self) {
+    /// Stops waiting for a key and closes the key prompt card.
+    fn disarm_capture(&mut self) {
         hook::set_capture(false);
         unsafe {
             let _ = KillTimer(Some(self.hwnd), TIMER_MENU_CAPTURE);
+        }
+        if let Some(id) = self.capture_notice.take() {
+            self.notices.dismiss(id, Instant::now());
+            self.render_notices();
         }
     }
 
@@ -820,7 +838,6 @@ impl AppState {
             hovered: menu.hovered(),
             accent: self.config.appearance.accent,
             notice: (!self.config_writable).then_some(CONFIG_NOTICE),
-            hint: self.menu_hint.as_deref().unwrap_or(menu.hint()),
             progress: fraction(self.menu_opened_at, OPEN_ANIMATION),
             panel_progress: fraction(self.menu_panel_at, PANEL_FADE),
         };
@@ -1053,12 +1070,6 @@ impl AppState {
                 };
                 let rows = crate::menubar::rows(&config, category, failed);
                 let capturing = what == "menu-capture";
-                let hint = match what {
-                    "menu-settings" => "Enter로 키 변경",
-                    "menu-tools" => "←/→ 카테고리 · ↓ 항목",
-                    "menu-capture" => "바꿀 키를 누르세요 · 다른 곳 클릭 시 취소",
-                    _ => "",
-                };
                 let view = crate::menubar::MenuView {
                     selected: if panel { 0 } else { 1 },
                     rows: panel.then_some(rows.as_slice()),
@@ -1068,12 +1079,14 @@ impl AppState {
                     hovered,
                     accent: config.appearance.accent,
                     notice: notice.then_some(CONFIG_NOTICE),
-                    hint,
                     progress: 1.0,
                     panel_progress: 1.0,
                 };
                 bar.show();
                 bar.render(&view);
+                if capturing {
+                    self.notify(key_prompt(SettingItem::CycleKey));
+                }
             }
             other => log_error!("SWISSWHEEL_PREVIEW: 알 수 없는 값 {other}"),
         }
@@ -1884,6 +1897,24 @@ fn info(title: &str, body: &str) -> Notice {
         title: title.to_string(),
         body: body.to_string(),
         action: None,
+    }
+}
+
+/// The card shown while a shortcut row waits for a key; clicking it cancels.
+fn key_prompt(item: SettingItem) -> Notice {
+    Notice {
+        kind: NoticeKind::KeyPrompt,
+        title: "바꿀 키를 누르세요".to_string(),
+        body: format!("{} · 다른 곳을 클릭하면 취소", item.label()),
+        action: Some(NoticeAction::CancelCapture),
+    }
+}
+
+/// The outcome of binding a key (3 s).
+fn key_result(title: &str, body: &str) -> Notice {
+    Notice {
+        kind: NoticeKind::KeyResult,
+        ..info(title, body)
     }
 }
 

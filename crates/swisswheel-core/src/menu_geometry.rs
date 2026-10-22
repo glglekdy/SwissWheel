@@ -58,8 +58,6 @@ pub struct MenuLayout {
     pub tabs: [Box2; CATEGORIES.len()],
     /// `MAX_ROWS` rows; a tab with fewer leaves the rest empty.
     pub rows: Vec<RowBoxes>,
-    /// The hint line under the rows.
-    pub hint: Box2,
 }
 
 /// Which rows of the open panel react: the selected tab's.
@@ -97,9 +95,9 @@ pub fn layout(notice: bool, scale: f32) -> MenuLayout {
             bottom: s(DROP + BAR_PAD + TILE),
         }
     });
-    // Notice (if any), tabs, the rows, then the hint.
+    // Notice (if any), tabs, then the rows.
     let first = usize::from(notice);
-    let lines = first + 1 + MAX_ROWS + 1;
+    let lines = first + 1 + MAX_ROWS;
     let panel = Box2 {
         left: 0.0,
         top: bar.bottom + s(PANEL_GAP),
@@ -154,7 +152,6 @@ pub fn layout(notice: bool, scale: f32) -> MenuLayout {
         notice: notice.then(|| line(0)),
         tabs,
         rows,
-        hint: line(first + 1 + MAX_ROWS),
     }
 }
 
@@ -227,14 +224,14 @@ mod tests {
     }
 
     #[test]
-    fn panel_has_tabs_three_rows_and_hint() {
+    fn panel_has_tabs_three_rows() {
         let l = layout(false, 1.0);
-        assert_eq!(l.panel.bottom - l.panel.top, 8.0 * 2.0 + 5.0 * 36.0);
+        assert_eq!(l.panel.bottom - l.panel.top, 2.0 * PANEL_PAD + 4.0 * ROW);
         assert_eq!(l.rows.len(), 3);
         assert_eq!(l.tabs[0].top, l.panel.top + 8.0);
         assert_eq!((l.tabs[0].left, l.tabs[4].right), (8.0, 600.0));
         assert_eq!(l.rows[0].row.top, l.tabs[0].bottom);
-        assert_eq!(l.hint.top, l.rows[2].row.bottom);
+        assert_eq!(l.panel.bottom, l.rows[2].row.bottom + PANEL_PAD);
         assert_eq!(
             (l.rows[0].keycap.left, l.rows[0].keycap.right),
             (l.rows[0].back.left, l.rows[0].forward.right)
@@ -300,7 +297,7 @@ mod tests {
     }
 
     #[test]
-    fn hit_tabs_keycaps_and_hint() {
+    fn hit_tabs_keycaps_and_panel() {
         let l = layout(false, 1.0);
         let (x, y) = mid(&l.tabs[2]);
         assert_eq!(hit(&l, keys(), x, y), MenuHit::Tab(2));
@@ -313,8 +310,8 @@ mod tests {
             hit(&l, keys(), l.rows[1].row.left + 4.0, y),
             MenuHit::Row(1)
         );
-        let (x, y) = mid(&l.hint);
-        assert_eq!(hit(&l, convert(), x, y), MenuHit::Panel);
+        let x = (l.panel.left + l.panel.right) / 2.0;
+        assert_eq!(hit(&l, convert(), x, l.panel.bottom - 2.0), MenuHit::Panel);
     }
 
     #[test]
@@ -344,7 +341,7 @@ mod tests {
         let l = layout(true, 1.0);
         let notice = l.notice.unwrap();
         assert_eq!(l.tabs[0].top, notice.bottom);
-        assert_eq!(l.panel.bottom - l.panel.top, 8.0 * 2.0 + 6.0 * 36.0);
+        assert_eq!(l.panel.bottom - l.panel.top, 2.0 * PANEL_PAD + 5.0 * ROW);
         let y = (notice.top + notice.bottom) / 2.0;
         assert_eq!(hit(&l, keys(), notice.left + 4.0, y), MenuHit::Panel);
     }
