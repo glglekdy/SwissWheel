@@ -9,6 +9,8 @@ const APPEAR: Duration = Duration::from_millis(200);
 const CLOSE: Duration = Duration::from_millis(150);
 const MORPH: Duration = Duration::from_millis(200);
 const FRAME: Duration = Duration::from_millis(16);
+/// How often an idle card's timer bar is redrawn.
+const BAR_STEP: Duration = Duration::from_millis(50);
 /// Most cards shown at once (cards that are fading out do not count).
 const MAX_CARDS: usize = 3;
 
@@ -25,6 +27,7 @@ pub enum NoticeKind {
 
 impl NoticeKind {
     /// How long the card stays before it closes by itself.
+    /// `KeyPrompt` must equal the app's `CAPTURE_TIMEOUT` (crates/swisswheel/src/app.rs).
     pub fn lifetime(self) -> Duration {
         let secs = match self {
             NoticeKind::Done | NoticeKind::Info | NoticeKind::KeyPrompt => 5,
@@ -315,8 +318,10 @@ impl Notices {
             .collect()
     }
 
-    /// When the app should next call `tick`: one frame ahead while anything
-    /// animates, else the next expiry. `None` when nothing is shown.
+    /// When the app should next call `tick` and repaint: one frame ahead while
+    /// anything animates, else the next timer-bar step (50 ms) or expiry, whichever
+    /// is sooner. `None` when nothing is shown or only paused cards remain, so
+    /// callers must re-arm after `hover`.
     pub fn next_wake(&self, now: Instant) -> Option<Instant> {
         if self.quiet || self.cards.is_empty() {
             return None;
@@ -324,7 +329,21 @@ impl Notices {
         if self.cards.iter().any(|c| c.animating(now)) {
             return Some(now + FRAME);
         }
-        self.cards.iter().filter_map(Card::expiry).min()
+        let expiry = self.cards.iter().filter_map(Card::expiry).min()?;
+        Some(expiry.min(now + BAR_STEP))
+    }
+
+    /// Restart a live card's timer as if posted at `now`, without a new appear animation.
+    pub fn restart(&mut self, id: NoticeId, now: Instant) {
+        if let Some(card) = self.cards.iter_mut().find(|c| c.id == id)
+            && card.closing_start(now).is_none()
+        {
+            card.paused_at = None;
+            card.paused_total = now.saturating_duration_since(card.posted);
+            if self.hovered == Some(id) {
+                self.hovered = None;
+            }
+        }
     }
 }
 
@@ -519,12 +538,50 @@ mod tests {
     }
 
     #[test]
-    fn next_wake_sleeps_until_expiry() {
+    fn next_wake_ticks_while_a_timer_runs() {
         let t0 = Instant::now();
         let mut n = Notices::new();
         assert_eq!(n.next_wake(t0), None);
-        n.post(done("A"), t0);
+        let a = n.post(done("A"), t0);
         assert_eq!(n.next_wake(t0 + ms(10)), Some(t0 + ms(10) + ms(16)));
-        assert_eq!(n.next_wake(t0 + ms(300)), Some(t0 + Duration::from_secs(5)));
+        assert_eq!(n.next_wake(t0 + ms(300)), Some(t0 + ms(350)));
+        let near = t0 + ms(4970);
+        assert_eq!(n.next_wake(near), Some(t0 + Duration::from_secs(5)));
+        n.hover(Some(a), t0 + ms(300));
+        assert_eq!(n.next_wake(t0 + ms(400)), None);
+    }
+
+    #[test]
+    fn restart_resets_timer() {
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        let id = n.post(note(NoticeKind::KeyPrompt, "key"), t0);
+        n.restart(id, t0 + Duration::from_secs(4));
+        let t = t0 + ms(8900);
+        n.tick(t);
+        let c = &n.cards(t)[0];
+        assert!(c.closing.is_none());
+        assert_eq!(c.appear, 1.0);
+        let t = t0 + ms(9100);
+        n.tick(t);
+        assert!(n.cards(t)[0].closing.is_some());
+    }
+
+    #[test]
+    fn posting_while_hovered_runs_the_new_timer() {
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        let a = n.post(done("A"), t0);
+        n.hover(Some(a), t0);
+        let b = n.post(done("B"), t0 + ms(1000));
+        let cards = n.cards(t0 + ms(3500));
+        let bv = cards.iter().find(|c| c.id == b).unwrap();
+        assert!((bv.remaining - 0.5).abs() < 0.01);
+        let t = t0 + ms(6100);
+        n.tick(t);
+        let cards = n.cards(t);
+        assert!(cards.iter().find(|c| c.id == b).unwrap().closing.is_some());
+        let av = cards.iter().find(|c| c.id == a).unwrap();
+        assert!(av.closing.is_none());
     }
 }
