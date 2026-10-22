@@ -50,7 +50,7 @@ pub struct MenuLayout {
     pub width: i32,
     pub height: i32,
     pub bar: Box2,
-    pub tiles: [Box2; 3],
+    pub tiles: [Box2; TILES.len()],
     pub panel: Box2,
     /// "설정 파일에 오류가 있어 저장하지 않습니다", above the tabs.
     pub notice: Option<Box2>,
@@ -266,6 +266,16 @@ mod tests {
         let (x, y) = window_origin(work, &l, 1.5);
         assert_eq!(x, -2560 + (2560 - l.width) / 2);
         assert_eq!(y, -200 + 12);
+    }
+
+    #[test]
+    fn every_tile_has_a_box_across_the_bar() {
+        let l = layout(false, 1.0);
+        assert_eq!(l.tiles.len(), TILES.len());
+        let last = l.tiles[TILES.len() - 1];
+        assert_eq!(last.right, l.bar.right - BAR_PAD);
+        let (x, y) = mid(&last);
+        assert_eq!(hit(&l, None, x, y), MenuHit::Tile(TILES.len() - 1));
     }
 
     #[test]
