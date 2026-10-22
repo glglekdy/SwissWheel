@@ -57,3 +57,5 @@ Manual checks that automated tests can't cover: [docs/manual-test.md](docs/manua
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
+
+Pretendard (assets/fonts) — SIL Open Font License 1.1, included unmodified.
