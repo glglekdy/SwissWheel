@@ -37,14 +37,19 @@ pub struct JobReport {
 }
 
 type OnDone = Box<dyn Fn(JobReport) + Send + Sync>;
+/// Finds FFmpeg; `ffmpeg::locate` outside tests.
+type Locate = Box<dyn Fn() -> Option<Tools> + Send + Sync>;
 
 struct Shared {
     /// Read once per file, so a file never mixes old and new settings.
     quality: RwLock<Quality>,
     reservations: Reservations,
     on_done: OnDone,
-    /// Found once at startup; media files fail with `MissingFfmpeg` without it.
-    tools: Option<Tools>,
+    /// Kept once found. While `None`, each media file looks again (the
+    /// download tile may have installed FFmpeg since) and fails with
+    /// `MissingFfmpeg` if it still isn't there.
+    tools: Mutex<Option<Tools>>,
+    locate: Locate,
     /// Set by `shutdown`: running FFmpeg is killed, queued files are skipped.
     cancel: AtomicBool,
     /// Jobs submitted but not yet reported, for `Runner::progress`.
@@ -108,7 +113,23 @@ impl Runner {
         quality: Quality,
         on_done: OnDone,
     ) -> Runner {
-        let tools = ffmpeg::locate();
+        Runner::with_locator(
+            image_workers,
+            media_workers,
+            quality,
+            on_done,
+            Box::new(ffmpeg::locate),
+        )
+    }
+
+    fn with_locator(
+        image_workers: usize,
+        media_workers: usize,
+        quality: Quality,
+        on_done: OnDone,
+        locate: Locate,
+    ) -> Runner {
+        let tools = locate();
         if tools.is_none() {
             log_info!("FFmpeg를 찾지 못했습니다: 영상·오디오 작업은 실패로 처리됩니다");
         }
@@ -116,7 +137,8 @@ impl Runner {
             quality: RwLock::new(quality),
             reservations: Reservations::default(),
             on_done,
-            tools,
+            tools: Mutex::new(tools),
+            locate,
             cancel: AtomicBool::new(false),
             active: Mutex::new(Vec::new()),
         });
@@ -231,6 +253,19 @@ impl Runner {
     }
 }
 
+impl Shared {
+    fn tools(&self) -> Option<Tools> {
+        let mut tools = self.tools.lock().unwrap();
+        if tools.is_none() {
+            *tools = (self.locate)();
+            if let Some(found) = &*tools {
+                log_info!("FFmpeg를 찾았습니다: {}", found.ffmpeg.display());
+            }
+        }
+        tools.clone()
+    }
+}
+
 fn worker(rx: &Mutex<Receiver<Work>>, shared: &Shared) {
     loop {
         let Ok(work) = rx.lock().unwrap().recv() else {
@@ -279,9 +314,9 @@ fn file_name(path: &Path) -> String {
 
 /// Which engine converts a file, decided before its output name is reserved
 /// (for media the output format depends on what ffprobe finds).
-enum Engine<'a> {
+enum Engine {
     Image,
-    Media(&'a Tools, media::MediaPlan),
+    Media(Tools, media::MediaPlan),
 }
 
 /// Converts one file: reserve a name, write to a temp file, then move it into
@@ -307,10 +342,9 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
         )
     } else if media::supports(op, format) {
         let tools = shared
-            .tools
-            .as_ref()
+            .tools()
             .ok_or_else(|| fail(EngineError::MissingFfmpeg))?;
-        let plan = ffmpeg::prepare(tools, op, preset, input, &quality).map_err(fail)?;
+        let plan = ffmpeg::prepare(&tools, op, preset, input, &quality).map_err(fail)?;
         let extension = plan.output.extension();
         (Engine::Media(tools, plan), extension)
     } else {
@@ -535,6 +569,32 @@ mod tests {
         let r = &run_jobs(vec![job(Operation::Convert(Format::Mp3), vec![clip])])[0];
         assert_eq!(r.outputs, vec![dir.path().join("clip.mp3")]);
         assert!(r.failures.is_empty(), "{:?}", r.failures);
+    }
+
+    #[test]
+    fn ffmpeg_installed_after_start_is_used_without_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make(dir.path(), "clip.mp4", CLIP);
+        let installed = Arc::new(AtomicBool::new(false));
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let flag = Arc::clone(&installed);
+        let runner = Runner::with_locator(
+            1,
+            1,
+            Quality::default(),
+            Box::new(move |r| tx.lock().unwrap().send(r).unwrap()),
+            Box::new(move || flag.load(Ordering::Relaxed).then(ffmpeg::locate).flatten()),
+        );
+        runner.submit(job(Operation::Convert(Format::Mp3), vec![clip.clone()]));
+        let before = rx.recv().unwrap();
+        assert_eq!(before.failures, ["clip.mp4: FFmpeg를 찾을 수 없습니다"]);
+        installed.store(true, Ordering::Relaxed); // the download tile finished
+        runner.submit(job(Operation::Convert(Format::Mp3), vec![clip]));
+        let after = rx.recv().unwrap();
+        runner.shutdown();
+        assert!(after.failures.is_empty(), "{:?}", after.failures);
+        assert_eq!(after.outputs, vec![dir.path().join("clip.mp3")]);
     }
 
     #[test]

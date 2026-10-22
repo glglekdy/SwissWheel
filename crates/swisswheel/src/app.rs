@@ -1160,9 +1160,17 @@ impl AppState {
         self.update_busy();
     }
 
+    fn background_busy(&self) -> bool {
+        background_busy(
+            self.update.is_some(),
+            self.ffmpeg.is_some(),
+            self.pending_swap.is_some(),
+        )
+    }
+
     fn start_ffmpeg(&mut self) {
         let ready = ffmpeg_tools::locate().is_some();
-        let busy = self.update.is_some() || self.ffmpeg.is_some();
+        let busy = self.background_busy();
         match ffmpeg_release::on_download_tile(ready, busy) {
             TileDecision::Refuse(notice) => self.tray.notify(ffmpeg_release::TITLE, notice),
             TileDecision::Start => {
@@ -1197,9 +1205,7 @@ impl AppState {
     /// Starts a fresh copy that waits for this one to exit, then closes
     /// normally (posted, like `apply_swap`).
     fn restart(&mut self) {
-        let background =
-            self.update.is_some() || self.ffmpeg.is_some() || self.pending_swap.is_some();
-        match restart::on_tile(self.active_jobs, background) {
+        match restart::on_tile(self.active_jobs, self.background_busy()) {
             TileDecision::Refuse(notice) => self.tray.notify(restart::TITLE, notice),
             TileDecision::Start => {
                 match std::env::current_exe().and_then(|exe| swap::launch_restarted(&exe)) {
@@ -1474,6 +1480,12 @@ fn previewing(preview: Option<String>) -> bool {
     cfg!(debug_assertions) && preview.is_some_and(|what| what != "update")
 }
 
+/// An update or FFmpeg thread runs, or a verified update waits to swap in
+/// (which restarts the app): the download and restart tiles hold off.
+fn background_busy(update: bool, ffmpeg: bool, pending_swap: bool) -> bool {
+    update || ffmpeg || pending_swap
+}
+
 /// Opens a release page in the browser; only https links.
 fn open_page(url: &str) {
     if !url.starts_with("https://") {
@@ -1495,6 +1507,15 @@ fn open_page(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_waiting_update_keeps_downloads_and_restarts_off() {
+        // The swap restarts the app, which would cut a download short.
+        assert!(background_busy(false, false, true));
+        assert!(background_busy(true, false, false));
+        assert!(background_busy(false, true, false));
+        assert!(!background_busy(false, false, false));
+    }
 
     #[test]
     fn update_preview_keeps_the_single_instance_rules() {

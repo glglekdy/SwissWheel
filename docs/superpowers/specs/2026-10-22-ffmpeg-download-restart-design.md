@@ -82,7 +82,7 @@
 ### 3.2 설치 위치와 찾는 순서
 - 설치 위치: exe 폴더에 쓸 수 있으면(`swap::writable`과 같은 검사) `<exe 폴더>\ffmpeg\`, 아니면 `%LOCALAPPDATA%\SwissWheel\ffmpeg\`.
 - `locate()` 찾는 순서: `<exe 폴더>\ffmpeg\` → `%LOCALAPPDATA%\SwissWheel\ffmpeg\` → `PATH`. 각 위치는 지금처럼 `ffmpeg.exe`와 `ffprobe.exe`가 **둘 다** 있어야 인정한다.
-- 작업은 시작할 때마다 `locate()`를 부르므로(`jobs.rs`), 설치가 끝난 뒤의 변환은 재시작 없이 새 FFmpeg를 쓴다.
+- 작업 러너(`jobs.rs`)는 FFmpeg를 아직 못 찾았으면 미디어 파일마다 `locate()`를 다시 부르고, 찾으면 그 뒤로 계속 쓴다. 그래서 설치가 끝난 뒤의 변환은 재시작 없이 새 FFmpeg를 쓴다.
 
 ### 3.3 받기와 설치 순서 (다운로드 스레드)
 `target` = 3.2의 설치 폴더, `partial` = 같은 부모 폴더의 `ffmpeg.partial\`. 같은 볼륨이라 이름 바꾸기가 원자적이다.
