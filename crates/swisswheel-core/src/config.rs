@@ -169,7 +169,8 @@ pub struct Appearance {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Notifications {
-    /// Hold notices back (except failures) until turned off.
+    /// Drop finished/failed job cards (logged, shown in the tooltip); other
+    /// notices still show.
     pub do_not_disturb: bool,
 }
 

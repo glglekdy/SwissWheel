@@ -767,10 +767,9 @@ fn draw_progress(
 fn glyph(kind: NoticeKind) -> &'static str {
     match kind {
         NoticeKind::Done => "\u{E73E}",                         // CheckMark
-        NoticeKind::Info => "\u{E946}",                         // Info
+        NoticeKind::Info | NoticeKind::KeyResult => "\u{E946}", // Info
         NoticeKind::Failed | NoticeKind::Warning => "\u{E7BA}", // Warning
         NoticeKind::KeyPrompt => "\u{E765}",                    // Keyboard
-        NoticeKind::KeyResult => "\u{E8AB}",                    // Switch
     }
 }
 
@@ -959,6 +958,12 @@ unsafe extern "system" fn wnd_proc(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn key_result_shows_the_info_icon() {
+        // Spec 2.6: 키 변경 결과 = ⓘ.
+        assert_eq!(glyph(NoticeKind::KeyResult), glyph(NoticeKind::Info));
+    }
 
     fn card(id: NoticeId) -> CardView {
         CardView {

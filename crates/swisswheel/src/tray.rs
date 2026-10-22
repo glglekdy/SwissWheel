@@ -27,10 +27,13 @@ pub struct Tray {
     icon_size: i32,
     /// The logo with a progress ring, at a 5% step (0..=20).
     ring: Option<(u8, HICON)>,
+    /// The ring's filled part: the accent color, straight RGB.
+    accent: [u8; 3],
 }
 
 impl Tray {
-    pub fn new(hwnd: HWND) -> windows::core::Result<Tray> {
+    /// `accent` is `0xRRGGBB` for the progress ring.
+    pub fn new(hwnd: HWND, accent: u32) -> windows::core::Result<Tray> {
         let size = unsafe { GetSystemMetrics(SM_CXSMICON) };
         let light = taskbar_light_theme();
         let tray = Tray {
@@ -41,6 +44,7 @@ impl Tray {
             tooltip: "SwissWheel".into(),
             icon_size: size,
             ring: None,
+            accent: icon::rgb(accent),
         };
         tray.add();
         Ok(tray)
@@ -90,6 +94,21 @@ impl Tray {
         }
     }
 
+    /// Redraws the progress ring in a new accent color (`0xRRGGBB`).
+    pub fn set_accent(&mut self, accent: u32) {
+        let accent = icon::rgb(accent);
+        if accent == self.accent {
+            return;
+        }
+        self.accent = accent;
+        if self.ring.is_some() {
+            self.set_ring(self.ring.map(|(s, _)| s));
+            unsafe {
+                let _ = Shell_NotifyIconW(NIM_MODIFY, &self.data());
+            }
+        }
+    }
+
     fn set_ring(&mut self, step: Option<u8>) {
         if let Some((_, old)) = self.ring.take() {
             unsafe {
@@ -97,7 +116,8 @@ impl Tray {
             }
         }
         if let Some(step) = step {
-            match icon::make_progress(f32::from(step) / 20.0, self.light, self.icon_size) {
+            let fraction = f32::from(step) / 20.0;
+            match icon::make_progress(fraction, self.light, self.accent, self.icon_size) {
                 Ok(hicon) => self.ring = Some((step, hicon)),
                 Err(e) => log_error!("진행 아이콘을 만들 수 없습니다: {e}"),
             }

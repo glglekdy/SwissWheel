@@ -8,7 +8,7 @@ Offline file converter for Windows. Drag a file in Explorer, press **Space**, an
 2. Start dragging one or more files in Explorer or on the desktop.
 3. While dragging, press **Space**. Drop on an item to run it; drop on the center to cancel.
 4. The result is saved next to the original (`photo.png` → `photo.jpg`). Originals are never modified or overwritten; name clashes get a number (`photo (1).jpg`).
-5. A card above the tray (bottom-right) reports the result. Click it to open the folder with the result selected; the click closes the card and doesn't take focus from the app you're typing in. Cards pause while the cursor is over them. In a full-screen app, a presentation, or while Windows is busy, cards wait and show when it ends.
+5. A card above the tray (bottom-right) reports the result. Click it to open the folder with the result selected; the click closes the card and doesn't take focus from the app you're typing in. Cards pause while the cursor is over them. In a full-screen app, a presentation, or while Windows is busy, cards wait and the newest three show when it ends (a key prompt posted meanwhile is dropped).
 
 Without a drag, click the desktop and press **Space** to open the menu bar at the top of the screen: **설정** (settings), **다운로드** (set up FFmpeg, see below), **플러그인** (plugins), **업데이트** (update), **재시작** (restart SwissWheel; it waits while files are converting or an update or download runs). Move with **←/→**, open with **Enter**, close with **Esc** or **Space**. The settings panel has tabs — **단축키** (keys), **도구** (tools), **변환** (convert), **알림** (notices), **일반** (general): **←/→** on the tab line switches tabs (or click one), **↓** goes into its settings. There **↑/↓** picks a setting and **←/→** changes it (or click ◀ ▶, or scroll); changes apply at once and are saved, no restart needed. **일반** holds **강조색** (accent color: 블루, 퍼플, 핑크, 레드, 오렌지, 그린, 그래파이트); **알림** holds the progress card, the tray ring, and **방해 금지** (do not disturb), which hides only the job done/failed cards — menu results and key prompts still show, and the tray tooltip keeps showing the last job ("마지막 작업: …").
 
@@ -58,4 +58,4 @@ Manual checks that automated tests can't cover: [docs/manual-test.md](docs/manua
 
 GPL-3.0-or-later. See [LICENSE](LICENSE).
 
-Pretendard (assets/fonts) — SIL Open Font License 1.1, included unmodified.
+Pretendard (assets/fonts, embedded in `swisswheel.exe`) — Copyright (c) 2021, Kil Hyung-jin (https://github.com/orioncactus/pretendard), with Reserved Font Name Pretendard. SIL Open Font License 1.1, included unmodified; full text in [assets/fonts/OFL.txt](assets/fonts/OFL.txt), also attached to every release as `OFL.txt`.

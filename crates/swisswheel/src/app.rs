@@ -235,7 +235,7 @@ pub fn run() -> Result<()> {
     let (config, warning) = config_file::load(&config_dir);
 
     let hwnd = create_host_window()?;
-    let tray = Tray::new(hwnd)?;
+    let tray = Tray::new(hwnd, config.appearance.accent.rgb())?;
     if let Some(exited) = old_exited {
         let after = if restarted.is_some() {
             "재시작"
@@ -805,6 +805,9 @@ impl AppState {
         self.notices
             .set_do_not_disturb(new.notifications.do_not_disturb);
         let before = std::mem::replace(&mut self.config, new);
+        if accent_changed {
+            self.tray.set_accent(self.config.appearance.accent.rgb());
+        }
         if progress_changed {
             self.update_busy(); // redraws the notice window too
         } else if accent_changed {
@@ -1937,6 +1940,12 @@ fn warning_notice(title: &str, body: &str) -> Notice {
 /// Opens Explorer on `path`'s folder with it selected. A folder deleted
 /// meanwhile only gets a log line.
 fn open_folder(path: &std::path::Path) {
+    // The notice card never takes focus, so SwissWheel isn't the foreground
+    // app; the click was our input, which lets us hand Explorer the right to
+    // come to the front instead of opening behind the active window.
+    if let Err(e) = unsafe { AllowSetForegroundWindow(ASFW_ANY) } {
+        log_error!("탐색기를 앞으로 가져올 권한을 넘기지 못했습니다: {e}");
+    }
     if let Err(e) = std::process::Command::new("explorer.exe")
         .arg(format!("/select,{}", path.display()))
         .spawn()

@@ -249,6 +249,8 @@ mod tests {
       "created_at": "2026-10-22T00:00:00Z", "published_at": "2026-10-22T00:00:00Z",
       "author": { "login": "glglekdy", "id": 7 },
       "assets": [
+        { "id": 10, "name": "OFL.txt", "size": 4400, "content_type": "text/plain",
+          "browser_download_url": "https://github.com/glglekdy/SwissWheel/releases/download/v0.2.0/OFL.txt" },
         { "id": 11, "name": "swisswheel.exe", "size": 5000000, "content_type": "application/octet-stream",
           "browser_download_url": "https://github.com/glglekdy/SwissWheel/releases/download/v0.2.0/swisswheel.exe" },
         { "id": 12, "name": "swisswheel.exe.sha256", "size": 81,

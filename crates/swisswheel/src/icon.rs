@@ -1,6 +1,6 @@
 //! The tray icon: the SwissWheel logo (`assets/logo.png`) in the taskbar's
 //! color, white on a dark taskbar and black on a light one, optionally
-//! ringed by job progress.
+//! ringed by job progress in the accent color.
 
 use std::sync::OnceLock;
 
@@ -13,8 +13,6 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, HICON, ICONINFO};
 
 const LOGO_PNG: &[u8] = include_bytes!("../../../assets/logo.png");
-/// The filled part of the progress ring.
-const RING: [u8; 3] = [0x34, 0xC7, 0x59];
 /// The unfilled part of the ring: the logo's color, this opaque.
 const TRACK_ALPHA: f32 = 0.35;
 const SAMPLES: u32 = 4; // per axis, for anti-aliasing
@@ -65,9 +63,15 @@ pub fn pixels(light: bool, size: u32) -> Vec<[u8; 4]> {
         .collect()
 }
 
-/// The logo, shrunk to fit inside a ring that fills clockwise from 12
-/// o'clock as `fraction` goes from 0 to 1.
-pub fn progress_pixels(fraction: f32, light: bool, size: u32) -> Vec<[u8; 4]> {
+/// `0xRRGGBB` → `[r, g, b]`.
+pub fn rgb(hex: u32) -> [u8; 3] {
+    let [_, r, g, b] = hex.to_be_bytes();
+    [r, g, b]
+}
+
+/// The logo, shrunk to fit inside a ring (filled part in `ring`, straight
+/// RGB) that fills clockwise from 12 o'clock as `fraction` goes from 0 to 1.
+pub fn progress_pixels(fraction: f32, light: bool, ring: [u8; 3], size: u32) -> Vec<[u8; 4]> {
     let s = size as f32;
     let color = logo_color(light);
     let outer = s / 2.0 - 0.5;
@@ -81,7 +85,7 @@ pub fn progress_pixels(fraction: f32, light: bool, size: u32) -> Vec<[u8; 4]> {
         }
         let deg = x.atan2(-y).to_degrees().rem_euclid(360.0);
         Some(if deg < filled {
-            [RING[0], RING[1], RING[2], 255]
+            [ring[0], ring[1], ring[2], 255]
         } else {
             track
         })
@@ -140,10 +144,16 @@ pub fn make(light: bool, size: i32) -> windows::core::Result<HICON> {
     from_pixels(&pixels(light, size as u32), size)
 }
 
-/// The logo with a progress ring; free it with `DestroyIcon`.
-pub fn make_progress(fraction: f32, light: bool, size: i32) -> windows::core::Result<HICON> {
+/// The logo with a progress ring in `ring` (straight RGB); free it with
+/// `DestroyIcon`.
+pub fn make_progress(
+    fraction: f32,
+    light: bool,
+    ring: [u8; 3],
+    size: i32,
+) -> windows::core::Result<HICON> {
     let size = size.max(16);
-    from_pixels(&progress_pixels(fraction, light, size as u32), size)
+    from_pixels(&progress_pixels(fraction, light, ring, size as u32), size)
 }
 
 fn from_pixels(px: &[[u8; 4]], size: i32) -> windows::core::Result<HICON> {
@@ -211,26 +221,46 @@ mod tests {
         }
     }
 
+    /// A pixel well inside the ring band of a 32 px icon, `deg` clockwise
+    /// from 12 o'clock.
+    fn ring_at(px: &[[u8; 4]], deg: f32) -> [u8; 4] {
+        let rad = deg.to_radians();
+        let x = (16.0 + 14.0 * rad.sin()) as u32;
+        let y = (16.0 - 14.0 * rad.cos()) as u32;
+        px[(y * 32 + x) as usize]
+    }
+
+    const GREEN: [u8; 3] = [0x1E, 0x9E, 0x50];
+
     #[test]
     fn progress_ring_fills_clockwise_from_the_top() {
         let size = 32;
-        let px = progress_pixels(0.25, false, size);
-        // A pixel well inside the ring band, `deg` clockwise from 12 o'clock.
-        let at = |px: &[[u8; 4]], deg: f32| {
-            let rad = deg.to_radians();
-            let x = (16.0 + 14.0 * rad.sin()) as u32;
-            let y = (16.0 - 14.0 * rad.cos()) as u32;
-            px[(y * size + x) as usize]
-        };
-        let green = [RING[2], RING[1], RING[0], 255];
-        assert_eq!(at(&px, 45.0), green);
-        let track = at(&px, 135.0);
+        let px = progress_pixels(0.25, false, GREEN, size);
+        let green = [GREEN[2], GREEN[1], GREEN[0], 255];
+        assert_eq!(ring_at(&px, 45.0), green);
+        let track = ring_at(&px, 135.0);
         assert_ne!(track, green);
         assert!((40..160).contains(&track[3]), "{track:?}"); // see-through
-        assert_eq!(at(&progress_pixels(0.0, false, size), 45.0), track);
-        assert_eq!(at(&progress_pixels(1.0, false, size), 300.0), green);
+        assert_eq!(
+            ring_at(&progress_pixels(0.0, false, GREEN, size), 45.0),
+            track
+        );
+        assert_eq!(
+            ring_at(&progress_pixels(1.0, false, GREEN, size), 300.0),
+            green
+        );
         assert_eq!(px[(16 * size + 16) as usize][3], 0); // the logo's open center
         assert!(!opaque(&px).iter().all(|p| *p == green)); // the logo is inside
+    }
+
+    #[test]
+    fn progress_ring_takes_the_accent() {
+        for hex in [0x0A84FF, 0xE5484D, 0x5C5C64] {
+            let [r, g, b] = rgb(hex);
+            let px = progress_pixels(1.0, false, rgb(hex), 32);
+            assert_eq!(ring_at(&px, 90.0), [b, g, r, 255], "{hex:06X}");
+        }
+        assert_eq!(rgb(0x0A84FF), [0x0A, 0x84, 0xFF]);
     }
 
     #[test]
