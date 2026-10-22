@@ -2,6 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
+pub use crate::appearance::Accent;
 pub use crate::options::Strength;
 
 /// Keys the wheel and menu can be bound to (settings spec 2.3). Letters,
@@ -157,6 +158,21 @@ impl Default for Tools {
     }
 }
 
+/// Look of the wheel, menu, and notices.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Appearance {
+    pub accent: Accent,
+}
+
+/// How notice cards behave.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Notifications {
+    /// Hold notices back (except failures) until turned off.
+    pub do_not_disturb: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -167,6 +183,8 @@ pub struct Config {
     pub quality: Quality,
     pub progress: ProgressDisplay,
     pub tools: Tools,
+    pub appearance: Appearance,
+    pub notifications: Notifications,
 }
 
 impl Default for Config {
@@ -179,6 +197,8 @@ impl Default for Config {
             quality: Quality::default(),
             progress: ProgressDisplay::default(),
             tools: Tools::default(),
+            appearance: Appearance::default(),
+            notifications: Notifications::default(),
         }
     }
 }
@@ -365,6 +385,47 @@ tray_ring = false
         ));
         assert!(matches!(
             parse("[tools]\ncompress_video = \"Max\""),
+            Err(ConfigError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn appearance_and_notifications() {
+        let c = Config::default();
+        assert_eq!(
+            (c.appearance.accent, c.notifications.do_not_disturb),
+            (Accent::Blue, false)
+        );
+        let c = parse(
+            "[appearance]
+accent = \"graphite\"
+[notifications]
+do_not_disturb = true
+",
+        )
+        .unwrap();
+        assert_eq!(
+            (c.appearance.accent, c.notifications.do_not_disturb),
+            (Accent::Graphite, true)
+        );
+        assert_eq!(parse(&toml::to_string_pretty(&c).unwrap()), Ok(c));
+        assert!(default_toml().contains("accent = \"blue\""));
+    }
+
+    #[test]
+    fn accent_invalid_is_parse_error() {
+        assert!(matches!(
+            parse(
+                "[appearance]
+accent = \"Blue\""
+            ),
+            Err(ConfigError::Parse(_))
+        ));
+        assert!(matches!(
+            parse(
+                "[appearance]
+accent = \"teal\""
+            ),
             Err(ConfigError::Parse(_))
         ));
     }

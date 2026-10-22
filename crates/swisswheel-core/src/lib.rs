@@ -1,5 +1,6 @@
 //! OS-independent logic for SwissWheel.
 
+pub mod appearance;
 pub mod catalog;
 pub mod config;
 pub mod drag;
