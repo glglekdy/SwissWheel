@@ -1677,11 +1677,14 @@ impl AppState {
         );
     }
 
+    /// A check's report: the local one first, then (if it went online)
+    /// the one with the newest release, which ends the check. When both
+    /// arrive before this runs, the second message finds the slot empty.
     fn on_essentials_checked(&mut self) {
-        self.checking = false;
         let Some(report) = self.status_slot.lock().unwrap().take() else {
             return;
         };
+        self.checking = !report.last;
         self.essentials.installed = Some(report.installed);
         self.own_dir = report.own_dir;
         self.system_ffmpeg = report.system;
