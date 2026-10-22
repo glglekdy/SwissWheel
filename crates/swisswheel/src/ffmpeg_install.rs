@@ -36,6 +36,14 @@ pub enum Outcome {
     Declined,
 }
 
+#[derive(Debug, PartialEq)]
+pub enum RemoveOutcome {
+    Removed,
+    /// A file couldn't be deleted (in use); the rest are gone.
+    Failed,
+    Declined,
+}
+
 /// Shared with the UI thread: download fraction (0..=10000) and, once
 /// confirmed, the release tag (the progress row's name).
 #[derive(Default)]
@@ -253,6 +261,49 @@ fn move_into(partial: &Path, target: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The names `move_into` puts in an install folder, the only files removed.
+const INSTALLED: [&str; 3] = ["ffmpeg.exe", "ffprobe.exe", "LICENSE"];
+
+/// After the user confirms `prompt`, deletes the app's own copy from each
+/// of `dirs`, and each folder left empty; anything else stays. Blocks.
+pub fn remove(dirs: &[PathBuf], prompt: &str, ui: &dyn Ui) -> RemoveOutcome {
+    if !ui.confirm(prompt) {
+        log_info!("FFmpeg 제거: 사용자가 취소했습니다");
+        return RemoveOutcome::Declined;
+    }
+    let mut failed = false;
+    for dir in dirs {
+        for name in INSTALLED {
+            let path = dir.join(name);
+            match fs::remove_file(&path) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                    log_error!("FFmpeg: {}를 지우지 못했습니다: {e}", path.display());
+                    failed = true;
+                }
+                _ => {}
+            }
+        }
+        // Fails while other files remain, which then stay with their folder.
+        let _ = fs::remove_dir(dir);
+    }
+    if failed {
+        RemoveOutcome::Failed
+    } else {
+        log_info!("FFmpeg를 지웠습니다");
+        RemoveOutcome::Removed
+    }
+}
+
+/// `dirs` with `prefer` first: an update goes where the old copy is.
+fn preferring(dirs: Vec<PathBuf>, prefer: Option<&Path>) -> Vec<PathBuf> {
+    let Some(prefer) = prefer else {
+        return dirs;
+    };
+    std::iter::once(prefer.to_path_buf())
+        .chain(dirs.into_iter().filter(|d| d != prefer))
+        .collect()
+}
+
 /// The releases endpoint; debug builds may point it elsewhere with
 /// `SWISSWHEEL_FFMPEG_URL` (a local server).
 pub fn endpoint() -> String {
@@ -272,20 +323,48 @@ pub struct Handle {
 /// Spawns the download thread; when done it stores the outcome in `slot`
 /// and posts `msg` to `hwnd`. The app never joins it: on exit the thread
 /// ends with the process, and the next start removes its scratch folder.
-pub fn spawn(hwnd: isize, msg: u32, slot: Arc<Mutex<Option<Outcome>>>) -> Handle {
+/// `prefer`: the folder to install into if it can be written (an update).
+pub fn spawn(
+    hwnd: isize,
+    msg: u32,
+    slot: Arc<Mutex<Option<Outcome>>>,
+    prefer: Option<PathBuf>,
+) -> Handle {
     let progress = Arc::new(Progress::default());
     let shared = Arc::clone(&progress);
     std::thread::spawn(move || {
         let ui = MessageBoxUi {
             title: DIALOG_TITLE,
         };
-        let outcome = run(&endpoint(), &install_dirs(), &ui, &shared);
+        let dirs = preferring(install_dirs(), prefer.as_deref());
+        let outcome = run(&endpoint(), &dirs, &ui, &shared);
         *slot.lock().unwrap() = Some(outcome);
         unsafe {
             let _ = PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(0), LPARAM(0));
         }
     });
     Handle { progress }
+}
+
+/// Spawns the remove thread: confirms `prompt`, removes from
+/// `install_dirs()`, stores the outcome in `slot`, and posts `msg`.
+#[allow(dead_code)] // wired in Task 6
+pub fn spawn_remove(
+    hwnd: isize,
+    msg: u32,
+    slot: Arc<Mutex<Option<RemoveOutcome>>>,
+    prompt: String,
+) {
+    std::thread::spawn(move || {
+        let ui = MessageBoxUi {
+            title: DIALOG_TITLE,
+        };
+        let outcome = remove(&install_dirs(), &prompt, &ui);
+        *slot.lock().unwrap() = Some(outcome);
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(0), LPARAM(0));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -563,5 +642,90 @@ mod tests {
         assert!(!partial_path(&dirs[0]).exists());
         assert!(!partial_path(&dirs[1]).exists());
         cleanup(&dirs); // nothing left: no panic
+    }
+
+    fn installed_in(dir: &Path) {
+        fs::create_dir_all(dir).unwrap();
+        for f in ["ffmpeg.exe", "ffprobe.exe", "LICENSE"] {
+            fs::write(dir.join(f), b"x").unwrap();
+        }
+    }
+
+    #[test]
+    fn remove_clears_both_install_dirs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dirs = vec![
+            tmp.path().join("앱").join("ffmpeg"),
+            tmp.path().join("로컬").join("ffmpeg"),
+        ];
+        dirs.iter().for_each(|d| installed_in(d));
+        let ui = FakeUi::new(true);
+        assert_eq!(remove(&dirs, "지울까요?", &ui), RemoveOutcome::Removed);
+        assert_eq!(*ui.confirms.borrow(), ["지울까요?"]);
+        assert!(dirs.iter().all(|d| !d.exists()));
+    }
+
+    #[test]
+    fn remove_keeps_other_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ffmpeg");
+        installed_in(&dir);
+        fs::write(dir.join("내 메모.txt"), b"keep").unwrap();
+        assert_eq!(
+            remove(std::slice::from_ref(&dir), "p", &FakeUi::new(true)),
+            RemoveOutcome::Removed
+        );
+        assert_eq!(names(&dir), ["내 메모.txt"]);
+    }
+
+    #[test]
+    fn remove_declined_or_with_nothing_there() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ffmpeg");
+        installed_in(&dir);
+        assert_eq!(
+            remove(std::slice::from_ref(&dir), "p", &FakeUi::new(false)),
+            RemoveOutcome::Declined
+        );
+        assert_eq!(names(&dir), ["LICENSE", "ffmpeg.exe", "ffprobe.exe"]);
+        assert_eq!(
+            remove(&[tmp.path().join("없음")], "p", &FakeUi::new(true)),
+            RemoveOutcome::Removed
+        );
+    }
+
+    #[test]
+    fn remove_reports_a_file_it_cannot_delete() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ffmpeg");
+        installed_in(&dir);
+        // std shares delete by default; share nothing, as a running exe would.
+        let open = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(dir.join("ffprobe.exe"))
+            .unwrap();
+        assert_eq!(
+            remove(std::slice::from_ref(&dir), "p", &FakeUi::new(true)),
+            RemoveOutcome::Failed
+        );
+        drop(open);
+        assert_eq!(names(&dir), ["ffprobe.exe"]); // the rest went; a retry finishes
+    }
+
+    #[test]
+    fn update_goes_to_the_preferred_dir() {
+        let (a, b) = (PathBuf::from(r"C:\a\ffmpeg"), PathBuf::from(r"C:\b\ffmpeg"));
+        assert_eq!(
+            preferring(vec![a.clone(), b.clone()], Some(&b)),
+            [b.clone(), a.clone()]
+        );
+        assert_eq!(
+            preferring(vec![a.clone(), b.clone()], None),
+            [a.clone(), b.clone()]
+        );
+        let c = PathBuf::from(r"D:\c\ffmpeg");
+        assert_eq!(preferring(vec![a.clone()], Some(&c)), [c, a]);
     }
 }

@@ -1589,6 +1589,7 @@ impl AppState {
                     self.hwnd.0 as isize,
                     WM_APP_FFMPEG,
                     Arc::clone(&self.ffmpeg_slot),
+                    None,
                 ));
                 self.update_busy();
             }

@@ -253,6 +253,15 @@ impl Runner {
     }
 }
 
+impl Runner {
+    /// Drops the FFmpeg found earlier (it was removed or replaced), so the
+    /// next media job looks again.
+    #[allow(dead_code)] // wired in Task 6
+    pub fn forget_tools(&self) {
+        *self.shared.tools.lock().unwrap() = None;
+    }
+}
+
 impl Shared {
     fn tools(&self) -> Option<Tools> {
         let mut tools = self.tools.lock().unwrap();
@@ -595,6 +604,31 @@ mod tests {
         runner.shutdown();
         assert!(after.failures.is_empty(), "{:?}", after.failures);
         assert_eq!(after.outputs, vec![dir.path().join("clip.mp3")]);
+    }
+
+    #[test]
+    fn forgotten_ffmpeg_is_looked_up_again() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make(dir.path(), "clip.mp4", CLIP);
+        let installed = Arc::new(AtomicBool::new(true));
+        let (tx, rx) = mpsc::channel();
+        let tx = Mutex::new(tx);
+        let flag = Arc::clone(&installed);
+        let runner = Runner::with_locator(
+            1,
+            1,
+            Quality::default(),
+            Box::new(move |r| tx.lock().unwrap().send(r).unwrap()),
+            Box::new(move || flag.load(Ordering::Relaxed).then(ffmpeg::locate).flatten()),
+        );
+        runner.submit(job(Operation::Convert(Format::Mp3), vec![clip.clone()]));
+        assert!(rx.recv().unwrap().failures.is_empty());
+        installed.store(false, Ordering::Relaxed); // the download panel removed it
+        runner.forget_tools();
+        runner.submit(job(Operation::Convert(Format::Mp3), vec![clip]));
+        let after = rx.recv().unwrap();
+        runner.shutdown();
+        assert_eq!(after.failures, ["clip.mp4: FFmpeg를 찾을 수 없습니다"]);
     }
 
     #[test]
