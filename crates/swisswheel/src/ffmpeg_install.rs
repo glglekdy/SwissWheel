@@ -177,10 +177,16 @@ pub fn partial_path(target: &Path) -> PathBuf {
     target.with_file_name("ffmpeg.partial")
 }
 
-/// Removes what an interrupted download left beside each install folder.
+/// Removes what an interrupted download left beside each install folder,
+/// and the copies an update or removal set aside while they ran; a folder
+/// that ends up empty goes too.
 pub fn cleanup(dirs: &[PathBuf]) {
     for dir in dirs {
         remove_partial(&partial_path(dir));
+        for name in INSTALLED {
+            let _ = fs::remove_file(aside_path(&dir.join(name)));
+        }
+        let _ = fs::remove_dir(dir);
     }
 }
 
@@ -253,12 +259,39 @@ fn extract(zip: &Path, into: &Path) -> io::Result<()> {
 fn move_into(partial: &Path, target: &Path) -> io::Result<()> {
     fs::create_dir_all(target)?;
     for name in ["ffprobe.exe", "LICENSE", "ffmpeg.exe"] {
-        let from = partial.join(name);
-        if from.is_file() {
-            fs::rename(&from, target.join(name))?;
+        let (from, to) = (partial.join(name), target.join(name));
+        if !from.is_file() {
+            continue;
+        }
+        if let Err(e) = fs::rename(&from, &to) {
+            // A conversion that started meanwhile runs the old one.
+            delete_or_set_aside(&to).map_err(|_| e)?;
+            fs::rename(&from, &to)?;
         }
     }
     Ok(())
+}
+
+/// Where a file a running conversion holds is moved to; `cleanup` deletes
+/// it once it is free.
+fn aside_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().unwrap_or_default().to_os_string();
+    name.push(".old");
+    path.with_file_name(name)
+}
+
+/// Deletes `path`, or renames it aside when it is a running exe (which
+/// Windows lets be renamed, not deleted). Gone already counts as done.
+fn delete_or_set_aside(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => {
+            let aside = aside_path(path);
+            let _ = fs::remove_file(&aside);
+            fs::rename(path, &aside).map_err(|_| e)
+        }
+    }
 }
 
 /// The names `move_into` puts in an install folder, the only files removed.
@@ -275,12 +308,9 @@ pub fn remove(dirs: &[PathBuf], prompt: &str, ui: &dyn Ui) -> RemoveOutcome {
     for dir in dirs {
         for name in INSTALLED {
             let path = dir.join(name);
-            match fs::remove_file(&path) {
-                Err(e) if e.kind() != io::ErrorKind::NotFound => {
-                    log_error!("FFmpeg: {}를 지우지 못했습니다: {e}", path.display());
-                    failed = true;
-                }
-                _ => {}
+            if let Err(e) = delete_or_set_aside(&path) {
+                log_error!("FFmpeg: {}를 지우지 못했습니다: {e}", path.display());
+                failed = true;
             }
         }
         // Fails while other files remain, which then stay with their folder.
@@ -726,5 +756,55 @@ mod tests {
         );
         let c = PathBuf::from(r"D:\c\ffmpeg");
         assert_eq!(preferring(vec![a.clone()], Some(&c)), [c, a]);
+    }
+
+    /// A copy of ping.exe running as `path`, the way a conversion holds
+    /// `ffmpeg.exe`: Windows won't delete or replace it, only rename it.
+    fn running_as(path: &Path) -> std::process::Child {
+        fs::copy(r"C:\Windows\System32\PING.EXE", path).unwrap();
+        std::process::Command::new(path)
+            .args(["-n", "30", "127.0.0.1"])
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap()
+    }
+
+    fn stop(mut child: std::process::Child) {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn update_replaces_a_running_ffmpeg() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (partial, target) = (tmp.path().join("partial"), tmp.path().join("ffmpeg"));
+        fs::create_dir_all(&partial).unwrap();
+        for f in ["ffmpeg.exe", "ffprobe.exe"] {
+            fs::write(partial.join(f), b"new").unwrap();
+        }
+        installed_in(&target);
+        let child = running_as(&target.join("ffmpeg.exe"));
+        move_into(&partial, &target).unwrap();
+        assert_eq!(fs::read(target.join("ffmpeg.exe")).unwrap(), b"new");
+        assert_eq!(fs::read(target.join("ffprobe.exe")).unwrap(), b"new");
+        stop(child);
+        cleanup(std::slice::from_ref(&target));
+        assert_eq!(names(&target), ["LICENSE", "ffmpeg.exe", "ffprobe.exe"]);
+    }
+
+    #[test]
+    fn remove_sets_a_running_ffmpeg_aside() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ffmpeg");
+        installed_in(&dir);
+        let child = running_as(&dir.join("ffmpeg.exe"));
+        assert_eq!(
+            remove(std::slice::from_ref(&dir), "p", &FakeUi::new(true)),
+            RemoveOutcome::Removed
+        );
+        assert_eq!(names(&dir), ["ffmpeg.exe.old"]); // locate no longer finds it
+        stop(child);
+        cleanup(std::slice::from_ref(&dir));
+        assert!(!dir.exists());
     }
 }
