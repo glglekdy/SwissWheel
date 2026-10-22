@@ -37,13 +37,25 @@ pub struct Tools {
     pub ffprobe: PathBuf,
 }
 
-/// The bundled copy in `<exe folder>\ffmpeg\`, else one on `PATH`.
-pub fn locate() -> Option<Tools> {
-    let exe = std::env::current_exe().ok()?;
-    locate_in(exe.parent()?, std::env::var_os("PATH").as_deref())
+/// Where the app keeps its own FFmpeg, in the order it looks:
+/// `<exe folder>\ffmpeg\`, then `%LOCALAPPDATA%\SwissWheel\ffmpeg\` (where the
+/// download tile installs when the exe's folder can't be written).
+pub fn install_dirs() -> Vec<PathBuf> {
+    let app = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.join("ffmpeg")));
+    let local = std::env::var_os("LOCALAPPDATA")
+        .map(|dir| PathBuf::from(dir).join("SwissWheel").join("ffmpeg"));
+    app.into_iter().chain(local).collect()
 }
 
-pub fn locate_in(app_dir: &Path, path_var: Option<&OsStr>) -> Option<Tools> {
+/// The app's own copy (see [`install_dirs`]), else one on `PATH`.
+pub fn locate() -> Option<Tools> {
+    locate_in(&install_dirs(), std::env::var_os("PATH").as_deref())
+}
+
+/// The first of `dirs`, then of `PATH`, that has both tools.
+pub fn locate_in(dirs: &[PathBuf], path_var: Option<&OsStr>) -> Option<Tools> {
     let in_dir = |dir: &Path| {
         let tools = Tools {
             ffmpeg: dir.join("ffmpeg.exe"),
@@ -51,7 +63,8 @@ pub fn locate_in(app_dir: &Path, path_var: Option<&OsStr>) -> Option<Tools> {
         };
         (tools.ffmpeg.is_file() && tools.ffprobe.is_file()).then_some(tools)
     };
-    in_dir(&app_dir.join("ffmpeg"))
+    dirs.iter()
+        .find_map(|dir| in_dir(dir))
         .or_else(|| std::env::split_paths(path_var?).find_map(|dir| in_dir(&dir)))
 }
 
@@ -404,35 +417,51 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn locates_bundled_before_path() {
-        let (app, path) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
-        let touch = |dir: &Path| {
-            for n in ["ffmpeg.exe", "ffprobe.exe"] {
-                std::fs::write(dir.join(n), b"").unwrap();
+    fn locate_prefers_install_dirs_in_order() {
+        let tempdir = || tempfile::tempdir().unwrap();
+        let (app, local, path) = (tempdir(), tempdir(), tempdir());
+        let fill = |d: &Path, names: &[&str]| {
+            std::fs::create_dir_all(d).unwrap();
+            for n in names {
+                std::fs::write(d.join(n), b"").unwrap();
             }
         };
-        touch(path.path());
+        let both = ["ffmpeg.exe", "ffprobe.exe"];
+        fill(path.path(), &both);
         let path_var = std::env::join_paths([path.path()]).unwrap();
+        let dirs = [app.path().join("ffmpeg"), local.path().join("ffmpeg")];
+        assert_eq!(locate_in(&dirs, None), None);
         assert_eq!(
-            locate_in(app.path(), Some(&path_var)).unwrap().ffmpeg,
+            locate_in(&dirs, Some(&path_var)).unwrap().ffmpeg,
             path.path().join("ffmpeg.exe")
         );
-        let bundled = app.path().join("ffmpeg");
-        std::fs::create_dir(&bundled).unwrap();
-        std::fs::write(bundled.join("ffmpeg.exe"), b"").unwrap(); // no ffprobe yet → still PATH
+        fill(&dirs[1], &both);
         assert_eq!(
-            locate_in(app.path(), Some(&path_var)).unwrap().ffmpeg,
-            path.path().join("ffmpeg.exe")
+            locate_in(&dirs, Some(&path_var)).unwrap().ffmpeg,
+            dirs[1].join("ffmpeg.exe")
         );
-        touch(&bundled);
+        fill(&dirs[0], &["ffmpeg.exe"]); // no ffprobe: skipped
         assert_eq!(
-            locate_in(app.path(), Some(&path_var)).unwrap(),
+            locate_in(&dirs, Some(&path_var)).unwrap().ffmpeg,
+            dirs[1].join("ffmpeg.exe")
+        );
+        fill(&dirs[0], &both);
+        assert_eq!(
+            locate_in(&dirs, Some(&path_var)).unwrap(),
             Tools {
-                ffmpeg: bundled.join("ffmpeg.exe"),
-                ffprobe: bundled.join("ffprobe.exe")
+                ffmpeg: dirs[0].join("ffmpeg.exe"),
+                ffprobe: dirs[0].join("ffprobe.exe")
             }
         );
-        assert_eq!(locate_in(tempfile::tempdir().unwrap().path(), None), None);
+    }
+
+    #[test]
+    fn install_dirs_are_app_then_local() {
+        let dirs = install_dirs();
+        let exe = std::env::current_exe().unwrap();
+        assert_eq!(dirs[0], exe.parent().unwrap().join("ffmpeg"));
+        let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap());
+        assert_eq!(dirs[1], local.join("SwissWheel").join("ffmpeg"));
     }
 
     #[test]
