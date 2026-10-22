@@ -11,6 +11,7 @@ pub mod media;
 pub mod menu;
 pub mod menu_geometry;
 pub mod naming;
+pub mod notices;
 pub mod options;
 pub mod restart;
 pub mod session;
