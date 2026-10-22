@@ -77,8 +77,18 @@ pub fn cleanup(exe: &Path) {
 
 /// Starts `exe --after-update <this pid>`, so it waits for us to exit.
 pub fn launch_after_update(exe: &Path) -> io::Result<()> {
+    launch_with(exe, "--after-update")
+}
+
+/// Starts `exe --restarted <this pid>` (the restart tile), so it waits for
+/// us to exit.
+pub fn launch_restarted(exe: &Path) -> io::Result<()> {
+    launch_with(exe, swisswheel_core::restart::ARG)
+}
+
+fn launch_with(exe: &Path, arg: &str) -> io::Result<()> {
     std::process::Command::new(exe)
-        .arg("--after-update")
+        .arg(arg)
         .arg(std::process::id().to_string())
         .spawn()
         .map(drop)
@@ -107,6 +117,12 @@ mod tests {
         let exe = dir.join("swisswheel.exe");
         fs::write(&exe, b"old").unwrap();
         exe
+    }
+
+    #[test]
+    fn launch_restarted_reports_a_missing_exe() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(launch_restarted(&dir.path().join("없음.exe")).is_err());
     }
 
     #[test]

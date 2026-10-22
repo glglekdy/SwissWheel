@@ -61,6 +61,8 @@
 | M51 | M49를 받는 도중 트레이 → 종료 → 다시 실행 | 1~2초 안에 종료. 다시 켜면 `ffmpeg.partial` 없음, `ffmpeg\` 없음 |
 | M52 | 디버그 빌드 + `SWISSWHEEL_PREVIEW=ffmpeg`, `SWISSWHEEL_FFMPEG_URL`이 digest를 틀리게 적은 로컬 JSON을 가리킴 → [예] | "받은 FFmpeg 파일이 손상되었습니다" 알림. `ffmpeg\`·`ffmpeg.partial` 없음 |
 | M53 | exe를 쓸 수 없는 폴더(예: `C:\Program Files\SwissWheel`)에 두고 M49 | 확인 창의 설치 위치가 `%LOCALAPPDATA%\SwissWheel\ffmpeg`. 그곳에 설치되고 변환이 됨 |
+| M54 | 메뉴 → 재시작 | 트레이 아이콘이 잠깐 사라졌다 다시 생기고 "다시 시작했습니다" 알림. 트레이 아이콘은 하나뿐. 설정 그대로, 레지스트리 `HKCU\Software\Microsoft\Windows\CurrentVersion\Run`의 SwissWheel 값이 바뀌지 않음. 로그에 "재시작 뒤 시작 (이전 프로세스 종료: true)" |
+| M55 | 긴 영상 변환 중 메뉴 → 재시작. M49를 받는 도중 메뉴 → 재시작 | 각각 "진행 중인 변환이 끝난 뒤 다시 눌러 주세요", "업데이트나 다운로드가 끝난 뒤 다시 눌러 주세요" 알림. 앱은 그대로 실행 중 |
 
 ## 결과 기록
 

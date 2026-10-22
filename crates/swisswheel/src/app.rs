@@ -15,6 +15,7 @@ use swisswheel_core::ffmpeg_release;
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession, Tile};
 use swisswheel_core::menu_geometry;
+use swisswheel_core::restart;
 use swisswheel_core::session::{Selection, WheelSession};
 use swisswheel_core::settings::{self, Dir, SettingItem};
 use swisswheel_core::summary::{busy_tooltip, job_summary, selection_label};
@@ -164,10 +165,14 @@ fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
 }
 
 pub fn run() -> Result<()> {
-    // Started by an update: the old app holds the single-instance mutex
-    // until it exits, so wait for it before taking the mutex.
-    let after_update = release::after_update_pid(std::env::args());
-    let old_exited = after_update.map(|pid| swap::wait_for_exit(pid, AFTER_UPDATE_WAIT));
+    // Started by an update or the restart tile: the old app holds the
+    // single-instance mutex until it exits, so wait for it before taking it.
+    let args: Vec<String> = std::env::args().collect();
+    let after_update = release::after_update_pid(args.clone());
+    let restarted = restart::restarted_pid(args);
+    let old_exited = after_update
+        .or(restarted)
+        .map(|pid| swap::wait_for_exit(pid, AFTER_UPDATE_WAIT));
     let _instance = unsafe { CreateMutexW(None, true, w!("Local\\SwissWheel.SingleInstance"))? };
     // A debug preview may run beside an installed copy: it only draws.
     let previewing = previewing(std::env::var("SWISSWHEEL_PREVIEW").ok());
@@ -199,7 +204,12 @@ pub fn run() -> Result<()> {
     let hwnd = create_host_window()?;
     let tray = Tray::new(hwnd)?;
     if let Some(exited) = old_exited {
-        log_info!("업데이트 뒤 시작 (이전 프로세스 종료: {exited})");
+        let after = if restarted.is_some() {
+            "재시작"
+        } else {
+            "업데이트"
+        };
+        log_info!("{after} 뒤 시작 (이전 프로세스 종료: {exited})");
     }
     if let Ok(exe) = std::env::current_exe() {
         swap::cleanup(&exe);
@@ -207,6 +217,9 @@ pub fn run() -> Result<()> {
     ffmpeg_install::cleanup(&ffmpeg_tools::install_dirs());
     if after_update.is_some() {
         tray.notify(release::TITLE, &text::updated(update::current()));
+    }
+    if restarted.is_some() {
+        tray.notify(restart::TITLE, restart::text::RESTARTED);
     }
     if let Some(w) = &warning {
         log_error!("설정 파일 오류: {w}");
@@ -589,6 +602,10 @@ impl AppState {
             MenuAction::Notice(Tile::Download) => {
                 self.close_menu();
                 self.start_ffmpeg();
+            }
+            MenuAction::Notice(Tile::Restart) => {
+                self.close_menu();
+                self.restart();
             }
             MenuAction::Notice(tile) => {
                 self.close_menu();
@@ -1175,6 +1192,30 @@ impl AppState {
             Some(O::InstallFailed) => self.tray.warn(title, t::INSTALL_FAILED),
         }
         self.update_busy();
+    }
+
+    /// Starts a fresh copy that waits for this one to exit, then closes
+    /// normally (posted, like `apply_swap`).
+    fn restart(&mut self) {
+        let background =
+            self.update.is_some() || self.ffmpeg.is_some() || self.pending_swap.is_some();
+        match restart::on_tile(self.active_jobs, background) {
+            TileDecision::Refuse(notice) => self.tray.notify(restart::TITLE, notice),
+            TileDecision::Start => {
+                match std::env::current_exe().and_then(|exe| swap::launch_restarted(&exe)) {
+                    Ok(()) => {
+                        log_info!("재시작합니다");
+                        unsafe {
+                            let _ = PostMessageW(Some(self.hwnd), WM_CLOSE, WPARAM(0), LPARAM(0));
+                        }
+                    }
+                    Err(e) => {
+                        log_error!("재시작 실패: {e}");
+                        self.tray.warn(restart::TITLE, restart::text::FAILED);
+                    }
+                }
+            }
+        }
     }
 
     /// Puts the verified download in place and starts it; this app then
