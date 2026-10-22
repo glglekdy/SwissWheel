@@ -333,6 +333,19 @@ impl Notices {
         Some(expiry.min(now + BAR_STEP))
     }
 
+    /// Empties the stack and the held queue, returning the notices of the
+    /// cards not fading out and the held ones, oldest first (to show them
+    /// some other way).
+    pub fn take_all(&mut self, now: Instant) -> Vec<Notice> {
+        self.hovered = None;
+        std::mem::take(&mut self.cards)
+            .into_iter()
+            .filter(|c| c.closing_start(now).is_none())
+            .map(|c| c.notice)
+            .chain(std::mem::take(&mut self.held))
+            .collect()
+    }
+
     /// Restart a live card's timer as if posted at `now`, without a new appear animation.
     pub fn restart(&mut self, id: NoticeId, now: Instant) {
         if let Some(card) = self.cards.iter_mut().find(|c| c.id == id)
@@ -565,6 +578,34 @@ mod tests {
         let t = t0 + ms(9100);
         n.tick(t);
         assert!(n.cards(t)[0].closing.is_some());
+    }
+
+    #[test]
+    fn take_all_returns_live_and_held_newest_last() {
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        let mut a = done("A");
+        a.action = Some(NoticeAction::OpenFolder(PathBuf::from("C:/a")));
+        let a_id = n.post(a.clone(), t0);
+        let gone = n.post(done("gone"), t0);
+        n.post(done("B"), t0);
+        n.click(gone, t0); // fading: not taken
+        let taken = n.take_all(t0 + ms(10));
+        assert_eq!(
+            taken.iter().map(|x| x.title.as_str()).collect::<Vec<_>>(),
+            ["A", "B"]
+        );
+        assert_eq!(taken[0].action, a.action);
+        assert!(n.cards(t0 + ms(10)).is_empty());
+        assert_eq!(n.click(a_id, t0 + ms(20)), None);
+        // Held notices come back too.
+        n.set_quiet(true, t0 + ms(30));
+        n.post(done("H"), t0 + ms(40));
+        let taken = n.take_all(t0 + ms(50));
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].title, "H");
+        n.set_quiet(false, t0 + ms(60));
+        assert!(n.cards(t0 + ms(60)).is_empty());
     }
 
     #[test]

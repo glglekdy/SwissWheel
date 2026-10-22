@@ -19,7 +19,9 @@ use swisswheel_core::notices::{Notice, NoticeAction, NoticeId, NoticeKind, Notic
 use swisswheel_core::restart;
 use swisswheel_core::session::{Selection, WheelSession};
 use swisswheel_core::settings::{self, Dir, SettingItem};
-use swisswheel_core::summary::{busy_tooltip, idle_tooltip, job_summary, selection_label};
+use swisswheel_core::summary::{
+    balloon_body, busy_tooltip, idle_tooltip, job_summary, selection_label,
+};
 use swisswheel_core::update::{self as release, ReadyDecision, TileDecision, Version, text};
 use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{
@@ -132,7 +134,10 @@ pub(crate) struct AppState {
     notice_failures: u8,
     /// The progress card's rows, as `update_busy` last read them.
     progress_rows: Vec<ProgressRow>,
-    /// The last frame showed the progress card (the last job's card may take its slot).
+    /// `progress_rows` lists files of running jobs (not only a download).
+    progress_jobs: bool,
+    /// The last frame showed job rows on the progress card (the last job's
+    /// card may take its slot).
     progress_shown: bool,
     /// `TIMER_QUIET` runs.
     quiet_watch: bool,
@@ -336,6 +341,7 @@ pub fn run() -> Result<()> {
         notices,
         notice_failures: 0,
         progress_rows: Vec::new(),
+        progress_jobs: false,
         progress_shown: false,
         quiet_watch: false,
         last_result: None,
@@ -1366,15 +1372,17 @@ impl AppState {
         id
     }
 
-    /// The balloon fallback; clicking it opens the notice's folder, if any.
+    /// The balloon fallback; clicking it opens the notice's folder, if any,
+    /// and its body says so (the card's action line in balloon form).
     fn balloon(&mut self, notice: &Notice) {
         self.last_output = match &notice.action {
             Some(NoticeAction::OpenFolder(path)) => Some(path.clone()),
             _ => None,
         };
+        let body = balloon_body(&notice.body, self.last_output.is_some());
         match notice.kind {
-            NoticeKind::Failed | NoticeKind::Warning => self.tray.warn(&notice.title, &notice.body),
-            _ => self.tray.notify(&notice.title, &notice.body),
+            NoticeKind::Failed | NoticeKind::Warning => self.tray.warn(&notice.title, &body),
+            _ => self.tray.notify(&notice.title, &body),
         }
     }
 
@@ -1431,7 +1439,9 @@ impl AppState {
         match window.render(rows, &cards, self.config.appearance.accent) {
             Ok(()) => {
                 self.notice_failures = 0;
-                self.progress_shown = !rows.is_empty();
+                // Rows of an update or FFmpeg download don't count: that
+                // card stays up after the last job.
+                self.progress_shown = !quiet && self.progress_jobs;
             }
             Err(e) => {
                 self.notice_failures += 1;
@@ -1445,15 +1455,15 @@ impl AppState {
                         let _ = KillTimer(Some(self.hwnd), TIMER_QUIET);
                     }
                     self.quiet_watch = false;
-                    // The newest card would be lost with the window.
-                    if let Some(card) = cards.iter().find(|c| c.closing.is_none()) {
-                        let notice = Notice {
-                            kind: card.kind,
-                            title: card.title.clone(),
-                            body: card.body.clone(),
-                            action: None,
-                        };
-                        self.balloon(&notice);
+                    // The newest card (shown or held) goes on as a balloon,
+                    // its folder and all; a balloon replaces the one before,
+                    // so the rest are only logged.
+                    let mut left = self.notices.take_all(now);
+                    if let Some(newest) = left.pop() {
+                        self.balloon(&newest);
+                    }
+                    if !left.is_empty() {
+                        log_error!("알림 {}개를 표시하지 못하고 버렸습니다", left.len());
                     }
                     return;
                 }
@@ -1668,6 +1678,7 @@ impl AppState {
             Some(runner) if active && self.config.progress.window => runner.rows(),
             _ => Vec::new(),
         };
+        self.progress_jobs = !rows.is_empty();
         if self.config.progress.window {
             rows.extend(download);
         }

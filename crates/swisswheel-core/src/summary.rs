@@ -8,25 +8,32 @@ use crate::catalog::Operation;
 const OPEN_HINT: &str = "클릭하면 폴더를 엽니다";
 
 /// (title, body) for a job where `succeeded` files worked and `failures`
-/// holds one user-facing message per failed file.
+/// holds one user-facing message per failed file. The body has no click
+/// hint: cards draw their own action line, balloons add it (`balloon_body`).
 pub fn job_summary(op: &Operation, succeeded: usize, failures: &[String]) -> (String, String) {
     let label = match op {
         Operation::Convert(f) => format!("{} 변환", f.label()),
         other => other.label().to_string(),
     };
     let Some(first_error) = failures.first() else {
-        return (
-            format!("{label} 완료"),
-            format!("파일 {succeeded}개 · {OPEN_HINT}"),
-        );
+        return (format!("{label} 완료"), format!("파일 {succeeded}개"));
     };
     let title = format!("{label}: {}개 실패", failures.len());
     let body = if succeeded > 0 {
-        format!("{first_error}\n성공 {succeeded}개 · {OPEN_HINT}")
+        format!("{first_error}\n성공 {succeeded}개")
     } else {
         first_error.clone()
     };
     (title, body)
+}
+
+/// A notice's body as a balloon says it: the click hint added when clicking opens a folder.
+pub fn balloon_body(body: &str, opens_folder: bool) -> String {
+    if opens_folder {
+        format!("{body} · {OPEN_HINT}")
+    } else {
+        body.to_string()
+    }
 }
 
 /// One progress-window row: "긴영상.mp4 → WEBM", or "a.mp4 · 영상 압축" for tools.
@@ -203,7 +210,8 @@ mod tests {
     fn all_succeeded() {
         let (t, b) = job_summary(&Operation::Convert(Format::Png), 3, &[]);
         assert_eq!(t, "PNG 변환 완료");
-        assert_eq!(b, "파일 3개 · 클릭하면 폴더를 엽니다");
+        // The card draws its own action line; the body carries no click hint.
+        assert_eq!(b, "파일 3개");
         let (t, _) = job_summary(&Operation::Tool(Tool::Shrink), 1, &[]);
         assert_eq!(t, "축소 완료");
     }
@@ -216,11 +224,25 @@ mod tests {
         ];
         let (t, b) = job_summary(&Operation::Convert(Format::Jpg), 1, &errs);
         assert_eq!(t, "JPG 변환: 2개 실패");
-        assert_eq!(
-            b,
-            "사진.png: 이미지를 읽을 수 없습니다\n성공 1개 · 클릭하면 폴더를 엽니다"
-        );
+        assert_eq!(b, "사진.png: 이미지를 읽을 수 없습니다\n성공 1개");
         let (_, b) = job_summary(&Operation::Convert(Format::Jpg), 0, &errs[..1]);
         assert_eq!(b, "사진.png: 이미지를 읽을 수 없습니다");
+    }
+
+    #[test]
+    fn balloon_body_keeps_the_click_hint() {
+        // Balloons read exactly as before cards had their own action line.
+        assert_eq!(
+            balloon_body("파일 3개", true),
+            "파일 3개 · 클릭하면 폴더를 엽니다"
+        );
+        assert_eq!(
+            balloon_body("사진.png: 이미지를 읽을 수 없습니다\n성공 1개", true),
+            "사진.png: 이미지를 읽을 수 없습니다\n성공 1개 · 클릭하면 폴더를 엽니다"
+        );
+        assert_eq!(
+            balloon_body("업데이트 확인 실패", false),
+            "업데이트 확인 실패"
+        );
     }
 }

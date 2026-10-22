@@ -423,6 +423,20 @@ impl NoticeWindow {
     }
 }
 
+impl Drop for NoticeWindow {
+    /// Frees the GPU surface first, then the window. At exit the owner's
+    /// destruction has already taken the window; that call just fails.
+    fn drop(&mut self) {
+        self.surface = None;
+        HITS.with_borrow_mut(Vec::clear);
+        HOVER.set(None);
+        TRACKING.set(false);
+        unsafe {
+            let _ = DestroyWindow(self.hwnd);
+        }
+    }
+}
+
 /// Rounded rectangles `[left, top, right, bottom]` joined into one region,
 /// or `None` (with nothing leaked) if GDI fails.
 fn union_region(rects: &[[i32; 4]], corner: i32) -> Option<HRGN> {
