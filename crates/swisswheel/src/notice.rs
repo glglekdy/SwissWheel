@@ -90,10 +90,6 @@ thread_local! {
 }
 
 /// Full screen, presentation mode, or similar: notices should wait.
-#[expect(
-    dead_code,
-    reason = "the app polls it once notices go through the cards"
-)]
 pub fn quiet_now() -> bool {
     matches!(
         unsafe { SHQueryUserNotificationState() },
@@ -115,6 +111,8 @@ pub struct NoticeWindow {
     /// `WS_EX_TRANSPARENT` is set: only the progress card shows, and clicks
     /// pass through it as they always have.
     click_through: bool,
+    /// Text formats for `scale`, rebuilt only when it changes.
+    formats: Option<(f32, Formats)>,
 }
 
 /// One slot of the stack, in window pixels.
@@ -187,6 +185,7 @@ impl NoticeWindow {
                 visible: false,
                 region: Vec::new(),
                 click_through: false,
+                formats: None,
             })
         }
     }
@@ -254,6 +253,15 @@ impl NoticeWindow {
         self.click_through = on;
     }
 
+    /// Moves a shown window to the work area's corner again, at the
+    /// monitor's current DPI (display, DPI, or work area changed). The
+    /// caller renders again afterwards.
+    pub fn reposition(&mut self) {
+        if self.visible {
+            self.place();
+        }
+    }
+
     /// Hides the window and frees its GPU resources (it is idle most of the time).
     pub fn hide(&mut self) {
         if self.visible {
@@ -308,7 +316,23 @@ impl NoticeWindow {
 
     fn draw(&mut self, progress: &[ProgressRow], cards: &[CardView], accent: Accent) -> Result<()> {
         let scale = self.scale;
-        let fonts = Formats::new(scale)?;
+        let fonts = match self.formats.take() {
+            Some((s, f)) if s == scale => f,
+            _ => Formats::new(scale)?,
+        };
+        let drawn = self.draw_with(&fonts, progress, cards, accent);
+        self.formats = Some((scale, fonts));
+        drawn
+    }
+
+    fn draw_with(
+        &mut self,
+        fonts: &Formats,
+        progress: &[ProgressRow],
+        cards: &[CardView],
+        accent: Accent,
+    ) -> Result<()> {
+        let scale = self.scale;
         let column = (WIDTH - 2.0 * PAD_X - ICON - ICON_GAP) * scale;
         let bodies: Vec<(NoticeId, Vec<String>)> = cards
             .iter()
@@ -353,9 +377,9 @@ impl NoticeWindow {
                 // A card growing out of the progress card is shorter than its content.
                 ctx.PushAxisAlignedClip(&p.rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 let drawn = match p.card {
-                    None => draw_progress(ctx, &fonts, progress, p.rect, &content, scale),
+                    None => draw_progress(ctx, fonts, progress, p.rect, &content, scale),
                     Some(card) => {
-                        draw_notice(surface, &fonts, card, p.body, p.rect, &content, scale)
+                        draw_notice(surface, fonts, card, p.body, p.rect, &content, scale)
                     }
                 };
                 ctx.PopAxisAlignedClip();
@@ -571,7 +595,7 @@ fn motion(card: &CardView) -> Motion {
     }
 }
 
-/// Text formats for one frame.
+/// Text formats at one scale.
 struct Formats {
     header: IDWriteTextFormat,
     row: IDWriteTextFormat,

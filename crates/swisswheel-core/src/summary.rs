@@ -64,6 +64,29 @@ pub fn busy_tooltip(active_jobs: usize, progress: Option<f32>) -> String {
     }
 }
 
+/// The tray tooltip while nothing runs: the last job's result, when there is one.
+/// Fits the tray's 128-unit tip buffer (127 UTF-16 units and a null), ending in "…" when cut.
+pub fn idle_tooltip(last_result: Option<&str>) -> String {
+    const MAX_UNITS: usize = 127;
+    let Some(title) = last_result else {
+        return "SwissWheel".to_string();
+    };
+    let full = format!("SwissWheel · 마지막 작업: {title}");
+    if full.encode_utf16().count() <= MAX_UNITS {
+        return full;
+    }
+    let mut units = 0;
+    let mut cut: String = full
+        .chars()
+        .take_while(|c| {
+            units += c.len_utf16();
+            units < MAX_UNITS // leaves one unit for "…"
+        })
+        .collect();
+    cut.push('…');
+    cut
+}
+
 /// "999 B", "1.5 KB", "12 MB": one decimal below 10, whole numbers above.
 pub fn format_size(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KB", "MB", "GB", "TB"];
@@ -151,6 +174,20 @@ mod tests {
             busy_tooltip(1, Some(1.7)),
             "SwissWheel · 작업 중 1개 · 100%"
         );
+    }
+
+    #[test]
+    fn idle_tooltip_shows_last_result() {
+        assert_eq!(idle_tooltip(None), "SwissWheel");
+        assert_eq!(
+            idle_tooltip(Some("3개 파일을 PNG로 변환했습니다")),
+            "SwissWheel · 마지막 작업: 3개 파일을 PNG로 변환했습니다"
+        );
+        let long = "가".repeat(200);
+        let tip = idle_tooltip(Some(&long));
+        assert_eq!(tip.encode_utf16().count(), 127);
+        assert!(tip.ends_with('…'));
+        assert!(tip.starts_with("SwissWheel · 마지막 작업: 가"));
     }
 
     #[test]

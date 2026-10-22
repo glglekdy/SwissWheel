@@ -15,12 +15,11 @@ use swisswheel_core::ffmpeg_release;
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession, Tile};
 use swisswheel_core::menu_geometry;
-#[cfg(debug_assertions)]
-use swisswheel_core::notices::Notices;
+use swisswheel_core::notices::{Notice, NoticeAction, NoticeId, NoticeKind, Notices};
 use swisswheel_core::restart;
 use swisswheel_core::session::{Selection, WheelSession};
 use swisswheel_core::settings::{self, Dir, SettingItem};
-use swisswheel_core::summary::{busy_tooltip, job_summary, selection_label};
+use swisswheel_core::summary::{busy_tooltip, idle_tooltip, job_summary, selection_label};
 use swisswheel_core::update::{self as release, ReadyDecision, TileDecision, Version, text};
 use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{
@@ -52,7 +51,7 @@ use crate::ffmpeg_install;
 use crate::hook::{self, Hooks, WM_APP_DRAG, WM_APP_FOREGROUND};
 use crate::jobs::{Job, JobReport, ProgressRow, Runner};
 use crate::menubar::{self, MenuBar, MenuMouse, MenuView};
-use crate::notice::{NoticeWindow, WM_APP_NOTICE};
+use crate::notice::{NoticeWindow, WM_APP_NOTICE, quiet_now};
 use crate::probe;
 use crate::tray::{Tray, WM_APP_TRAY};
 use crate::update::{self, Outcome, swap};
@@ -87,9 +86,13 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const PANEL_TICK_MS: u32 = 50;
 /// How often the tray tooltip refreshes the progress of running jobs.
 const PROGRESS_INTERVAL_MS: u32 = 500;
-/// Steps the notice cards of the `notices` preview.
-#[cfg(debug_assertions)]
+/// Fires once at the notice cards' next frame, timer-bar step, or expiry.
 const TIMER_NOTICE: usize = 10;
+/// Re-checks full screen / presentation mode while cards are shown or held.
+const TIMER_QUIET: usize = 11;
+const QUIET_INTERVAL_MS: u32 = 2000;
+/// Render failures in a row after which the notice window is given up.
+const NOTICE_FAILURES: u8 = 2;
 
 /// Shown at the top of the settings panel when config.toml couldn't be read.
 const CONFIG_NOTICE: &str = "설정 파일에 오류가 있어 저장하지 않습니다";
@@ -119,8 +122,22 @@ pub(crate) struct AppState {
     /// Foreground watch while the menu is open (it closes when another
     /// window comes forward).
     foreground_hook: Option<HWINEVENTHOOK>,
-    /// The progress card and notice cards above the tray.
-    notice_window: NoticeWindow,
+    /// The progress card and notice cards above the tray; `None` when it
+    /// couldn't be made or drawn (or `SWISSWHEEL_FORCE_BALLOON=1`): notices
+    /// then go to balloons.
+    notice_window: Option<NoticeWindow>,
+    /// The notice cards' rules and timers.
+    notices: Notices,
+    /// The notice window's render failures in a row.
+    notice_failures: u8,
+    /// The progress card's rows, as `update_busy` last read them.
+    progress_rows: Vec<ProgressRow>,
+    /// The last frame showed the progress card (the last job's card may take its slot).
+    progress_shown: bool,
+    /// `TIMER_QUIET` runs.
+    quiet_watch: bool,
+    /// Title of the last finished job, for the idle tooltip.
+    last_result: Option<String>,
     /// The settings in effect; the settings panel edits them live.
     config: Config,
     config_dir: PathBuf,
@@ -153,7 +170,7 @@ pub(crate) struct AppState {
     /// The running FFmpeg check, download, or install, if any.
     ffmpeg: Option<ffmpeg_install::Handle>,
     ffmpeg_slot: Arc<Mutex<Option<ffmpeg_install::Outcome>>>,
-    /// First output of the last finished job, opened when its balloon is clicked.
+    /// Balloon fallback: the folder of the last balloon, opened when it is clicked.
     last_output: Option<PathBuf>,
     hooks_installed_at: Instant,
     taskbar_created: u32,
@@ -224,15 +241,20 @@ pub fn run() -> Result<()> {
         swap::cleanup(&exe);
     }
     ffmpeg_install::cleanup(&ffmpeg_tools::install_dirs());
+    // Shown once the app state (and the notice window) exists.
+    let mut startup = Vec::new();
     if after_update.is_some() {
-        tray.notify(release::TITLE, &text::updated(update::current()));
+        startup.push(info(release::TITLE, &text::updated(update::current())));
     }
     if restarted.is_some() {
-        tray.notify(restart::TITLE, restart::text::RESTARTED);
+        startup.push(info(restart::TITLE, restart::text::RESTARTED));
     }
     if let Some(w) = &warning {
         log_error!("설정 파일 오류: {w}");
-        tray.warn("설정 파일 오류", &format!("{w}\n기본 설정으로 실행합니다"));
+        startup.push(warning_notice(
+            "설정 파일 오류",
+            &format!("{w}\n기본 설정으로 실행합니다"),
+        ));
     }
     if let Some(enable) = autostart_fix(
         autostart::is_enabled(),
@@ -252,7 +274,16 @@ pub fn run() -> Result<()> {
             hook::set_menu_enabled(false);
         })
         .ok();
-    let notice_window = NoticeWindow::new(hwnd)?;
+    let notice_window = if std::env::var("SWISSWHEEL_FORCE_BALLOON").is_ok_and(|v| v == "1") {
+        log_info!("SWISSWHEEL_FORCE_BALLOON: 알림 카드 대신 풍선 알림을 씁니다");
+        None
+    } else {
+        NoticeWindow::new(hwnd)
+            .inspect_err(|e| log_error!("알림 창을 만들 수 없어 풍선 알림을 씁니다: {e}"))
+            .ok()
+    };
+    let mut notices = Notices::new();
+    notices.set_do_not_disturb(config.notifications.do_not_disturb);
     let drop_target: IDropTarget = DropTarget.into();
     unsafe { RegisterDragDrop(wheel.hwnd(), &drop_target)? };
 
@@ -302,6 +333,12 @@ pub fn run() -> Result<()> {
         menu_hint: None,
         foreground_hook: None,
         notice_window,
+        notices,
+        notice_failures: 0,
+        progress_rows: Vec::new(),
+        progress_shown: false,
+        quiet_watch: false,
+        last_result: None,
         config_writable: warning.is_none(),
         config,
         config_dir,
@@ -329,6 +366,11 @@ pub fn run() -> Result<()> {
         #[cfg(debug_assertions)]
         preview_notices: None,
     }));
+    with_state(|s| {
+        for notice in startup {
+            s.notify(notice);
+        }
+    });
     #[cfg(debug_assertions)]
     if let Ok(what) = std::env::var("SWISSWHEEL_PREVIEW") {
         with_state(|s| s.preview(&what));
@@ -402,23 +444,32 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_FOREGROUND => {
             with_state(|s| s.on_foreground(HWND(wparam.0 as *mut _)));
         }
-        // Hover and clicks on the notice cards; only the preview shows cards yet.
+        // Hover and clicks on the notice cards.
         WM_APP_NOTICE => {
-            #[cfg(debug_assertions)]
-            with_state(|s| s.on_preview_notice(wparam, lparam));
+            with_state(|s| s.on_notice(wparam, lparam));
         }
-        // Monitors, DPI, or the work area changed: the bar's placement is stale.
+        // Monitors, DPI, or the work area changed: the bar's and the notice
+        // window's placement is stale.
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
-            with_state(AppState::close_menu);
+            with_state(|s| {
+                s.close_menu();
+                s.reposition_notices();
+            });
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
         WM_SETTINGCHANGE => {
-            if wparam.0 == SPI_SETWORKAREA.0 as usize {
-                with_state(AppState::close_menu);
-            }
-            // "ImmersiveColorSet" when the Windows mode changes; the tray
-            // checks the registry itself, so any change is enough.
-            with_state(|s| s.tray.refresh_theme());
+            let work_area = wparam.0 == SPI_SETWORKAREA.0 as usize;
+            with_state(|s| {
+                if work_area {
+                    s.close_menu();
+                    s.reposition_notices();
+                }
+                // "ImmersiveColorSet" when the Windows mode changes; the tray
+                // checks the registry itself, so any change is enough. The
+                // cards pick up the theme and transparency when redrawn.
+                s.tray.refresh_theme();
+                s.render_notices();
+            });
             return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) };
         }
         WM_APP_TRAY => on_tray(hwnd, wparam, lparam),
@@ -625,8 +676,7 @@ impl AppState {
             }
             MenuAction::Notice(tile) => {
                 self.close_menu();
-                self.tray
-                    .notify(tile.label(), "다음 버전에서 지원 예정입니다");
+                self.notify(info(tile.label(), "다음 버전에서 지원 예정입니다"));
             }
             MenuAction::Close => self.close_menu(),
             MenuAction::StartCapture => {
@@ -682,6 +732,14 @@ impl AppState {
         }
     }
 
+    /// Stops waiting for a key: the timeout, or a click on the key prompt card.
+    fn cancel_capture(&mut self) {
+        self.disarm_capture();
+        if self.menu.as_mut().is_some_and(MenuSession::cancel_capture) {
+            self.render_menu();
+        }
+    }
+
     /// Puts a settings change into effect right away, then saves it.
     fn apply_config(&mut self, mut new: Config, item: SettingItem) {
         let old = &self.config;
@@ -695,18 +753,25 @@ impl AppState {
         {
             runner.set_quality(new.quality.clone());
         }
+        let progress_changed = new.progress != old.progress;
+        let accent_changed = new.appearance.accent != old.appearance.accent;
         if new.start_with_windows != old.start_with_windows
             && let Err(e) = autostart::set(new.start_with_windows)
         {
             log_error!("시작 프로그램 등록 실패: {e}");
-            self.tray
-                .warn("시작 프로그램 등록에 실패했습니다", &e.message());
-            new.start_with_windows = old.start_with_windows;
+            new.start_with_windows = self.config.start_with_windows;
+            self.notify(warning_notice(
+                "시작 프로그램 등록에 실패했습니다",
+                &e.message(),
+            ));
         }
-        let progress_changed = new.progress != old.progress;
+        self.notices
+            .set_do_not_disturb(new.notifications.do_not_disturb);
         let before = std::mem::replace(&mut self.config, new);
         if progress_changed {
-            self.update_busy();
+            self.update_busy(); // redraws the notice window too
+        } else if accent_changed {
+            self.render_notices();
         }
         if !self.config_writable {
             return; // see CONFIG_NOTICE
@@ -716,7 +781,7 @@ impl AppState {
             Err(e) => {
                 log_error!("설정 저장 실패: {e}");
                 if self.save_failed.is_none() {
-                    self.tray.warn("설정을 저장하지 못했습니다", &e.to_string());
+                    self.notify(warning_notice("설정을 저장하지 못했습니다", &e.to_string()));
                 }
                 self.save_failed = Some(item);
             }
@@ -926,9 +991,8 @@ impl AppState {
                     row("b.mp4", Operation::Convert(Format::Mkv), None),
                     row("c.mp4", Operation::Convert(Format::Mkv), None),
                 ];
-                if let Err(e) = self
-                    .notice_window
-                    .render(&rows, &[], self.config.appearance.accent)
+                if let Some(window) = &mut self.notice_window
+                    && let Err(e) = window.render(&rows, &[], self.config.appearance.accent)
                 {
                     log_error!("알림 창 그리기 실패: {e}");
                 }
@@ -1058,7 +1122,9 @@ impl AppState {
             }
         }
         let accent = self.config.appearance.accent;
-        if let Err(e) = self.notice_window.render(rows, &notices.cards(now), accent) {
+        if let Some(window) = &mut self.notice_window
+            && let Err(e) = window.render(rows, &notices.cards(now), accent)
+        {
             log_error!("알림 창 그리기 실패: {e}");
         }
         unsafe {
@@ -1146,8 +1212,22 @@ impl AppState {
                 }
             }
             TIMER_PROGRESS => self.update_busy(),
-            #[cfg(debug_assertions)]
-            TIMER_NOTICE => self.render_preview_notices(),
+            TIMER_NOTICE => {
+                #[cfg(debug_assertions)]
+                if self.preview_notices.is_some() {
+                    self.render_preview_notices();
+                    return;
+                }
+                self.render_notices();
+            }
+            TIMER_QUIET => {
+                let was = self.notices.quiet();
+                self.notices.set_quiet(quiet_now(), Instant::now());
+                if self.notices.quiet() != was {
+                    log_info!("전체 화면 등으로 알림 대기: {}", self.notices.quiet());
+                }
+                self.render_notices(); // also stops this timer once nothing is shown or held
+            }
             TIMER_SWAP => {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_SWAP);
@@ -1159,12 +1239,7 @@ impl AppState {
                     self.apply_swap(version);
                 }
             }
-            TIMER_MENU_CAPTURE => {
-                self.disarm_capture();
-                if self.menu.as_mut().is_some_and(MenuSession::cancel_capture) {
-                    self.render_menu();
-                }
-            }
+            TIMER_MENU_CAPTURE => self.cancel_capture(),
             TIMER_MENU_ANIMATION => {
                 self.render_menu();
                 if self.menu.is_none()
@@ -1231,27 +1306,190 @@ impl AppState {
             for failure in &report.failures {
                 log_error!("{failure}");
             }
-            if let Some(first) = report.outputs.first() {
-                self.last_output = Some(first.clone());
-            }
-            if report.failures.is_empty() {
-                self.tray.notify(&title, &body);
+            let kind = if report.failures.is_empty() {
+                NoticeKind::Done
             } else {
-                self.tray.warn(&title, &body);
-            }
+                NoticeKind::Failed
+            };
+            self.last_result = Some(title.clone());
+            let notice = Notice {
+                kind,
+                title,
+                body,
+                action: report
+                    .outputs
+                    .first()
+                    .cloned()
+                    .map(NoticeAction::OpenFolder),
+            };
+            self.notify_job(notice, self.active_jobs == 0);
         }
         if let Some(delay) =
             release::on_jobs_finished(self.pending_swap.is_some(), self.active_jobs)
         {
             unsafe { SetTimer(Some(self.hwnd), TIMER_SWAP, delay.as_millis() as u32, None) };
         }
-        self.update_busy();
+        self.update_busy(); // draws the new cards with the remaining rows
+    }
+
+    /// Shows a notice: a card, or a balloon without the notice window.
+    /// The card's id, or `None` when it became a balloon.
+    fn notify(&mut self, notice: Notice) -> Option<NoticeId> {
+        if self.notice_window.is_none() {
+            self.balloon(&notice);
+            return None;
+        }
+        let id = self.notices.post(notice, Instant::now());
+        self.render_notices();
+        // A window given up on just now showed this notice as a balloon.
+        self.notice_window.as_ref().map(|_| id)
+    }
+
+    /// Shows a finished job's notice; the last job's card may take the
+    /// progress card's slot. `None` when do-not-disturb dropped it or it
+    /// became a balloon. The caller redraws (see `on_jobs_done`), so that
+    /// jobs finishing together are drawn once, against fresh progress rows.
+    fn notify_job(&mut self, notice: Notice, last_job: bool) -> Option<NoticeId> {
+        let title = notice.title.clone();
+        let id = if self.notice_window.is_none() {
+            if !self.config.notifications.do_not_disturb {
+                self.balloon(&notice);
+            }
+            None
+        } else {
+            self.notices
+                .post_job(notice, last_job, self.progress_shown, Instant::now())
+        };
+        if self.config.notifications.do_not_disturb {
+            log_info!("방해 금지: 알림을 띄우지 않습니다 ({title})");
+        }
+        id
+    }
+
+    /// The balloon fallback; clicking it opens the notice's folder, if any.
+    fn balloon(&mut self, notice: &Notice) {
+        self.last_output = match &notice.action {
+            Some(NoticeAction::OpenFolder(path)) => Some(path.clone()),
+            _ => None,
+        };
+        match notice.kind {
+            NoticeKind::Failed | NoticeKind::Warning => self.tray.warn(&notice.title, &notice.body),
+            _ => self.tray.notify(&notice.title, &notice.body),
+        }
+    }
+
+    /// Hover and clicks on the notice cards (`WM_APP_NOTICE`).
+    fn on_notice(&mut self, wparam: WPARAM, lparam: LPARAM) {
+        #[cfg(debug_assertions)]
+        if self.preview_notices.is_some() {
+            self.on_preview_notice(wparam, lparam);
+            return;
+        }
+        let now = Instant::now();
+        match wparam.0 {
+            0 => self.notices.hover(u64::try_from(lparam.0).ok(), now),
+            _ => match self.notices.click(lparam.0 as NoticeId, now) {
+                Some(NoticeAction::OpenFolder(path)) => open_folder(&path),
+                Some(NoticeAction::CancelCapture) => self.cancel_capture(),
+                None => {}
+            },
+        }
+        self.render_notices(); // a card left alone resumes its timer
+    }
+
+    /// Display, DPI, or work area changed: moves the notice window and redraws it.
+    fn reposition_notices(&mut self) {
+        if let Some(window) = &mut self.notice_window {
+            window.reposition();
+        }
+        self.render_notices();
+    }
+
+    /// Draws the progress card and the notice cards, then sets the notice
+    /// timer for the next frame and the quiet check. Two failed renders in a
+    /// row give up on the window: notices go to balloons from then on.
+    fn render_notices(&mut self) {
+        #[cfg(debug_assertions)]
+        if self.preview_notices.is_some() {
+            return;
+        }
+        let Some(window) = &mut self.notice_window else {
+            return;
+        };
+        let now = Instant::now();
+        self.notices.tick(now);
+        // Not watching yet: check before anything shows over a full-screen app.
+        if !self.quiet_watch
+            && (!self.progress_rows.is_empty() || !self.notices.cards(now).is_empty())
+        {
+            self.notices.set_quiet(quiet_now(), now);
+        }
+        let quiet = self.notices.quiet();
+        let cards = self.notices.cards(now);
+        // Quiet hides the whole window, the progress card too.
+        let rows: &[ProgressRow] = if quiet { &[] } else { &self.progress_rows };
+        match window.render(rows, &cards, self.config.appearance.accent) {
+            Ok(()) => {
+                self.notice_failures = 0;
+                self.progress_shown = !rows.is_empty();
+            }
+            Err(e) => {
+                self.notice_failures += 1;
+                self.progress_shown = false;
+                if self.notice_failures >= NOTICE_FAILURES {
+                    log_error!("알림 창을 그릴 수 없어 풍선 알림으로 바꿉니다: {e}");
+                    window.hide();
+                    self.notice_window = None;
+                    unsafe {
+                        let _ = KillTimer(Some(self.hwnd), TIMER_NOTICE);
+                        let _ = KillTimer(Some(self.hwnd), TIMER_QUIET);
+                    }
+                    self.quiet_watch = false;
+                    // The newest card would be lost with the window.
+                    if let Some(card) = cards.iter().find(|c| c.closing.is_none()) {
+                        let notice = Notice {
+                            kind: card.kind,
+                            title: card.title.clone(),
+                            body: card.body.clone(),
+                            action: None,
+                        };
+                        self.balloon(&notice);
+                    }
+                    return;
+                }
+                log_error!("알림 창 그리기 실패: {e}");
+            }
+        }
+        let watch = quiet || !rows.is_empty() || !cards.is_empty();
+        unsafe {
+            match self.notices.next_wake(now) {
+                Some(at) => {
+                    let ms = at.saturating_duration_since(now).as_millis().max(1) as u32;
+                    SetTimer(Some(self.hwnd), TIMER_NOTICE, ms, None);
+                }
+                // A failed frame is tried again soon.
+                None if self.notice_failures > 0 => {
+                    SetTimer(Some(self.hwnd), TIMER_NOTICE, 50, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_NOTICE);
+                }
+            }
+            if watch && !self.quiet_watch {
+                SetTimer(Some(self.hwnd), TIMER_QUIET, QUIET_INTERVAL_MS, None);
+            } else if !watch && self.quiet_watch {
+                let _ = KillTimer(Some(self.hwnd), TIMER_QUIET);
+            }
+        }
+        self.quiet_watch = watch;
     }
 
     fn start_update(&mut self) {
         let background = self.update.is_some() || self.ffmpeg.is_some();
         match release::on_tile(background, self.active_jobs) {
-            TileDecision::Refuse(notice) => self.tray.notify(release::TITLE, notice),
+            TileDecision::Refuse(notice) => {
+                self.notify(info(release::TITLE, notice));
+            }
             TileDecision::Start => {
                 self.update = Some(update::spawn(
                     self.hwnd.0 as isize,
@@ -1267,23 +1505,30 @@ impl AppState {
         self.update = None;
         let outcome = self.update_slot.lock().unwrap().take();
         let title = release::TITLE;
-        match outcome {
-            None | Some(Outcome::Declined) => {}
-            Some(Outcome::UpToDate) => self
-                .tray
-                .notify(title, &text::up_to_date(update::current())),
-            Some(Outcome::CheckFailed) => self.tray.warn(title, text::CHECK_FAILED),
-            Some(Outcome::MissingAssets) => self.tray.warn(title, text::NO_ASSETS),
-            Some(Outcome::DownloadFailed) => self.tray.warn(title, text::DOWNLOAD_FAILED),
-            Some(Outcome::Corrupt) => self.tray.warn(title, text::CORRUPT),
-            Some(Outcome::NotWritable { page_url }) => open_page(&page_url),
+        let notice = match outcome {
+            None | Some(Outcome::Declined) => None,
+            Some(Outcome::UpToDate) => Some(info(title, &text::up_to_date(update::current()))),
+            Some(Outcome::CheckFailed) => Some(warning_notice(title, text::CHECK_FAILED)),
+            Some(Outcome::MissingAssets) => Some(warning_notice(title, text::NO_ASSETS)),
+            Some(Outcome::DownloadFailed) => Some(warning_notice(title, text::DOWNLOAD_FAILED)),
+            Some(Outcome::Corrupt) => Some(warning_notice(title, text::CORRUPT)),
+            Some(Outcome::NotWritable { page_url }) => {
+                open_page(&page_url);
+                None
+            }
             Some(Outcome::Ready { version }) => match release::on_ready(self.active_jobs) {
-                ReadyDecision::SwapNow => self.apply_swap(version),
+                ReadyDecision::SwapNow => {
+                    self.apply_swap(version);
+                    None
+                }
                 ReadyDecision::WaitForJobs => {
                     self.pending_swap = Some(version);
-                    self.tray.notify(title, text::WAITING);
+                    Some(info(title, text::WAITING))
                 }
             },
+        };
+        if let Some(notice) = notice {
+            self.notify(notice);
         }
         self.update_busy();
     }
@@ -1300,7 +1545,9 @@ impl AppState {
         let ready = ffmpeg_tools::locate().is_some();
         let busy = self.background_busy();
         match ffmpeg_release::on_download_tile(ready, busy) {
-            TileDecision::Refuse(notice) => self.tray.notify(ffmpeg_release::TITLE, notice),
+            TileDecision::Refuse(notice) => {
+                self.notify(info(ffmpeg_release::TITLE, notice));
+            }
             TileDecision::Start => {
                 self.ffmpeg = Some(ffmpeg_install::spawn(
                     self.hwnd.0 as isize,
@@ -1318,14 +1565,17 @@ impl AppState {
         self.ffmpeg = None;
         let outcome = self.ffmpeg_slot.lock().unwrap().take();
         let title = ffmpeg_release::TITLE;
-        match outcome {
-            None | Some(O::Declined) => {}
-            Some(O::Installed { tag }) => self.tray.notify(title, &t::installed(&tag)),
-            Some(O::CheckFailed) => self.tray.warn(title, t::CHECK_FAILED),
-            Some(O::MissingAsset) => self.tray.warn(title, t::NO_ASSET),
-            Some(O::DownloadFailed) => self.tray.warn(title, t::DOWNLOAD_FAILED),
-            Some(O::Corrupt) => self.tray.warn(title, t::CORRUPT),
-            Some(O::InstallFailed) => self.tray.warn(title, t::INSTALL_FAILED),
+        let notice = match outcome {
+            None | Some(O::Declined) => None,
+            Some(O::Installed { tag }) => Some(info(title, &t::installed(&tag))),
+            Some(O::CheckFailed) => Some(warning_notice(title, t::CHECK_FAILED)),
+            Some(O::MissingAsset) => Some(warning_notice(title, t::NO_ASSET)),
+            Some(O::DownloadFailed) => Some(warning_notice(title, t::DOWNLOAD_FAILED)),
+            Some(O::Corrupt) => Some(warning_notice(title, t::CORRUPT)),
+            Some(O::InstallFailed) => Some(warning_notice(title, t::INSTALL_FAILED)),
+        };
+        if let Some(notice) = notice {
+            self.notify(notice);
         }
         self.update_busy();
     }
@@ -1334,7 +1584,9 @@ impl AppState {
     /// normally (posted, like `apply_swap`).
     fn restart(&mut self) {
         match restart::on_tile(self.active_jobs, self.background_busy()) {
-            TileDecision::Refuse(notice) => self.tray.notify(restart::TITLE, notice),
+            TileDecision::Refuse(notice) => {
+                self.notify(info(restart::TITLE, notice));
+            }
             TileDecision::Start => {
                 match std::env::current_exe().and_then(|exe| swap::launch_restarted(&exe)) {
                     Ok(()) => {
@@ -1345,7 +1597,7 @@ impl AppState {
                     }
                     Err(e) => {
                         log_error!("재시작 실패: {e}");
-                        self.tray.warn(restart::TITLE, restart::text::FAILED);
+                        self.notify(warning_notice(restart::TITLE, restart::text::FAILED));
                     }
                 }
             }
@@ -1366,7 +1618,7 @@ impl AppState {
             }
             Err(e) => {
                 log_error!("업데이트 교체 실패: {e}");
-                self.tray.warn(release::TITLE, text::SWAP_FAILED);
+                self.notify(warning_notice(release::TITLE, text::SWAP_FAILED));
             }
         }
     }
@@ -1408,6 +1660,7 @@ impl AppState {
             (Some(_), Some(p)) if !active => {
                 format!("SwissWheel · {what} 받는 중 · {}%", (p * 100.0).round())
             }
+            _ if !busy => idle_tooltip(self.last_result.as_deref()),
             _ => busy_tooltip(self.active_jobs, progress),
         };
         self.tray.set_busy(busy, &tooltip, ring);
@@ -1418,13 +1671,8 @@ impl AppState {
         if self.config.progress.window {
             rows.extend(download);
         }
-        // Notices join in once they go through the cards.
-        if let Err(e) = self
-            .notice_window
-            .render(&rows, &[], self.config.appearance.accent)
-        {
-            log_error!("알림 창 그리기 실패: {e}");
-        }
+        self.progress_rows = rows;
+        self.render_notices();
         unsafe {
             // While an update or FFmpeg thread runs too: the timer notices
             // when its download starts.
@@ -1439,8 +1687,7 @@ impl AppState {
     fn submit(&mut self, selection: Selection) {
         let Selection { op, preset } = selection;
         if let Operation::Action(action) = op {
-            self.tray
-                .notify(action.label(), "다음 버전에서 지원 예정입니다");
+            self.notify(info(action.label(), "다음 버전에서 지원 예정입니다"));
             return;
         }
         let inputs = std::mem::take(&mut self.dragged);
@@ -1582,11 +1829,10 @@ fn on_tray(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
             };
             show_menu(hwnd, pt);
         }
+        // Only balloons of the fallback; the cards handle their own clicks.
         NIN_BALLOONUSERCLICK => {
             if let Some(Some(path)) = with_state(|s| s.last_output.clone()) {
-                let _ = std::process::Command::new("explorer.exe")
-                    .arg(format!("/select,{}", path.display()))
-                    .spawn();
+                open_folder(&path);
             }
         }
         _ => {}
@@ -1618,6 +1864,35 @@ fn previewing(preview: Option<String>) -> bool {
 /// (which restarts the app): the download and restart tiles hold off.
 fn background_busy(update: bool, ffmpeg: bool, pending_swap: bool) -> bool {
     update || ffmpeg || pending_swap
+}
+
+/// An app notice (ⓘ, 5 s).
+fn info(title: &str, body: &str) -> Notice {
+    Notice {
+        kind: NoticeKind::Info,
+        title: title.to_string(),
+        body: body.to_string(),
+        action: None,
+    }
+}
+
+/// An app warning (⚠, 8 s).
+fn warning_notice(title: &str, body: &str) -> Notice {
+    Notice {
+        kind: NoticeKind::Warning,
+        ..info(title, body)
+    }
+}
+
+/// Opens Explorer on `path`'s folder with it selected. A folder deleted
+/// meanwhile only gets a log line.
+fn open_folder(path: &std::path::Path) {
+    if let Err(e) = std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.display()))
+        .spawn()
+    {
+        log_error!("탐색기를 열 수 없습니다 ({}): {e}", path.display());
+    }
 }
 
 /// Opens a release page in the browser; only https links.
