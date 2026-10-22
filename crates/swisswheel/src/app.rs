@@ -15,6 +15,8 @@ use swisswheel_core::ffmpeg_release;
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession, Tile};
 use swisswheel_core::menu_geometry;
+#[cfg(debug_assertions)]
+use swisswheel_core::notices::Notices;
 use swisswheel_core::restart;
 use swisswheel_core::session::{Selection, WheelSession};
 use swisswheel_core::settings::{self, Dir, SettingItem};
@@ -50,8 +52,8 @@ use crate::ffmpeg_install;
 use crate::hook::{self, Hooks, WM_APP_DRAG, WM_APP_FOREGROUND};
 use crate::jobs::{Job, JobReport, ProgressRow, Runner};
 use crate::menubar::{self, MenuBar, MenuMouse, MenuView};
+use crate::notice::{NoticeWindow, WM_APP_NOTICE};
 use crate::probe;
-use crate::progress::ProgressWindow;
 use crate::tray::{Tray, WM_APP_TRAY};
 use crate::update::{self, Outcome, swap};
 use crate::wheel::{PanelView, WheelView, WheelWindow};
@@ -85,6 +87,9 @@ const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 const PANEL_TICK_MS: u32 = 50;
 /// How often the tray tooltip refreshes the progress of running jobs.
 const PROGRESS_INTERVAL_MS: u32 = 500;
+/// Steps the notice cards of the `notices` preview.
+#[cfg(debug_assertions)]
+const TIMER_NOTICE: usize = 10;
 
 /// Shown at the top of the settings panel when config.toml couldn't be read.
 const CONFIG_NOTICE: &str = "설정 파일에 오류가 있어 저장하지 않습니다";
@@ -114,7 +119,8 @@ pub(crate) struct AppState {
     /// Foreground watch while the menu is open (it closes when another
     /// window comes forward).
     foreground_hook: Option<HWINEVENTHOOK>,
-    progress_window: ProgressWindow,
+    /// The progress card and notice cards above the tray.
+    notice_window: NoticeWindow,
     /// The settings in effect; the settings panel edits them live.
     config: Config,
     config_dir: PathBuf,
@@ -151,6 +157,9 @@ pub(crate) struct AppState {
     last_output: Option<PathBuf>,
     hooks_installed_at: Instant,
     taskbar_created: u32,
+    /// The `notices` preview's cards and progress rows.
+    #[cfg(debug_assertions)]
+    preview_notices: Option<(Notices, Vec<ProgressRow>)>,
 }
 
 thread_local! {
@@ -243,7 +252,7 @@ pub fn run() -> Result<()> {
             hook::set_menu_enabled(false);
         })
         .ok();
-    let progress_window = ProgressWindow::new(hwnd)?;
+    let notice_window = NoticeWindow::new(hwnd)?;
     let drop_target: IDropTarget = DropTarget.into();
     unsafe { RegisterDragDrop(wheel.hwnd(), &drop_target)? };
 
@@ -292,7 +301,7 @@ pub fn run() -> Result<()> {
         menu_panel_at: Instant::now(),
         menu_hint: None,
         foreground_hook: None,
-        progress_window,
+        notice_window,
         config_writable: warning.is_none(),
         config,
         config_dir,
@@ -317,6 +326,8 @@ pub fn run() -> Result<()> {
         last_output: None,
         hooks_installed_at: Instant::now(),
         taskbar_created,
+        #[cfg(debug_assertions)]
+        preview_notices: None,
     }));
     #[cfg(debug_assertions)]
     if let Ok(what) = std::env::var("SWISSWHEEL_PREVIEW") {
@@ -390,6 +401,11 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_FOREGROUND => {
             with_state(|s| s.on_foreground(HWND(wparam.0 as *mut _)));
+        }
+        // Hover and clicks on the notice cards; only the preview shows cards yet.
+        WM_APP_NOTICE => {
+            #[cfg(debug_assertions)]
+            with_state(|s| s.on_preview_notice(wparam, lparam));
         }
         // Monitors, DPI, or the work area changed: the bar's placement is stale.
         WM_DISPLAYCHANGE | WM_DPICHANGED => {
@@ -835,7 +851,7 @@ impl AppState {
     }
 
     /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`,
-    /// `progress`, `menu`, `menu-settings`, `menu-tools`, `menu-capture`,
+    /// `progress`, `notices`, `menu`, `menu-settings`, `menu-tools`, `menu-capture`,
     /// `menu-notifications`, or `menu-general` shows that UI at startup
     /// without a drag or key press, so the drawing can be checked by eye.
     #[cfg(debug_assertions)]
@@ -846,6 +862,10 @@ impl AppState {
         use swisswheel_core::session::PANEL_DWELL_MS;
 
         let ago = |secs| Instant::now().checked_sub(Duration::from_secs(secs));
+        let row = |file: &str, op, fraction| ProgressRow {
+            title: swisswheel_core::summary::progress_title(file, &op),
+            fraction,
+        };
         match what {
             "panel" | "panel-left" => {
                 let (sw, sh) =
@@ -889,10 +909,6 @@ impl AppState {
             // Checks SWISSWHEEL_FFMPEG_URL (a local server) as if the tile were pressed.
             "ffmpeg" => self.start_ffmpeg(),
             "progress" => {
-                let row = |file: &str, op, fraction| crate::jobs::ProgressRow {
-                    title: swisswheel_core::summary::progress_title(file, &op),
-                    fraction,
-                };
                 let rows = [
                     row("긴영상.mp4", Operation::Convert(Format::Webm), Some(0.37)),
                     row(
@@ -910,9 +926,21 @@ impl AppState {
                     row("b.mp4", Operation::Convert(Format::Mkv), None),
                     row("c.mp4", Operation::Convert(Format::Mkv), None),
                 ];
-                self.progress_window
-                    .update(&rows, self.config.appearance.accent);
+                if let Err(e) = self
+                    .notice_window
+                    .render(&rows, &[], self.config.appearance.accent)
+                {
+                    log_error!("알림 창 그리기 실패: {e}");
+                }
                 self.tray.set_busy(true, "SwissWheel · preview", Some(0.4));
+            }
+            "notices" => {
+                let rows = vec![
+                    row("photo.png", Operation::Convert(Format::Jpg), Some(0.64)),
+                    row("여행 영상.mp4", Operation::Convert(Format::Gif), None),
+                ];
+                self.preview_notices = Some((Notices::new(), rows));
+                self.render_preview_notices();
             }
             "menu" | "menu-settings" | "menu-tools" | "menu-capture" | "menu-notifications"
             | "menu-general" => {
@@ -981,6 +1009,88 @@ impl AppState {
         }
     }
 
+    /// Steps the `notices` preview: posts its three cards again once all
+    /// have closed, draws a frame, and sets the timer for the next one.
+    #[cfg(debug_assertions)]
+    fn render_preview_notices(&mut self) {
+        use swisswheel_core::notices::{Notice, NoticeAction, NoticeKind};
+
+        let Some((notices, rows)) = &mut self.preview_notices else {
+            return;
+        };
+        let now = Instant::now();
+        notices.tick(now);
+        if notices.cards(now).is_empty() {
+            let folder = || Some(NoticeAction::OpenFolder(std::env::temp_dir()));
+            let cards = [
+                (
+                    2,
+                    NoticeKind::KeyPrompt,
+                    "바꿀 키를 누르세요",
+                    "휠 열기 키 · 다른 곳을 클릭하면 취소",
+                    Some(NoticeAction::CancelCapture),
+                ),
+                (
+                    1,
+                    NoticeKind::Failed,
+                    "1개 파일을 변환하지 못했습니다",
+                    // Three lines' worth: the second ends in "…".
+                    "여행 브이로그 2026 최종 편집본 진짜최종.mp4: 지원하지 않는 오디오 코덱입니다 (pcm_s24le)\n성공 1개",
+                    folder(),
+                ),
+                (
+                    0,
+                    NoticeKind::Done,
+                    "2개 파일을 변환했습니다",
+                    "photo.jpg 외 1개 · JPG, GIF",
+                    folder(),
+                ),
+            ];
+            for (ago, kind, title, body, action) in cards {
+                let notice = Notice {
+                    kind,
+                    title: title.into(),
+                    body: body.into(),
+                    action,
+                };
+                let at = now.checked_sub(Duration::from_secs(ago)).unwrap_or(now);
+                notices.post(notice, at);
+            }
+        }
+        let accent = self.config.appearance.accent;
+        if let Err(e) = self.notice_window.render(rows, &notices.cards(now), accent) {
+            log_error!("알림 창 그리기 실패: {e}");
+        }
+        unsafe {
+            match notices.next_wake(now) {
+                Some(at) => {
+                    let ms = at.saturating_duration_since(now).as_millis().max(1) as u32;
+                    SetTimer(Some(self.hwnd), TIMER_NOTICE, ms, None);
+                }
+                None => {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_NOTICE);
+                }
+            }
+        }
+    }
+
+    /// Hover and clicks on the `notices` preview's cards.
+    #[cfg(debug_assertions)]
+    fn on_preview_notice(&mut self, wparam: WPARAM, lparam: LPARAM) {
+        let Some((notices, _)) = &mut self.preview_notices else {
+            return;
+        };
+        let now = Instant::now();
+        match wparam.0 {
+            0 => notices.hover(u64::try_from(lparam.0).ok(), now),
+            _ => {
+                let action = notices.click(lparam.0 as u64, now);
+                log_info!("미리보기 카드 클릭: {action:?}");
+            }
+        }
+        self.render_preview_notices();
+    }
+
     /// Milliseconds since the wheel opened: the session's clock for dwells.
     fn now_ms(&self) -> u64 {
         self.session_started.elapsed().as_millis() as u64
@@ -1036,6 +1146,8 @@ impl AppState {
                 }
             }
             TIMER_PROGRESS => self.update_busy(),
+            #[cfg(debug_assertions)]
+            TIMER_NOTICE => self.render_preview_notices(),
             TIMER_SWAP => {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_SWAP);
@@ -1306,8 +1418,13 @@ impl AppState {
         if self.config.progress.window {
             rows.extend(download);
         }
-        self.progress_window
-            .update(&rows, self.config.appearance.accent);
+        // Notices join in once they go through the cards.
+        if let Err(e) = self
+            .notice_window
+            .render(&rows, &[], self.config.appearance.accent)
+        {
+            log_error!("알림 창 그리기 실패: {e}");
+        }
         unsafe {
             // While an update or FFmpeg thread runs too: the timer notices
             // when its download starts.

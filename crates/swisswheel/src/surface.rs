@@ -1,6 +1,6 @@
 //! A Direct2D swap chain shown through Windows.UI.Composition, over one or
 //! more host-backdrop blurs (the glass) clipped to rounded rectangles. Used
-//! by the progress card and the desktop menu; the wheel has its own.
+//! by the notice cards and the desktop menu; the wheel has its own.
 
 use windows::UI::Composition::Desktop::DesktopWindowTarget;
 use windows::UI::Composition::{CompositionRoundedRectangleGeometry, Compositor, SpriteVisual};
@@ -144,6 +144,14 @@ impl Surface {
             Y: corner,
         })?;
         backdrop.SetIsVisible(true)
+    }
+
+    /// Fades glass area `index` (e.g. with a card fading in or out).
+    pub fn set_glass_opacity(&self, index: usize, opacity: f32) -> Result<()> {
+        match self.glass.get(index) {
+            Some((backdrop, _)) => backdrop.SetOpacity(opacity.clamp(0.0, 1.0)),
+            None => Ok(()),
+        }
     }
 
     pub fn ctx(&self) -> &ID2D1DeviceContext {
