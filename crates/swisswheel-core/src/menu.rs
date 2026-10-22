@@ -426,7 +426,7 @@ mod tests {
     fn tabs_switch_and_stop_at_ends() {
         let mut m = panel();
         assert_eq!(m.key(MenuKey::Left), MenuAction::None);
-        for _ in 0..3 {
+        for _ in 0..4 {
             assert_eq!(m.key(MenuKey::Right), MenuAction::Redraw);
         }
         assert_eq!(m.key(MenuKey::Right), MenuAction::None);

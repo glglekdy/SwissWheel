@@ -1,6 +1,7 @@
 //! The settings panel's rows: what each shows and how ← / → change it.
 
-use crate::config::{Config, Key, Strength};
+use crate::appearance::ACCENTS;
+use crate::config::{Accent, Config, Key, Strength};
 
 /// ← (`Back`) or → (`Forward`) on a settings row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +23,8 @@ pub enum SettingItem {
     TrayRing,
     ShrinkPercent,
     CompressVideo,
+    DoNotDisturb,
+    Accent,
 }
 
 /// The panel's tabs (settings spec 2.1).
@@ -30,14 +33,16 @@ pub enum Category {
     Keys,
     Tools,
     Convert,
+    Notifications,
     General,
 }
 
 /// The tabs, left to right.
-pub const CATEGORIES: [Category; 4] = [
+pub const CATEGORIES: [Category; 5] = [
     Category::Keys,
     Category::Tools,
     Category::Convert,
+    Category::Notifications,
     Category::General,
 ];
 
@@ -50,6 +55,7 @@ impl Category {
             Category::Keys => "단축키",
             Category::Tools => "도구",
             Category::Convert => "변환",
+            Category::Notifications => "알림",
             Category::General => "일반",
         }
     }
@@ -61,7 +67,8 @@ impl Category {
             Category::Keys => &[OpenKey, CycleKey, CancelKey],
             Category::Tools => &[ShrinkPercent, CompressVideo],
             Category::Convert => &[JpgQuality, WebpQuality, Mp3Bitrate],
-            Category::General => &[StartWithWindows, ProgressWindow, TrayRing],
+            Category::Notifications => &[ProgressWindow, TrayRing, DoNotDisturb],
+            Category::General => &[StartWithWindows, Accent],
         }
     }
 }
@@ -131,6 +138,8 @@ impl SettingItem {
             SettingItem::TrayRing => "트레이 링",
             SettingItem::ShrinkPercent => "축소 비율",
             SettingItem::CompressVideo => "영상 압축",
+            SettingItem::DoNotDisturb => "방해 금지",
+            SettingItem::Accent => "강조색",
         }
     }
 
@@ -157,6 +166,8 @@ impl SettingItem {
             SettingItem::TrayRing => on_off(c.progress.tray_ring),
             SettingItem::ShrinkPercent => format!("{}%", c.tools.shrink_percent),
             SettingItem::CompressVideo => strength_label(c.tools.compress_video).to_string(),
+            SettingItem::DoNotDisturb => on_off(c.notifications.do_not_disturb),
+            SettingItem::Accent => c.appearance.accent.label().to_string(),
         }
     }
 }
@@ -225,6 +236,19 @@ pub fn step(c: &Config, item: SettingItem, dir: Dir) -> Option<Config> {
                 |_| false,
             )?;
             next.tools.compress_video = STRENGTHS[i];
+        }
+        SettingItem::DoNotDisturb => {
+            next.notifications.do_not_disturb = next_in(
+                [false, true].into_iter(),
+                c.notifications.do_not_disturb,
+                dir,
+                |_| false,
+            )?;
+        }
+        SettingItem::Accent => {
+            let index = |a: Accent| ACCENTS.iter().position(|&x| x == a).unwrap_or(0);
+            let i = next_in(0..ACCENTS.len(), index(c.appearance.accent), dir, |_| false)?;
+            next.appearance.accent = ACCENTS[i];
         }
     }
     Some(next)
@@ -303,9 +327,11 @@ mod tests {
             ("JPG 품질", "90"),
             ("WebP 품질", "85"),
             ("MP3 비트레이트", "192 kbps"),
-            ("Windows 시작 시 실행", "끔"),
             ("진행률 카드", "켬"),
             ("트레이 링", "켬"),
+            ("방해 금지", "끔"),
+            ("Windows 시작 시 실행", "끔"),
+            ("강조색", "블루"),
         ]
         .map(|(l, v)| (l, v.to_string()));
         assert_eq!(rows, expected);
@@ -315,7 +341,7 @@ mod tests {
     fn categories_in_order_with_their_items() {
         use SettingItem::*;
         let labels: Vec<_> = CATEGORIES.iter().map(|c| c.label()).collect();
-        assert_eq!(labels, ["단축키", "도구", "변환", "일반"]);
+        assert_eq!(labels, ["단축키", "도구", "변환", "알림", "일반"]);
         assert_eq!(Category::Keys.items(), [OpenKey, CycleKey, CancelKey]);
         assert_eq!(Category::Tools.items(), [ShrinkPercent, CompressVideo]);
         assert_eq!(
@@ -323,9 +349,10 @@ mod tests {
             [JpgQuality, WebpQuality, Mp3Bitrate]
         );
         assert_eq!(
-            Category::General.items(),
-            [StartWithWindows, ProgressWindow, TrayRing]
+            Category::Notifications.items(),
+            [ProgressWindow, TrayRing, DoNotDisturb]
         );
+        assert_eq!(Category::General.items(), [StartWithWindows, Accent]);
         assert!(CATEGORIES.iter().all(|c| c.items().len() <= MAX_ROWS));
     }
 
@@ -340,6 +367,24 @@ mod tests {
         let c = step(&c, SettingItem::CompressVideo, Dir::Back).unwrap();
         assert_eq!(SettingItem::CompressVideo.value(&c), "약하게");
         assert_eq!(step(&c, SettingItem::CompressVideo, Dir::Back), None);
+    }
+
+    #[test]
+    fn accent_steps_through_presets_and_stops_at_ends() {
+        let c = Config::default();
+        assert_eq!(step(&c, SettingItem::Accent, Dir::Back), None);
+        let c = step(&c, SettingItem::Accent, Dir::Forward).unwrap();
+        assert_eq!(c.appearance.accent, Accent::Purple);
+        let mut c = c;
+        c.appearance.accent = Accent::Graphite;
+        assert_eq!(step(&c, SettingItem::Accent, Dir::Forward), None);
+    }
+
+    #[test]
+    fn do_not_disturb_toggles() {
+        let c = step(&Config::default(), SettingItem::DoNotDisturb, Dir::Forward).unwrap();
+        assert!(c.notifications.do_not_disturb);
+        assert_eq!(step(&c, SettingItem::DoNotDisturb, Dir::Forward), None);
     }
 
     #[test]

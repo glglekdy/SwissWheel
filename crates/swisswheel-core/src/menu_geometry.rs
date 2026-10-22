@@ -55,7 +55,7 @@ pub struct MenuLayout {
     /// "설정 파일에 오류가 있어 저장하지 않습니다", above the tabs.
     pub notice: Option<Box2>,
     /// The category tabs, left to right.
-    pub tabs: [Box2; 4],
+    pub tabs: [Box2; CATEGORIES.len()],
     /// `MAX_ROWS` rows; a tab with fewer leaves the rest empty.
     pub rows: Vec<RowBoxes>,
     /// The hint line under the rows.
@@ -232,8 +232,7 @@ mod tests {
         assert_eq!(l.panel.bottom - l.panel.top, 8.0 * 2.0 + 5.0 * 36.0);
         assert_eq!(l.rows.len(), 3);
         assert_eq!(l.tabs[0].top, l.panel.top + 8.0);
-        assert_eq!((l.tabs[0].left, l.tabs[3].right), (8.0, 600.0));
-        assert_eq!(l.tabs[1].left - l.tabs[0].left, 148.0);
+        assert_eq!((l.tabs[0].left, l.tabs[4].right), (8.0, 600.0));
         assert_eq!(l.rows[0].row.top, l.tabs[0].bottom);
         assert_eq!(l.hint.top, l.rows[2].row.bottom);
         assert_eq!(
@@ -351,6 +350,19 @@ mod tests {
     }
 
     #[test]
+    fn five_tabs_split_the_panel() {
+        let l = layout(false, 1.0);
+        assert_eq!(l.tabs.len(), 5);
+        assert_eq!(l.tabs[0].left, l.panel.left + PANEL_PAD);
+        assert_eq!(l.tabs[4].right, l.panel.right - PANEL_PAD);
+        let w = l.tabs[0].right - l.tabs[0].left;
+        for pair in l.tabs.windows(2) {
+            assert!((pair[0].right - pair[1].left).abs() < 1e-3);
+            assert!((pair[1].right - pair[1].left - w).abs() < 1e-3);
+        }
+    }
+
+    #[test]
     fn hit_scales_with_dpi() {
         let l1 = layout(false, 1.0);
         let l2 = layout(false, 1.25);
@@ -358,6 +370,6 @@ mod tests {
         let b = &l2.tiles[2];
         assert_eq!(hit(&l2, None, b.left + 1.0, b.top + 1.0), MenuHit::Tile(2));
         assert_eq!(l2.tiles[2].left, l1.tiles[2].left * 1.25);
-        assert_eq!(l2.tabs[3].right, l1.tabs[3].right * 1.25);
+        assert_eq!(l2.tabs[4].right, l1.tabs[4].right * 1.25);
     }
 }
