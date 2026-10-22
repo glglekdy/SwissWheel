@@ -3,7 +3,7 @@
 use std::cell::OnceCell;
 
 use windows::Win32::Graphics::DirectWrite::*;
-use windows::core::{PCWSTR, Result, w};
+use windows::core::{Interface, PCWSTR, Result, w};
 
 pub const FAMILY: PCWSTR = w!("Pretendard");
 /// Used with the system collection when the embedded fonts can't be loaded.
@@ -16,18 +16,19 @@ const FILES: [&[u8]; 3] = [
 ];
 
 thread_local! {
-    static FACTORY: IDWriteFactory5 = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
-        .expect("DirectWrite 3 (Windows 10 1703+) is required");
+    static FACTORY: IDWriteFactory = unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED) }
+        .expect("DirectWrite is available on every supported Windows");
     static COLLECTION: OnceCell<Option<IDWriteFontCollection1>> = const { OnceCell::new() };
 }
 
 /// The shared DirectWrite factory.
-pub fn factory() -> IDWriteFactory5 {
+pub fn factory() -> IDWriteFactory {
     FACTORY.with(Clone::clone)
 }
 
 /// The embedded Pretendard collection, or `None` (logged once) when it
-/// can't be built.
+/// can't be built, e.g. on Windows without font sets (before 10 1703).
+/// Built once per thread; the UI is single-threaded.
 pub fn collection() -> Option<IDWriteFontCollection1> {
     COLLECTION.with(|cell| {
         cell.get_or_init(|| {
@@ -41,10 +42,11 @@ pub fn collection() -> Option<IDWriteFontCollection1> {
 
 fn load() -> Result<IDWriteFontCollection1> {
     let factory = factory();
+    let factory5: IDWriteFactory5 = factory.cast()?;
     unsafe {
-        let loader = factory.CreateInMemoryFontFileLoader()?;
+        let loader = factory5.CreateInMemoryFontFileLoader()?;
         factory.RegisterFontFileLoader(&loader)?;
-        let builder = factory.CreateFontSetBuilder()?;
+        let builder = factory5.CreateFontSetBuilder()?;
         for data in FILES {
             // With an owner object DirectWrite reads `data` in place instead of
             // copying it; the shared factory lives as long as the process.
@@ -56,7 +58,7 @@ fn load() -> Result<IDWriteFontCollection1> {
             )?;
             builder.AddFontFile(&file)?;
         }
-        factory.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?)
+        factory5.CreateFontCollectionFromFontSet(&builder.CreateFontSet()?)
     }
 }
 
@@ -66,7 +68,16 @@ pub fn text_format(
     weight: DWRITE_FONT_WEIGHT,
     alignment: DWRITE_TEXT_ALIGNMENT,
 ) -> Result<IDWriteTextFormat> {
-    let fonts = collection();
+    format_in(collection(), size, weight, alignment)
+}
+
+/// `text_format` over `fonts`, or the fallback family when it is `None`.
+fn format_in(
+    fonts: Option<IDWriteFontCollection1>,
+    size: f32,
+    weight: DWRITE_FONT_WEIGHT,
+    alignment: DWRITE_TEXT_ALIGNMENT,
+) -> Result<IDWriteTextFormat> {
     let family = if fonts.is_some() { FAMILY } else { FALLBACK };
     let fonts: Option<IDWriteFontCollection> = fonts.map(Into::into);
     unsafe {
@@ -158,5 +169,17 @@ mod tests {
     fn text_format_uses_pretendard() {
         let f = text_format(13.0, DWRITE_FONT_WEIGHT_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER).unwrap();
         assert_eq!(family_name(&f), "Pretendard");
+    }
+
+    #[test]
+    fn text_format_falls_back_to_segoe_without_pretendard() {
+        let f = format_in(
+            None,
+            13.0,
+            DWRITE_FONT_WEIGHT_BOLD,
+            DWRITE_TEXT_ALIGNMENT_CENTER,
+        )
+        .unwrap();
+        assert_eq!(family_name(&f), "Segoe UI Variable Text");
     }
 }
