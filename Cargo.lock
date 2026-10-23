@@ -1207,7 +1207,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "swisswheel"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "embed-resource",
  "image",
@@ -1228,7 +1228,7 @@ dependencies = [
 
 [[package]]
 name = "swisswheel-core"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "serde",
  "serde_json",
