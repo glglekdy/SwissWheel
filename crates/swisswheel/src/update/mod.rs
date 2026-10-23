@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 
 use sha2::{Digest as _, Sha256};
 use swisswheel_core::update::{
-    ENDPOINT, Version, not_writable_body, parse_checksum, parse_release, prompt_body,
+    ENDPOINT, Release, Version, not_writable_body, parse_checksum, parse_release, prompt_body,
 };
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -66,19 +66,8 @@ pub fn run(
     ui: &dyn Ui,
     progress: &Progress,
 ) -> Outcome {
-    log_info!("업데이트 확인: {endpoint}");
-    let release = match http::get(endpoint, JSON_LIMIT, &mut |_, _| {}) {
-        Ok(body) => match parse_release(&String::from_utf8_lossy(&body)) {
-            Some(release) => release,
-            None => {
-                log_error!("업데이트 확인: 릴리스 정보를 해석할 수 없습니다");
-                return Outcome::CheckFailed;
-            }
-        },
-        Err(e) => {
-            log_error!("업데이트 확인 실패: {e}");
-            return Outcome::CheckFailed;
-        }
+    let Some(release) = latest(endpoint) else {
+        return Outcome::CheckFailed;
     };
     log_info!("최신 릴리스 v{} (지금 v{current})", release.version);
     if release.version <= current {
@@ -137,6 +126,25 @@ pub fn run(
     log_info!("업데이트: v{} 준비됨", release.version);
     Outcome::Ready {
         version: release.version,
+    }
+}
+
+/// The newest release at `endpoint`, or `None` (logged) when it can't be
+/// fetched or read. Blocks.
+pub fn latest(endpoint: &str) -> Option<Release> {
+    log_info!("업데이트 확인: {endpoint}");
+    match http::get(endpoint, JSON_LIMIT, &mut |_, _| {}) {
+        Ok(body) => {
+            let release = parse_release(&String::from_utf8_lossy(&body));
+            if release.is_none() {
+                log_error!("업데이트 확인: 릴리스 정보를 해석할 수 없습니다");
+            }
+            release
+        }
+        Err(e) => {
+            log_error!("업데이트 확인 실패: {e}");
+            None
+        }
     }
 }
 
@@ -218,6 +226,19 @@ pub fn spawn(hwnd: isize, msg: u32, slot: Arc<Mutex<Option<Outcome>>>) -> Handle
         }
     });
     Handle { progress }
+}
+
+/// Spawns a thread that only looks for the newest release (no dialog);
+/// it stores its version, or `None` on failure, in `slot` and posts `msg`
+/// to `hwnd`.
+pub fn spawn_check(hwnd: isize, msg: u32, slot: Arc<Mutex<Option<Option<Version>>>>) {
+    std::thread::spawn(move || {
+        let version = latest(&endpoint()).map(|release| release.version);
+        *slot.lock().unwrap() = Some(version);
+        unsafe {
+            let _ = PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(0), LPARAM(0));
+        }
+    });
 }
 
 #[cfg(test)]
@@ -419,5 +440,21 @@ mod tests {
         );
         assert_eq!(ui.informs.borrow().len(), 1);
         assert!(ui.confirms.borrow().is_empty());
+    }
+
+    #[test]
+    fn latest_reads_the_release_or_gives_up() {
+        let server = TestServer::start(vec![
+            ("/latest", release("v0.3.0", true)),
+            ("/broken", Reply::Ok(b"not json".to_vec())),
+            ("/down", Reply::Status(500)),
+        ]);
+        let url = |p: &str| format!("{}{p}", server.base);
+        assert_eq!(
+            latest(&url("/latest")).map(|r| r.version),
+            Version::parse("0.3.0")
+        );
+        assert_eq!(latest(&url("/broken")), None);
+        assert_eq!(latest(&url("/down")), None);
     }
 }
