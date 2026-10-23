@@ -40,14 +40,8 @@ impl Version {
 
     /// `v0.2.0이` / `v0.2.2가`: the subject particle for the version as read
     /// aloud, which ends on its last digit.
-    fn with_subject(self) -> String {
-        // 영 일 삼 육 칠 팔 end in a consonant; 이 사 오 구 do not.
-        let particle = if matches!(self.patch % 10, 0 | 1 | 3 | 6 | 7 | 8) {
-            "이"
-        } else {
-            "가"
-        };
-        format!("v{self}{particle}")
+    pub(crate) fn with_subject(self) -> String {
+        format!("v{self}{}", subject_particle(self.patch % 10))
     }
 
     /// `v0.2.0으로` / `v0.2.1로`: 로 after a vowel or ㄹ (일 칠 팔).
@@ -64,6 +58,16 @@ impl Version {
 impl fmt::Display for Version {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}.{}.{}", self.major, self.minor, self.patch)
+    }
+}
+
+/// 이 or 가 after a number read aloud that ends on `last_digit`.
+pub(crate) fn subject_particle(last_digit: u32) -> &'static str {
+    // 영 일 삼 육 칠 팔 end in a consonant; 이 사 오 구 do not.
+    if matches!(last_digit, 0 | 1 | 3 | 6 | 7 | 8) {
+        "이"
+    } else {
+        "가"
     }
 }
 
