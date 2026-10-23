@@ -770,6 +770,7 @@ fn glyph(kind: NoticeKind) -> &'static str {
         NoticeKind::Info | NoticeKind::KeyResult => "\u{E946}", // Info
         NoticeKind::Failed | NoticeKind::Warning => "\u{E7BA}", // Warning
         NoticeKind::KeyPrompt => "\u{E765}",                    // Keyboard
+        NoticeKind::Update => "\u{E896}",                       // Download
     }
 }
 
@@ -972,6 +973,7 @@ mod tests {
             title: "2개 파일을 변환했습니다".into(),
             body: "photo.jpg 외 1개".into(),
             action_label: None,
+            buttons: vec![],
             remaining: 1.0,
             appear: 1.0,
             closing: None,

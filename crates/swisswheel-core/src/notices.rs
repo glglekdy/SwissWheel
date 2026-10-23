@@ -23,6 +23,8 @@ pub enum NoticeKind {
     Warning,
     KeyPrompt,
     KeyResult,
+    /// A newer version is out; carries [업데이트] and [이 버전 건너뛰기].
+    Update,
 }
 
 impl NoticeKind {
@@ -33,16 +35,35 @@ impl NoticeKind {
             NoticeKind::Done | NoticeKind::Info | NoticeKind::KeyPrompt => 5,
             NoticeKind::Failed | NoticeKind::Warning => 8,
             NoticeKind::KeyResult => 3,
+            NoticeKind::Update => 15,
         };
         Duration::from_secs(secs)
     }
 }
 
-/// What a click on a card does.
+/// What an update notice is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Product {
+    App,
+    Ffmpeg,
+}
+
+/// What a click on a card, or on one of its buttons, does.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NoticeAction {
     OpenFolder(PathBuf),
     CancelCapture,
+    /// Start the update, as the update tile or the download panel does.
+    Update(Product),
+    /// Don't announce this version (or older) again.
+    Skip(Product, String),
+}
+
+/// A button on a card, in a row under its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NoticeButton {
+    pub label: &'static str,
+    pub action: NoticeAction,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,7 +71,9 @@ pub struct Notice {
     pub kind: NoticeKind,
     pub title: String,
     pub body: String,
+    /// A click on the card outside its buttons.
     pub action: Option<NoticeAction>,
+    pub buttons: Vec<NoticeButton>,
 }
 
 pub type NoticeId = u64;
@@ -63,6 +86,8 @@ pub struct CardView {
     pub title: String,
     pub body: String,
     pub action_label: Option<&'static str>,
+    /// The buttons' labels, left to right.
+    pub buttons: Vec<&'static str>,
     /// 1 -> 0 over the card's life (timer bar); paused time is not counted.
     pub remaining: f32,
     /// 0 -> 1 over 200 ms after posting.
@@ -241,15 +266,25 @@ impl Notices {
         }
     }
 
-    /// Click a card: starts its fade and returns its action. A closing or unknown
-    /// card is ignored, so a click during the fade cannot act twice.
-    pub fn click(&mut self, id: NoticeId, now: Instant) -> Option<NoticeAction> {
+    /// Click a card, on its button `button` or elsewhere: starts its fade
+    /// and returns that button's action, or the card's (also for a button it
+    /// doesn't have). A closing or unknown card is ignored, so a click
+    /// during the fade cannot act twice.
+    pub fn click(
+        &mut self,
+        id: NoticeId,
+        button: Option<usize>,
+        now: Instant,
+    ) -> Option<NoticeAction> {
         let card = self.cards.iter_mut().find(|c| c.id == id)?;
         if card.closing_start(now).is_some() {
             return None;
         }
         card.closing_since = Some(now);
-        card.notice.action.clone()
+        match button.and_then(|i| card.notice.buttons.get(i)) {
+            Some(b) => Some(b.action.clone()),
+            None => card.notice.action.clone(),
+        }
     }
 
     /// Going quiet holds visible cards (key prompts are dropped) and hides
@@ -314,6 +349,7 @@ impl Notices {
                         Some(NoticeAction::OpenFolder(_)) => Some("클릭하면 폴더 열기"),
                         _ => None,
                     },
+                    buttons: c.notice.buttons.iter().map(|b| b.label).collect(),
                     remaining: (1.0 - c.elapsed(now).as_secs_f32() / life).clamp(0.0, 1.0),
                     appear: fraction(c.posted, now, APPEAR),
                     closing,
@@ -383,6 +419,7 @@ mod tests {
             title: title.to_string(),
             body: String::new(),
             action: None,
+            buttons: Vec::new(),
         }
     }
 
@@ -503,7 +540,10 @@ mod tests {
         let mut notice = done("A");
         notice.action = Some(NoticeAction::OpenFolder(p.clone()));
         let id = n.post(notice, t0);
-        assert_eq!(n.click(id, t0 + ms(300)), Some(NoticeAction::OpenFolder(p)));
+        assert_eq!(
+            n.click(id, None, t0 + ms(300)),
+            Some(NoticeAction::OpenFolder(p))
+        );
         assert!(n.cards(t0 + ms(310))[0].closing.is_some());
     }
 
@@ -514,9 +554,9 @@ mod tests {
         let mut notice = done("A");
         notice.action = Some(NoticeAction::OpenFolder(PathBuf::from("x")));
         let id = n.post(notice, t0);
-        assert!(n.click(id, t0 + ms(300)).is_some());
-        assert_eq!(n.click(id, t0 + ms(350)), None);
-        assert_eq!(n.click(999, t0 + ms(350)), None);
+        assert!(n.click(id, None, t0 + ms(300)).is_some());
+        assert_eq!(n.click(id, None, t0 + ms(350)), None);
+        assert_eq!(n.click(999, None, t0 + ms(350)), None);
     }
 
     #[test]
@@ -526,7 +566,7 @@ mod tests {
         let mut notice = note(NoticeKind::KeyPrompt, "key");
         notice.action = Some(NoticeAction::CancelCapture);
         let id = n.post(notice, t0);
-        assert_eq!(n.click(id, t0), Some(NoticeAction::CancelCapture));
+        assert_eq!(n.click(id, None, t0), Some(NoticeAction::CancelCapture));
     }
 
     #[test]
@@ -641,7 +681,7 @@ mod tests {
         let a_id = n.post(a.clone(), t0);
         let gone = n.post(done("gone"), t0);
         n.post(done("B"), t0);
-        n.click(gone, t0); // fading: not taken
+        n.click(gone, None, t0); // fading: not taken
         let taken = n.take_all(t0 + ms(10));
         assert_eq!(
             taken.iter().map(|x| x.title.as_str()).collect::<Vec<_>>(),
@@ -649,7 +689,7 @@ mod tests {
         );
         assert_eq!(taken[0].action, a.action);
         assert!(n.cards(t0 + ms(10)).is_empty());
-        assert_eq!(n.click(a_id, t0 + ms(20)), None);
+        assert_eq!(n.click(a_id, None, t0 + ms(20)), None);
         // Held notices come back too.
         n.set_quiet(true, t0 + ms(30));
         n.post(done("H"), t0 + ms(40));
@@ -676,5 +716,83 @@ mod tests {
         assert!(cards.iter().find(|c| c.id == b).unwrap().closing.is_some());
         let av = cards.iter().find(|c| c.id == a).unwrap();
         assert!(av.closing.is_none());
+    }
+
+    fn update_card() -> Notice {
+        Notice {
+            kind: NoticeKind::Update,
+            title: "업데이트".into(),
+            body: "SwissWheel v0.3.0이 나왔습니다".into(),
+            action: None,
+            buttons: vec![
+                NoticeButton {
+                    label: "업데이트",
+                    action: NoticeAction::Update(Product::App),
+                },
+                NoticeButton {
+                    label: "이 버전 건너뛰기",
+                    action: NoticeAction::Skip(Product::App, "0.3.0".into()),
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn buttons_run_their_own_action() {
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        let id = n.post(update_card(), t0);
+        assert_eq!(n.cards(t0)[0].buttons, ["업데이트", "이 버전 건너뛰기"]);
+        assert_eq!(
+            n.click(id, Some(1), t0),
+            Some(NoticeAction::Skip(Product::App, "0.3.0".into()))
+        );
+        assert!(n.cards(t0 + ms(10))[0].closing.is_some());
+        let id = n.post(update_card(), t0);
+        assert_eq!(
+            n.click(id, Some(0), t0),
+            Some(NoticeAction::Update(Product::App))
+        );
+        let id = n.post(update_card(), t0);
+        assert_eq!(n.click(id, None, t0), None); // the card itself only closes
+    }
+
+    #[test]
+    fn unknown_button_acts_like_the_card() {
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        let mut card = update_card();
+        card.action = Some(NoticeAction::CancelCapture);
+        let id = n.post(card, t0);
+        assert_eq!(n.click(id, Some(7), t0), Some(NoticeAction::CancelCapture));
+    }
+
+    #[test]
+    fn button_click_on_closing_card_is_ignored() {
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        let id = n.post(update_card(), t0);
+        assert!(n.click(id, Some(0), t0).is_some());
+        assert_eq!(n.click(id, Some(1), t0 + ms(50)), None);
+    }
+
+    #[test]
+    fn update_cards_stay_fifteen_seconds() {
+        assert_eq!(NoticeKind::Update.lifetime(), Duration::from_secs(15));
+    }
+
+    #[test]
+    fn quiet_release_keeps_buttons() {
+        let t0 = Instant::now();
+        let mut n = Notices::new();
+        n.set_quiet(true, t0);
+        n.post(update_card(), t0);
+        n.set_quiet(false, t0 + ms(100));
+        let cards = n.cards(t0 + ms(100));
+        assert_eq!(cards[0].buttons.len(), 2);
+        assert_eq!(
+            n.click(cards[0].id, Some(0), t0 + ms(100)),
+            Some(NoticeAction::Update(Product::App))
+        );
     }
 }

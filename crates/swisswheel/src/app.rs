@@ -1218,6 +1218,7 @@ impl AppState {
                         // Three lines' worth: the second ends in "…".
                         body: "여행 브이로그 2026 최종 편집본 진짜최종.mp4: 지원하지 않는 오디오 코덱입니다 (pcm_s24le)\n성공 1개".into(),
                         action: folder(),
+                        buttons: Vec::new(),
                     },
                 ),
                 (
@@ -1227,6 +1228,7 @@ impl AppState {
                         title: "2개 파일을 변환했습니다".into(),
                         body: "photo.jpg 외 1개 · JPG, GIF".into(),
                         action: folder(),
+                        buttons: Vec::new(),
                     },
                 ),
             ];
@@ -1264,7 +1266,7 @@ impl AppState {
         match wparam.0 {
             0 => notices.hover(u64::try_from(lparam.0).ok(), now),
             _ => {
-                let action = notices.click(lparam.0 as u64, now);
+                let action = notices.click(lparam.0 as u64, wparam.0.checked_sub(2), now);
                 log_info!("미리보기 카드 클릭: {action:?}");
             }
         }
@@ -1435,6 +1437,7 @@ impl AppState {
                     .first()
                     .cloned()
                     .map(NoticeAction::OpenFolder),
+                buttons: Vec::new(),
             };
             self.notify_job(notice, self.active_jobs == 0);
         }
@@ -1504,10 +1507,14 @@ impl AppState {
         let now = Instant::now();
         match wparam.0 {
             0 => self.notices.hover(u64::try_from(lparam.0).ok(), now),
-            _ => match self.notices.click(lparam.0 as NoticeId, now) {
+            n => match self
+                .notices
+                .click(lparam.0 as NoticeId, n.checked_sub(2), now)
+            {
                 Some(NoticeAction::OpenFolder(path)) => open_folder(&path),
                 Some(NoticeAction::CancelCapture) => self.cancel_capture(),
-                None => {}
+                // No card carries these yet.
+                Some(NoticeAction::Update(_) | NoticeAction::Skip(..)) | None => {}
             },
         }
         self.render_notices(); // a card left alone resumes its timer
@@ -2125,6 +2132,7 @@ fn info(title: &str, body: &str) -> Notice {
         title: title.to_string(),
         body: body.to_string(),
         action: None,
+        buttons: Vec::new(),
     }
 }
 
@@ -2135,6 +2143,7 @@ fn key_prompt(item: SettingItem) -> Notice {
         title: "바꿀 키를 누르세요".to_string(),
         body: format!("{} · 다른 곳을 클릭하면 취소", item.label()),
         action: Some(NoticeAction::CancelCapture),
+        buttons: Vec::new(),
     }
 }
 
