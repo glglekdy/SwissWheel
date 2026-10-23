@@ -34,7 +34,8 @@ use crate::surface::{Surface, draw_text, rounded};
 use crate::theme::{Piece, Theme, glass_layer, glass_piece, outer_shadow, rounded_shape};
 
 /// Posted to the owner window: `wparam` 0 = the hovered card changed
-/// (`lparam` = its id, or -1 for none), 1 = a card was clicked (`lparam` = id).
+/// (`lparam` = its id, or -1 for none), 1 = a card was clicked outside its
+/// buttons, `2 + i` = its button `i` was clicked (`lparam` = id).
 pub const WM_APP_NOTICE: u32 = WM_APP + 33;
 
 /// Card shape (DIPs), shared by the progress card and the notice cards.
@@ -71,11 +72,16 @@ const ACTION: f32 = 19.0;
 const TIMER: f32 = 2.0;
 const TIMER_ABOVE: f32 = 10.0;
 const TIMER_BELOW: f32 = 6.0;
+/// A card's buttons: their height, the row they take with the space above
+/// them, and the gap between two.
+const BUTTON: f32 = 26.0;
+const BUTTON_ROW: f32 = 34.0;
+const BUTTON_GAP: f32 = 8.0;
 
 /// Cards drawn at once: three live ones plus those fading out.
 const MAX_DRAWN: usize = 6;
 /// The tallest stack the window has room for.
-const MAX_STACK: f32 = card_height(MAX_ROWS, true) + 4.0 * (GAP + notice_height(2, true));
+const MAX_STACK: f32 = card_height(MAX_ROWS, true) + 4.0 * (GAP + notice_height(2, true, true));
 
 /// Not exported by the `windows` crate under WindowsAndMessaging.
 const WM_MOUSELEAVE: u32 = 0x02A3;
@@ -83,6 +89,9 @@ const WM_MOUSELEAVE: u32 = 0x02A3;
 thread_local! {
     /// The cards under the mouse, in window pixels, in `hit_list` order.
     static HITS: RefCell<Vec<(NoticeId, D2D_RECT_F)>> = const { RefCell::new(Vec::new()) };
+    /// The live cards' buttons (card, button index, rect), in window pixels.
+    static BUTTON_HITS: RefCell<Vec<(NoticeId, usize, D2D_RECT_F)>> =
+        const { RefCell::new(Vec::new()) };
     /// The card last reported as hovered.
     static HOVER: Cell<Option<NoticeId>> = const { Cell::new(None) };
     /// A WM_MOUSELEAVE is requested for the current hover.
@@ -273,6 +282,7 @@ impl NoticeWindow {
         self.surface = None;
         self.region.clear();
         HITS.with_borrow_mut(Vec::clear);
+        BUTTON_HITS.with_borrow_mut(Vec::clear);
         if HOVER.take().is_some() {
             post_to_owner(self.hwnd, 0, -1);
         }
@@ -351,6 +361,7 @@ impl NoticeWindow {
         let placed = arrange(shown, more, cards, body_of, self.margin, bottom, scale);
         self.set_region(&placed);
         HITS.set(hit_list(&placed));
+        BUTTON_HITS.set(button_hits(&placed, scale));
 
         let Some(surface) = &self.surface else {
             return Ok(());
@@ -429,6 +440,7 @@ impl Drop for NoticeWindow {
     fn drop(&mut self) {
         self.surface = None;
         HITS.with_borrow_mut(Vec::clear);
+        BUTTON_HITS.with_borrow_mut(Vec::clear);
         HOVER.set(None);
         TRACKING.set(false);
         unsafe {
@@ -524,6 +536,58 @@ fn hit_list(placed: &[Placed]) -> Vec<(NoticeId, D2D_RECT_F)> {
         .collect()
 }
 
+/// The buttons of the cards not fading out, in window pixels.
+fn button_hits(placed: &[Placed], scale: f32) -> Vec<(NoticeId, usize, D2D_RECT_F)> {
+    placed
+        .iter()
+        .filter(|p| !p.closing())
+        .filter_map(|p| Some((p.card?, p.rect)))
+        .flat_map(|(card, rect)| {
+            button_rects(rect, card.buttons.len(), scale)
+                .into_iter()
+                .enumerate()
+                .map(move |(i, r)| (card.id, i, r))
+        })
+        .collect()
+}
+
+/// `count` equal buttons across the text column, right above the timer bar.
+fn button_rects(card: D2D_RECT_F, count: usize, scale: f32) -> Vec<D2D_RECT_F> {
+    if count == 0 {
+        return Vec::new();
+    }
+    let left = card.left + (PAD_X + ICON + ICON_GAP) * scale;
+    let right = card.right - PAD_X * scale;
+    let bottom = card.bottom - (TIMER_ABOVE + TIMER + TIMER_BELOW) * scale;
+    let gap = BUTTON_GAP * scale;
+    let width = (right - left - gap * (count - 1) as f32) / count as f32;
+    (0..count)
+        .map(|i| {
+            let x = left + i as f32 * (width + gap);
+            D2D_RECT_F {
+                left: x,
+                top: bottom - BUTTON * scale,
+                right: x + width,
+                bottom,
+            }
+        })
+        .collect()
+}
+
+/// The button of card `id` at `(x, y)`, if any.
+fn button_at(
+    hits: &[(NoticeId, usize, D2D_RECT_F)],
+    id: NoticeId,
+    x: f32,
+    y: f32,
+) -> Option<usize> {
+    hits.iter()
+        .find(|(card, _, r)| {
+            *card == id && x >= r.left && x < r.right && y >= r.top && y < r.bottom
+        })
+        .map(|&(_, i, _)| i)
+}
+
 /// The first card in `hits` containing `(x, y)`.
 fn hit_at(hits: &[(NoticeId, D2D_RECT_F)], x: f32, y: f32) -> Option<NoticeId> {
     hits.iter()
@@ -543,11 +607,13 @@ const fn card_height(rows: usize, more: bool) -> f32 {
     HEADER + rows as f32 * ROW + if more { MORE } else { 0.0 } + BOTTOM
 }
 
-/// A notice card's height with `body_lines` lines of body text.
-const fn notice_height(body_lines: usize, action: bool) -> f32 {
+/// A notice card's height with `body_lines` lines of body text, an action
+/// line, and a row of buttons.
+const fn notice_height(body_lines: usize, action: bool, buttons: bool) -> f32 {
     let text = TITLE + body_lines as f32 * BODY_LINE + if action { ACTION } else { 0.0 };
     let content = if text > ICON { text } else { ICON };
-    PAD_Y + content + TIMER_ABOVE + TIMER + TIMER_BELOW
+    let row = if buttons { BUTTON_ROW } else { 0.0 };
+    PAD_Y + content + row + TIMER_ABOVE + TIMER + TIMER_BELOW
 }
 
 /// Each slot with its top edge and height in DIPs, measured up from the
@@ -571,7 +637,11 @@ fn stack(
     // row of the job that just finished, or what is still listed.
     let morph_from = card_height(progress_rows.max(1), more);
     for card in cards {
-        let own = notice_height(body_lines(card), card.action_label.is_some());
+        let own = notice_height(
+            body_lines(card),
+            card.action_label.is_some(),
+            !card.buttons.is_empty(),
+        );
         let (height, shown) = match card.from_progress {
             Some(f) => (morph_from + (own - morph_from) * f, 1.0),
             None => (own, card.appear),
@@ -619,6 +689,7 @@ struct Formats {
     /// The body's size, wrapping, to find its line breaks.
     wrap: IDWriteTextFormat,
     action: IDWriteTextFormat,
+    button: IDWriteTextFormat,
 }
 
 impl Formats {
@@ -637,6 +708,11 @@ impl Formats {
             body: trimmed(12.0 * scale, DWRITE_FONT_WEIGHT_NORMAL, leading)?,
             wrap: wrapping_format(12.0 * scale)?,
             action: trimmed(11.5 * scale, DWRITE_FONT_WEIGHT_SEMI_BOLD, leading)?,
+            button: trimmed(
+                11.5 * scale,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_TEXT_ALIGNMENT_CENTER,
+            )?,
         })
     }
 }
@@ -834,7 +910,7 @@ fn draw_notice(
         };
         let mut top = r.top + PAD_Y * scale;
         // A title alone centers on the icon.
-        let alone = body.is_empty() && card.action_label.is_none();
+        let alone = body.is_empty() && card.action_label.is_none() && card.buttons.is_empty();
         let title_height = if alone { ICON } else { TITLE } * scale;
         draw_text(
             ctx,
@@ -857,6 +933,18 @@ fn draw_notice(
                 column(top, ACTION * scale),
                 &brush(&theme.accent)?,
             );
+        }
+
+        // The first button is the one to press: filled with the accent.
+        let buttons = button_rects(r, card.buttons.len(), scale);
+        for (i, (label, rect)) in card.buttons.iter().zip(buttons).enumerate() {
+            let (fill, ink) = if i == 0 {
+                (theme.accent, theme.on_accent)
+            } else {
+                (theme.track, theme.text)
+            };
+            ctx.FillRoundedRectangle(&rounded(rect, BUTTON * scale / 2.0), &brush(&fill)?);
+            draw_text(ctx, label, &f.button, rect, &brush(&ink)?);
         }
 
         // Time left before the card closes by itself.
@@ -948,7 +1036,8 @@ unsafe extern "system" fn wnd_proc(
         WM_LBUTTONDOWN => {
             let (x, y) = client_point(lparam);
             if let Some(id) = hit(x, y) {
-                post_to_owner(hwnd, 1, id as isize);
+                let button = BUTTON_HITS.with_borrow(|hits| button_at(hits, id, x, y));
+                post_to_owner(hwnd, button.map_or(1, |i| 2 + i), id as isize);
             }
         }
         _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
@@ -991,7 +1080,7 @@ mod tests {
         let cards = [card(3), card(2)];
         let s = stack(2, false, &cards, |_| 1);
         let progress = card_height(2, false);
-        let one = notice_height(1, false);
+        let one = notice_height(1, false, false);
         assert_eq!(s.len(), 3);
         assert_eq!(s[0], (Slot::Progress, progress, progress));
         // The newest card sits 8 DIPs above the progress card.
@@ -1008,12 +1097,12 @@ mod tests {
 
     #[test]
     fn body_lines_and_action_set_the_height() {
-        assert!(notice_height(2, false) > notice_height(1, false));
-        assert!(notice_height(1, true) > notice_height(1, false));
+        assert!(notice_height(2, false, false) > notice_height(1, false, false));
+        assert!(notice_height(1, true, false) > notice_height(1, false, false));
         let mut long = card(1);
         long.action_label = Some("클릭하면 폴더 열기");
         let s = stack(0, false, &[long], |_| 2);
-        assert!(near(s[0].2, notice_height(2, true)));
+        assert!(near(s[0].2, notice_height(2, true, false)));
     }
 
     #[test]
@@ -1065,7 +1154,7 @@ mod tests {
         let mut closing = card(2);
         closing.closing = Some(0.5);
         let s = stack(0, false, &[closing, card(1)], |_| 1);
-        let one = notice_height(1, false);
+        let one = notice_height(1, false, false);
         // Halfway through the fade, half of its room (with the gap) is left.
         assert!(near(s[1].1 - s[1].2, (one + 8.0) * 0.5));
     }
@@ -1111,7 +1200,7 @@ mod tests {
 
     #[test]
     fn morph_interpolates_height() {
-        let own = notice_height(1, true);
+        let own = notice_height(1, true, false);
         let mut c = card(1);
         c.action_label = Some("클릭하면 폴더 열기");
         c.from_progress = Some(0.5);
@@ -1123,5 +1212,44 @@ mod tests {
         c.from_progress = Some(1.0);
         let s = stack(0, false, &[c], |_| 1);
         assert!(near(s[0].2, own));
+    }
+
+    #[test]
+    fn buttons_add_a_row() {
+        assert!(near(
+            notice_height(1, false, true) - notice_height(1, false, false),
+            BUTTON_ROW
+        ));
+        let mut c = card(1);
+        c.buttons = vec!["업데이트", "이 버전 건너뛰기"];
+        let s = stack(0, false, &[c], |_| 1);
+        assert!(near(s[0].2, notice_height(1, false, true)));
+    }
+
+    #[test]
+    fn button_rects_split_the_text_column() {
+        let r = D2D_RECT_F {
+            left: 0.0,
+            top: 0.0,
+            right: WIDTH,
+            bottom: notice_height(1, false, true),
+        };
+        let b = button_rects(r, 2, 1.0);
+        assert_eq!(b.len(), 2);
+        assert!(near(b[0].left, PAD_X + ICON + ICON_GAP));
+        assert!(near(b[1].right, WIDTH - PAD_X));
+        assert!(near(b[1].left - b[0].right, BUTTON_GAP));
+        assert!(near(b[0].right - b[0].left, b[1].right - b[1].left));
+        assert!(near(
+            b[0].bottom,
+            r.bottom - (TIMER_ABOVE + TIMER + TIMER_BELOW)
+        ));
+        assert!(near(b[0].bottom - b[0].top, BUTTON));
+        let hits: Vec<_> = b.iter().enumerate().map(|(i, &r)| (7, i, r)).collect();
+        let mid = |r: D2D_RECT_F| ((r.left + r.right) / 2.0, (r.top + r.bottom) / 2.0);
+        let (x, y) = mid(b[1]);
+        assert_eq!(button_at(&hits, 7, x, y), Some(1));
+        assert_eq!(button_at(&hits, 8, x, y), None);
+        assert_eq!(button_at(&hits, 7, x, b[1].top - 1.0), None);
     }
 }
