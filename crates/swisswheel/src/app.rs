@@ -18,7 +18,7 @@ use swisswheel_core::ffmpeg_release;
 use swisswheel_core::geometry::Hit;
 use swisswheel_core::menu::{MenuAction, MenuHit, MenuSession, Tile};
 use swisswheel_core::menu_geometry;
-use swisswheel_core::notices::{Notice, NoticeAction, NoticeId, NoticeKind, Notices};
+use swisswheel_core::notices::{Notice, NoticeAction, NoticeId, NoticeKind, Notices, Product};
 use swisswheel_core::restart;
 use swisswheel_core::session::{Selection, WheelSession};
 use swisswheel_core::settings::{self, Dir, SettingItem};
@@ -26,6 +26,7 @@ use swisswheel_core::summary::{
     balloon_body, busy_tooltip, idle_tooltip, job_summary, selection_label,
 };
 use swisswheel_core::update::{self as release, ReadyDecision, TileDecision, Version, text};
+use swisswheel_core::update_notice;
 use windows::System::DispatcherQueueController;
 use windows::Win32::Foundation::{
     ERROR_ALREADY_EXISTS, GetLastError, HWND, LPARAM, LRESULT, POINT, WPARAM,
@@ -74,6 +75,8 @@ const WM_APP_FFMPEG: u32 = WM_APP + 32;
 const WM_APP_ESSENTIALS: u32 = WM_APP + 35;
 /// The FFmpeg remove thread finished; its outcome is in `remove_slot`.
 const WM_APP_FFMPEG_REMOVE: u32 = WM_APP + 36;
+/// The startup check found (or failed to find) the newest SwissWheel.
+const WM_APP_AUTO_CHECK: u32 = WM_APP + 37;
 /// How long a successful check for the newest FFmpeg is trusted.
 const LATEST_TTL: Duration = Duration::from_secs(3600);
 /// How long a freshly updated app waits for the old one to exit.
@@ -102,6 +105,8 @@ const PROGRESS_INTERVAL_MS: u32 = 500;
 const TIMER_NOTICE: usize = 10;
 /// Re-checks full screen / presentation mode while cards are shown or held.
 const TIMER_QUIET: usize = 11;
+/// Fires once, `update_notice::DELAY` after start, for the update check.
+const TIMER_AUTO_CHECK: usize = 12;
 const QUIET_INTERVAL_MS: u32 = 2000;
 /// Render failures in a row after which the notice window is given up.
 const NOTICE_FAILURES: u8 = 2;
@@ -200,6 +205,10 @@ pub(crate) struct AppState {
     /// The FFmpeg remove thread is running.
     removing: bool,
     remove_slot: Arc<Mutex<Option<RemoveOutcome>>>,
+    /// The startup check's newest SwissWheel (`None` inside: it failed).
+    auto_check_slot: Arc<Mutex<Option<Option<Version>>>>,
+    /// The startup check waits for the FFmpeg check's last report.
+    auto_ffmpeg: bool,
     /// Balloon fallback: the folder of the last balloon, opened when it is clicked.
     last_output: Option<PathBuf>,
     hooks_installed_at: Instant,
@@ -400,6 +409,8 @@ pub fn run() -> Result<()> {
         status_slot: Arc::new(Mutex::new(None)),
         removing: false,
         remove_slot: Arc::new(Mutex::new(None)),
+        auto_check_slot: Arc::new(Mutex::new(None)),
+        auto_ffmpeg: false,
         last_output: None,
         hooks_installed_at: Instant::now(),
         taskbar_created,
@@ -411,6 +422,10 @@ pub fn run() -> Result<()> {
             s.notify(notice);
         }
     });
+    if !previewing {
+        let delay = update_notice::DELAY.as_millis() as u32;
+        unsafe { SetTimer(Some(hwnd), TIMER_AUTO_CHECK, delay, None) };
+    }
     #[cfg(debug_assertions)]
     if let Ok(what) = std::env::var("SWISSWHEEL_PREVIEW") {
         with_state(|s| s.preview(&what));
@@ -486,6 +501,9 @@ unsafe extern "system" fn wnd_proc(
         }
         WM_APP_FFMPEG_REMOVE => {
             with_state(AppState::on_remove_done);
+        }
+        WM_APP_AUTO_CHECK => {
+            with_state(AppState::on_auto_checked);
         }
         WM_APP_FOREGROUND => {
             with_state(|s| s.on_foreground(HWND(wparam.0 as *mut _)));
@@ -863,18 +881,69 @@ impl AppState {
         } else if accent_changed {
             self.render_notices();
         }
+        self.save_config(&before, Some(item));
+    }
+
+    /// Saves what changed since `before`; a failure shows a warning and,
+    /// for a settings row (`item`), its ⚠.
+    fn save_config(&mut self, before: &Config, item: Option<SettingItem>) {
         if !self.config_writable {
             return; // see CONFIG_NOTICE
         }
-        match config_file::save(&self.config_dir, &before, &self.config) {
+        match config_file::save(&self.config_dir, before, &self.config) {
             Ok(()) => self.save_failed = None,
             Err(e) => {
                 log_error!("설정 저장 실패: {e}");
                 if self.save_failed.is_none() {
                     self.notify(warning_notice("설정을 저장하지 못했습니다", &e.to_string()));
                 }
-                self.save_failed = Some(item);
+                if let Some(item) = item {
+                    self.save_failed = Some(item);
+                }
             }
+        }
+    }
+
+    /// [이 버전 건너뛰기]: the startup check stays quiet about `version`
+    /// (and older) from now on.
+    fn skip_version(&mut self, product: Product, version: String) {
+        log_info!("{version} 버전을 건너뜁니다 ({product:?})");
+        let mut new = self.config.clone();
+        match product {
+            Product::App => new.updates.skip_app = Some(version),
+            Product::Ffmpeg => new.updates.skip_ffmpeg = Some(version),
+        }
+        let before = std::mem::replace(&mut self.config, new);
+        self.save_config(&before, None);
+    }
+
+    /// A minute after start: look for a newer SwissWheel and FFmpeg, unless
+    /// the setting is off. A panel check already running is waited for.
+    fn start_auto_check(&mut self) {
+        if !self.config.updates.auto_check {
+            log_info!("자동 확인: 꺼져 있어 확인하지 않습니다");
+            return;
+        }
+        update::spawn_check(
+            self.hwnd.0 as isize,
+            WM_APP_AUTO_CHECK,
+            Arc::clone(&self.auto_check_slot),
+        );
+        self.auto_ffmpeg = true;
+        self.start_essentials_check();
+    }
+
+    fn on_auto_checked(&mut self) {
+        let Some(latest) = self.auto_check_slot.lock().unwrap().take() else {
+            return;
+        };
+        let skipped = self.config.updates.skip_app.as_deref();
+        match latest {
+            Some(v) if update_notice::app_due(v, update::current(), skipped) => {
+                self.notify(update_notice::notice(Product::App, &v.to_string()));
+            }
+            Some(v) => log_info!("자동 확인: SwissWheel v{v}, 알림 없음 (최신이거나 건너뜀)"),
+            None => log_info!("자동 확인: SwissWheel 확인 실패, 알림 없음"),
         }
     }
 
@@ -1221,16 +1290,9 @@ impl AppState {
                         buttons: Vec::new(),
                     },
                 ),
-                (
-                    0,
-                    Notice {
-                        kind: NoticeKind::Done,
-                        title: "2개 파일을 변환했습니다".into(),
-                        body: "photo.jpg 외 1개 · JPG, GIF".into(),
-                        action: folder(),
-                        buttons: Vec::new(),
-                    },
-                ),
+                // The stack holds three: the update card stands in for a
+                // finished job's (the failed one shows the action line).
+                (0, update_notice::notice(Product::App, "0.3.0")),
             ];
             for (ago, notice) in cards {
                 let at = now.checked_sub(Duration::from_secs(ago)).unwrap_or(now);
@@ -1356,6 +1418,12 @@ impl AppState {
                 }
             }
             TIMER_MENU_CAPTURE => self.cancel_capture(),
+            TIMER_AUTO_CHECK => {
+                unsafe {
+                    let _ = KillTimer(Some(self.hwnd), TIMER_AUTO_CHECK);
+                }
+                self.start_auto_check();
+            }
             TIMER_MENU_ANIMATION => {
                 self.render_menu();
                 if self.menu.is_none()
@@ -1513,8 +1581,12 @@ impl AppState {
             {
                 Some(NoticeAction::OpenFolder(path)) => open_folder(&path),
                 Some(NoticeAction::CancelCapture) => self.cancel_capture(),
-                // No card carries these yet.
-                Some(NoticeAction::Update(_) | NoticeAction::Skip(..)) | None => {}
+                Some(NoticeAction::Update(Product::App)) => self.start_update(),
+                Some(NoticeAction::Update(Product::Ffmpeg)) => {
+                    self.run_essential(EssentialAction::Update);
+                }
+                Some(NoticeAction::Skip(product, version)) => self.skip_version(product, version),
+                None => {}
             },
         }
         self.render_notices(); // a card left alone resumes its timer
@@ -1707,6 +1779,16 @@ impl AppState {
                 self.latest_ok_at = None;
             }
             None => {}
+        }
+        if report.last && self.auto_ffmpeg {
+            self.auto_ffmpeg = false;
+            let skipped = self.config.updates.skip_ffmpeg.as_deref();
+            match update_notice::ffmpeg_due(&self.essentials, skipped) {
+                Some(tag) => {
+                    self.notify(update_notice::notice(Product::Ffmpeg, &tag));
+                }
+                None => log_info!("자동 확인: FFmpeg 알림 없음"),
+            }
         }
         self.refresh_download_panel();
     }

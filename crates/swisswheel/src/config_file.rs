@@ -221,6 +221,25 @@ mod tests {
     }
 
     #[test]
+    fn save_records_a_skipped_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(&path, "# mine\nopen_key = \"Space\"\n").unwrap();
+        let before = Config::default();
+        let mut after = before.clone();
+        after.updates.skip_app = Some("0.3.0".into());
+        save(dir.path(), &before, &after).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with("# mine\nopen_key = \"Space\"\n"), "{text}");
+        assert!(text.contains("[updates]\nskip_app = \"0.3.0\""), "{text}");
+        assert!(!text.contains("auto_check"), "{text}");
+        assert_eq!(
+            config::parse(&text).unwrap().updates.skip_app.as_deref(),
+            Some("0.3.0")
+        );
+    }
+
+    #[test]
     fn save_refuses_unreadable_toml() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
