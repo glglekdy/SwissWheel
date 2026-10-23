@@ -24,6 +24,7 @@ pub enum SettingItem {
     ShrinkPercent,
     CompressVideo,
     DoNotDisturb,
+    AutoCheck,
     Accent,
 }
 
@@ -68,7 +69,7 @@ impl Category {
             Category::Tools => &[ShrinkPercent, CompressVideo],
             Category::Convert => &[JpgQuality, WebpQuality, Mp3Bitrate],
             Category::Notifications => &[ProgressWindow, TrayRing, DoNotDisturb],
-            Category::General => &[StartWithWindows, Accent],
+            Category::General => &[StartWithWindows, AutoCheck, Accent],
         }
     }
 }
@@ -139,6 +140,7 @@ impl SettingItem {
             SettingItem::ShrinkPercent => "축소 비율",
             SettingItem::CompressVideo => "영상 압축",
             SettingItem::DoNotDisturb => "방해 금지",
+            SettingItem::AutoCheck => "업데이트 자동 확인",
             SettingItem::Accent => "강조색",
         }
     }
@@ -167,6 +169,7 @@ impl SettingItem {
             SettingItem::ShrinkPercent => format!("{}%", c.tools.shrink_percent),
             SettingItem::CompressVideo => strength_label(c.tools.compress_video).to_string(),
             SettingItem::DoNotDisturb => on_off(c.notifications.do_not_disturb),
+            SettingItem::AutoCheck => on_off(c.updates.auto_check),
             SettingItem::Accent => c.appearance.accent.label().to_string(),
         }
     }
@@ -244,6 +247,12 @@ pub fn step(c: &Config, item: SettingItem, dir: Dir) -> Option<Config> {
                 dir,
                 |_| false,
             )?;
+        }
+        SettingItem::AutoCheck => {
+            next.updates.auto_check =
+                next_in([false, true].into_iter(), c.updates.auto_check, dir, |_| {
+                    false
+                })?;
         }
         SettingItem::Accent => {
             let index = |a: Accent| ACCENTS.iter().position(|&x| x == a).unwrap_or(0);
@@ -331,6 +340,7 @@ mod tests {
             ("트레이 링", "켬"),
             ("방해 금지", "끔"),
             ("Windows 시작 시 실행", "끔"),
+            ("업데이트 자동 확인", "켬"),
             ("강조색", "블루"),
         ]
         .map(|(l, v)| (l, v.to_string()));
@@ -352,7 +362,10 @@ mod tests {
             Category::Notifications.items(),
             [ProgressWindow, TrayRing, DoNotDisturb]
         );
-        assert_eq!(Category::General.items(), [StartWithWindows, Accent]);
+        assert_eq!(
+            Category::General.items(),
+            [StartWithWindows, AutoCheck, Accent]
+        );
         assert!(CATEGORIES.iter().all(|c| c.items().len() <= MAX_ROWS));
     }
 
@@ -476,5 +489,20 @@ mod tests {
         let ring = step(&c, SettingItem::TrayRing, Dir::Back).unwrap();
         assert!(!ring.progress.tray_ring);
         assert_eq!(step(&c, SettingItem::ProgressWindow, Dir::Forward), None);
+    }
+
+    #[test]
+    fn auto_check_toggles() {
+        let c = Config::default();
+        let off = step(&c, SettingItem::AutoCheck, Dir::Back).unwrap();
+        assert!(!off.updates.auto_check);
+        assert_eq!(SettingItem::AutoCheck.value(&off), "끔");
+        assert_eq!(step(&c, SettingItem::AutoCheck, Dir::Forward), None);
+        assert!(
+            step(&off, SettingItem::AutoCheck, Dir::Forward)
+                .unwrap()
+                .updates
+                .auto_check
+        );
     }
 }

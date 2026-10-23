@@ -174,6 +174,28 @@ pub struct Notifications {
     pub do_not_disturb: bool,
 }
 
+/// The check for new versions a minute after start, and the versions the
+/// user chose to skip (announced again only when a newer one comes out).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    pub auto_check: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_app: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skip_ffmpeg: Option<String>,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Updates {
+            auto_check: true,
+            skip_app: None,
+            skip_ffmpeg: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -186,6 +208,7 @@ pub struct Config {
     pub tools: Tools,
     pub appearance: Appearance,
     pub notifications: Notifications,
+    pub updates: Updates,
 }
 
 impl Default for Config {
@@ -200,6 +223,7 @@ impl Default for Config {
             tools: Tools::default(),
             appearance: Appearance::default(),
             notifications: Notifications::default(),
+            updates: Updates::default(),
         }
     }
 }
@@ -411,6 +435,33 @@ do_not_disturb = true
         );
         assert_eq!(parse(&toml::to_string_pretty(&c).unwrap()), Ok(c));
         assert!(default_toml().contains("accent = \"blue\""));
+    }
+
+    #[test]
+    fn updates_defaults_and_skips() {
+        let c = Config::default();
+        assert!(c.updates.auto_check);
+        assert_eq!(
+            (
+                c.updates.skip_app.as_deref(),
+                c.updates.skip_ffmpeg.as_deref()
+            ),
+            (None, None)
+        );
+        assert!(default_toml().contains("[updates]"));
+        assert!(!default_toml().contains("skip_"));
+        let c = parse(
+            "[updates]
+auto_check = false
+skip_app = \"0.3.0\"
+skip_ffmpeg = \"8.0.1\"
+",
+        )
+        .unwrap();
+        assert!(!c.updates.auto_check);
+        assert_eq!(c.updates.skip_app.as_deref(), Some("0.3.0"));
+        assert_eq!(c.updates.skip_ffmpeg.as_deref(), Some("8.0.1"));
+        assert_eq!(parse(&toml::to_string_pretty(&c).unwrap()), Ok(c));
     }
 
     #[test]
