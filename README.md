@@ -26,10 +26,32 @@ Quit from the tray icon's right-click menu. Settings can be changed in the menu'
 - Options: some items take options (GIF frame rate and size, video resolution, compression strength, shrink ratio, JPG/WebP quality). Rest on such an item for a moment and a panel opens beside the wheel; drop on one of its rows, or on the item itself for the default.
 - Progress: while jobs run, a small card above the tray lists each file with a progress bar, and a ring around the tray icon fills up. When a job finishes, its card turns into the result card. Either can be turned off in the settings panel or `config.toml` (`[progress] window`, `tray_ring`). Quitting cancels running video work and cleans up.
 - Desktop menu and settings panel: wheel keys (press to bind), the shrink ratio and video compression strength used when you drop on the tool itself, start with Windows, JPG/WebP quality, MP3 bitrate, and the progress displays, accent color, and do not disturb, all applied live. The UI uses a liquid-glass look (transparency can be turned off in Windows) with the embedded Pretendard font.
+- Image editor: drop one still image on **✎편집** (last tile of the tools wheel) and a floating panel opens mid-screen with the rest dimmed. Crop (free or fixed ratio), rotate, flip, grayscale, and strip location/camera info, with undo/redo; saves `photo (edited).jpg` next to the original. See "Image editor" below.
 
 Video and audio need FFmpeg: open **다운로드** in the desktop menu. Its panel shows the FFmpeg in use and checks for a newer one; **설치** fetches the latest essentials build from [GyanD/codexffmpeg](https://github.com/GyanD/codexffmpeg/releases) and sets it up (checked against GitHub's SHA-256; it goes in an `ffmpeg` folder next to `swisswheel.exe`, or `%LOCALAPPDATA%\SwissWheel\ffmpeg` when that folder can't be written), **업데이트** replaces it with a newer release, and **제거** deletes the copy SwissWheel put there. An FFmpeg you installed yourself on `PATH` is shown but never changed; **전용 설치** gives SwissWheel its own copy, which it then prefers. You can also put `ffmpeg.exe` and `ffprobe.exe` in either folder yourself, or have them on `PATH`.
 
 Shown but not yet implemented (they say "다음 버전에서 지원 예정입니다"): the actions wheel (share, copy, cut, copy path, terminal), and the menu's plugin tile.
+
+## Image editor
+
+1. Drag one still image (JPG, PNG, WebP, BMP, TIFF, GIF, ICO; not an animated GIF) and press **Space**. **✎편집** is the last tile of the tools wheel; it doesn't show for several files, folders, video, or audio.
+2. Drop on it. The panel opens centered on the monitor under the cursor and takes keyboard focus; clicking outside doesn't close it. A big photo shows **불러오는 중** while it loads.
+3. Edit with the buttons or keys, watching the preview:
+
+   | Key | Does |
+   |---|---|
+   | **C** | Crop mode on/off. Drag a handle to resize, drag inside to move, pick **자유 / 원본 / 1:1 / 4:3 / 3:4 / 16:9 / 9:16**. **Enter** or **C** applies, **Esc** cancels. |
+   | **R** / **Shift+R** | Rotate 90° clockwise / counterclockwise |
+   | **H** / **V** | Flip horizontally / vertically |
+   | **G** | Grayscale on/off |
+   | **I** | Strip location and camera info on/off (JPG, PNG, WebP) |
+   | **Ctrl+Z** / **Ctrl+Y** (or **Ctrl+Shift+Z**) | Undo / redo |
+   | **Enter** | Save |
+   | **Esc** | Cancel; with edits, press **Esc** again within 3 seconds to discard them |
+
+4. Saving closes the panel and runs like any other job: the result is `photo (edited).jpg` next to the original (same format; JPG quality 95, WebP 92, other formats lossless). With only **I** on, the file is copied without re-compressing and without its info, as `photo (no info).jpg`; any other edit re-saves the picture and drops the info too. Phone portrait photos stay upright.
+
+Only one panel can be open at a time. While it is open, double-tapping Ctrl does nothing, and the menu's **재시작** and **업데이트** wait until you close it. Quitting SwissWheel discards unsaved edits.
 
 ## Updates
 
