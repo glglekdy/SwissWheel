@@ -189,8 +189,6 @@ pub fn set_menu_enabled(enabled: bool) {
 }
 
 /// The image editor opened or closed: while open, the menu stays shut.
-// Unused until Task 12 wires `editor::is_open()` to it.
-#[allow(dead_code)]
 pub fn set_editor_open(open: bool) {
     with_tracker(|t| t.set_editor_open(open));
 }

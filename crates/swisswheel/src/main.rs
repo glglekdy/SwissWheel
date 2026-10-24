@@ -6,8 +6,6 @@ mod app;
 mod autostart;
 mod config_file;
 mod dnd;
-// Opened from the wheel once Task 12 wires it into app.rs.
-#[allow(dead_code)]
 mod editor;
 mod engines;
 mod essentials_status;
