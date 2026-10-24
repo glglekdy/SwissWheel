@@ -2122,6 +2122,7 @@ impl AppState {
             return;
         }
         let accent = self.config.appearance.accent;
+        // An unreadable image comes back as an event with its own card.
         if let Err(e) = editor::open(path, self.hwnd, WM_APP_EDITOR, accent) {
             log_error!("편집기를 열 수 없습니다: {e}");
             self.notify(warning_notice(editor_text::TITLE, editor_text::OPEN_FAILED));

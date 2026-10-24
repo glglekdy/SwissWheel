@@ -30,6 +30,10 @@ const SMALL_WEBP_QUALITY: u8 = 70;
 
 /// Image in, image out. Anything touching video (animated GIF → MP4,
 /// MKV → GIF) belongs to FFmpeg.
+///
+/// `Tool::Edit` is deliberately absent: an editor save carries `Job.edits`,
+/// and `jobs` routes it to [`apply_edits`] or the info strip before it ever
+/// asks `supports`.
 pub fn supports(op: &Operation, input: Format) -> bool {
     input.kind() == MediaKind::Image
         && match op {
@@ -863,5 +867,19 @@ pub(crate) mod tests {
         let src = dir.path().join("d.png");
         rgba_png(&src, 37, 11, 255);
         assert_eq!(dimensions(&src).unwrap(), (37, 11));
+    }
+
+    #[test]
+    fn dimensions_of_a_broken_image_is_a_read_error() {
+        // The editor shows this message when it cannot open a file.
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("broken.jpg");
+        std::fs::write(&src, b"not an image").unwrap();
+        let err = dimensions(&src).unwrap_err();
+        assert!(matches!(err, EngineError::Read(_)));
+        assert_eq!(
+            err.user_message("broken.jpg"),
+            "broken.jpg: 이미지를 읽을 수 없습니다"
+        );
     }
 }

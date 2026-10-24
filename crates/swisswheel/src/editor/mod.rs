@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use ::image::imageops::{self, FilterType};
+use ::image::imageops::FilterType;
 use ::image::{DynamicImage, RgbaImage};
 use swisswheel_core::appearance::Accent;
 use swisswheel_core::editor::{EditPlan, text};
@@ -82,7 +82,9 @@ thread_local! {
 /// Opens the panel for `path` on the monitor under the cursor, showing
 /// "불러오는 중" while a thread decodes the image. Every event later is
 /// queued for `take_events` and announced by posting `notify` to `owner`.
-/// An error (unreadable header, no window or renderer) leaves no window.
+/// An unreadable image opens nothing and queues `Failed` with the read
+/// message, as a failed decode does; an error (no window or renderer)
+/// leaves no window.
 pub fn open(path: PathBuf, owner: HWND, notify: u32, accent: Accent) -> windows::core::Result<()> {
     if is_open() {
         // Callers check `is_open` first; one panel at a time.
@@ -94,10 +96,21 @@ pub fn open(path: PathBuf, owner: HWND, notify: u32, accent: Accent) -> windows:
         return Ok(());
     }
     let name = file_name(&path);
-    let size = dimensions(&path).map_err(|e| {
-        log_error!("편집기: 크기를 읽을 수 없습니다: {e}");
-        windows::core::Error::new(E_FAIL, e.to_string())
-    })?;
+    let size = match dimensions(&path) {
+        Ok(size) => size,
+        Err(e) => {
+            log_error!("편집기: 이미지를 읽을 수 없습니다: {e}");
+            EVENTS.with(|events| {
+                events
+                    .borrow_mut()
+                    .push(EditorEvent::Failed(e.user_message(&name)))
+            });
+            unsafe {
+                let _ = PostMessageW(Some(owner), notify, WPARAM(0), LPARAM(0));
+            }
+            return Ok(());
+        }
+    };
     let place = window::placement();
     let layout = panel_layout(place.work, place.scale, size);
     let windows = Windows::create(owner, place.monitor, layout.window)?;
@@ -342,22 +355,53 @@ fn spawn_decode(path: PathBuf, panel: HWND, longest: u32, slot: Slot) {
     });
 }
 
+/// Shrinks before converting, so a large photo is never copied to RGBA at
+/// full size.
 fn previews_of(image: DynamicImage, longest: u32) -> Decoded {
     let (width, height) = (image.width(), image.height());
-    let mut color = image.into_rgba8();
     let side = width.max(height);
-    if side > longest {
+    let small = if side > longest {
         let fit = |v: u32| ((u64::from(v) * u64::from(longest)) as f64 / f64::from(side)).round();
         let (w, h) = (fit(width).max(1.0) as u32, fit(height).max(1.0) as u32);
-        color = imageops::resize(&color, w, h, FilterType::Triangle);
-    }
-    let gray = DynamicImage::ImageRgba8(color.clone())
-        .grayscale()
-        .into_rgba8();
+        image.resize_exact(w, h, FilterType::Triangle)
+    } else {
+        image
+    };
+    let gray = small.grayscale().into_rgba8();
+    let color = small.into_rgba8();
     Decoded {
         width,
         height,
         color,
         gray,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn previews_shrink_to_the_longest_side_and_keep_the_size() {
+        let image = DynamicImage::ImageRgb8(::image::RgbImage::from_pixel(
+            600,
+            300,
+            ::image::Rgb([200, 40, 10]),
+        ));
+        let d = previews_of(image, 100);
+        assert_eq!((d.width, d.height), (600, 300));
+        assert_eq!(d.color.dimensions(), (100, 50));
+        assert_eq!(d.gray.dimensions(), (100, 50));
+        assert_eq!(d.color.get_pixel(50, 25).0, [200, 40, 10, 255]);
+        let [r, g, b, a] = d.gray.get_pixel(50, 25).0;
+        assert!(r == g && g == b && a == 255);
+    }
+
+    #[test]
+    fn small_previews_are_not_upscaled() {
+        let image = DynamicImage::ImageRgba8(RgbaImage::new(40, 20));
+        let d = previews_of(image, 100);
+        assert_eq!(d.color.dimensions(), (40, 20));
+        assert_eq!(d.gray.dimensions(), (40, 20));
     }
 }
