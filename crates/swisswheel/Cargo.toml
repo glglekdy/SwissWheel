@@ -62,4 +62,5 @@ features = [
 ]
 
 [dev-dependencies]
+crc32fast = "1"
 tempfile = "3"
