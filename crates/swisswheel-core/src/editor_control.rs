@@ -205,6 +205,18 @@ impl EditorState {
         }
     }
 
+    /// Called by the panel for a key press that [`key_command`] does not map; it disarms the
+    /// discard prompt like any other key.
+    pub fn key_other(&mut self, now: Instant) -> Outcome {
+        let was_up = self.discard_until.is_some_and(|deadline| now < deadline);
+        self.discard_until = None;
+        if was_up {
+            Outcome::Redraw
+        } else {
+            Outcome::Nothing
+        }
+    }
+
     /// Applies a click on `hit`.
     pub fn click(&mut self, hit: EditorHit, now: Instant) -> Outcome {
         let cmd = match hit {
@@ -432,5 +444,21 @@ mod tests {
         assert_eq!(s.click(EditorHit::Redo, t), Outcome::Redraw);
         let plan = s.session().unwrap().plan().unwrap();
         assert_eq!(s.click(EditorHit::Save, t), Outcome::Save(plan));
+    }
+
+    #[test]
+    fn unmapped_key_clears_the_prompt() {
+        let t = Instant::now();
+        let mut s = ready(100, 50);
+        assert_eq!(s.key_other(t), Outcome::Nothing);
+        s.command(EditorCommand::RotateCw, t);
+        s.command(EditorCommand::Escape, t);
+        assert_eq!(s.key_other(t), Outcome::Redraw);
+        assert_eq!(s.footer_text(EditorHit::Nothing, t), None);
+        assert_eq!(s.key_other(t), Outcome::Nothing);
+        // An already-expired prompt needs no redraw.
+        s.command(EditorCommand::Escape, t);
+        assert_eq!(s.key_other(t + Duration::from_secs(4)), Outcome::Nothing);
+        assert_eq!(s.discard_deadline(), None);
     }
 }
