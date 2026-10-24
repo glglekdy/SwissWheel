@@ -71,8 +71,9 @@
 - 비율 칩: **자유**(기본) · **원본**(지금 사진의 비율) · 1:1 · 4:3 · 3:4 · 16:9 · 9:16.
   - 고르면 사각형이 지금 중심을 지키며 그 비율로 들어갈 수 있는 가장 큰 크기로 바뀌고, 이후 드래그는 그 비율을 지킨다.
 - 하단 가운데에 자를 크기(원본 픽셀)를 보인다.
-- **Enter** 또는 ✂ 다시 누르기: 사각형이 사진 전체와 다르면 자르기를 기록에 쌓고 모드를 끝낸다. 같으면 아무것도 쌓지 않고 끝낸다.
-- **Esc**: 자르지 않고 모드를 끝낸다.
+- 자르기 모드 동안 하단 버튼은 [Esc 자르기 취소] [↵ 자르기 적용]으로 바뀐다(마우스만으로도 끝낼 수 있게).
+- **Enter**, ✂ 다시 누르기, [자르기 적용]: 사각형이 사진 전체와 다르면 자르기를 기록에 쌓고 모드를 끝낸다. 같으면 아무것도 쌓지 않고 끝낸다.
+- **Esc**, [자르기 취소]: 자르지 않고 모드를 끝낸다.
 
 ### 2.5 되돌리기
 - ↶ / **Ctrl+Z**: 마지막 편집을 되돌린다. ↷ / **Ctrl+Y**(또는 Ctrl+Shift+Z): 다시 한다. 새 편집을 하면 다시 하기 기록은 사라진다.
@@ -118,32 +119,34 @@
     - `has_pixel_edits()`: 자르기·회전·반전, 또는 흑백이 켜진 상태.
     - `save_kind() -> Option<SaveKind>`, `SaveKind { Edited, StripOnly }`. 편집 없음은 `None`.
   - 같은 토글을 같은 값으로 두 번 쌓지 않는다.
+- `EditSession::to_result() -> Affine`: 원본 픽셀 좌표 → 지금 결과 좌표의 변환. 미리보기 그리기가 쓴다.
+- 새 모듈 `editor_control.rs` — 패널의 입력 처리(창과 무관, 단위 테스트 가능): 키 → 명령, 클릭 → 명령, 자르기 모드와 드래그, 취소 확인(3초), 하단 안내 문구. 앱의 `editor/`는 창·그리기만 맡는다.
 - 새 모듈 `editor_geometry.rs` — 배치와 마우스 계산(`menu_geometry.rs`와 같은 방식, DIP와 배율):
   - `panel_layout(work_area, scale, image_size, cropping) -> EditorLayout`: 패널 크기·위치, 도구 버튼·비율 칩·하단 버튼 박스, 미리보기 영역.
   - `hit_test(layout, point) -> EditorHit`(도구, 칩, 되돌리기, 다시 하기, 취소, 저장, 미리보기, 없음).
   - `Fit`: 미리보기 영역에 이미지를 맞춘 배율·위치, `to_image(point)`, `to_view(rect)`.
-  - 자르기: `CropHandle`(모서리 4, 변 4, 안쪽), `handle_at(fit, crop, point)`, `drag(crop, handle, delta, bounds, ratio) -> PixelRect`(비율 고정, 경계, 최소 16px), `fit_ratio(crop, bounds, ratio) -> PixelRect`(2.4의 칩 동작).
+  - 자르기 계산은 따로 `crop.rs`에 둔다: `CropHandle`(모서리 4, 변 4, 안쪽), `handle_at(fit, crop, point)`, `drag(crop, handle, delta, bounds, ratio) -> PixelRect`(비율 고정, 경계, 최소 16px), `fit_ratio(crop, bounds, ratio) -> PixelRect`(2.4의 칩 동작).
   - `AspectRatio { Free, Original, Fixed(u32, u32) }`, 칩 순서 상수.
 
 ### 3.2 앱 (`swisswheel`) — 새 모듈 `editor/`
 - `editor/window.rs`:
-  - **어둡게 하는 창:** 모니터 전체, 최상위, `WS_EX_TOOLWINDOW`, 반투명 검정(Composition), 클릭을 삼킨다(통과시키지 않는다).
+  - **어둡게 하는 창:** 모니터 전체, 최상위, `WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, 반투명 검정(레이어드 창, 알파 96/255), 클릭을 삼킨다(통과시키지 않는다). 패널은 이 창이 소유해 항상 그 위에 있다.
   - **패널 창:** 최상위 팝업, `WS_EX_TOOLWINDOW`(작업 표시줄 버튼 없음), 열 때 `SetForegroundWindow`로 포커스를 가진다. `Surface`(글래스 1영역, 둥근 모서리)를 쓴다.
   - 키: `WM_KEYDOWN`으로 C·R·H·V·G·I, Shift+R, Ctrl+Z/Y/Shift+Z, Enter, Esc를 받는다.
   - 마우스: 누름·끌기·뗌(`SetCapture`), 마우스 올림 추적, `WM_SETCURSOR`로 커서 모양.
   - DPI: 모니터 DPI로 배율을 정하고 `WM_DPICHANGED`는 무시한다(패널은 움직이지 않는다).
 - `editor/render.rs` — Direct2D:
-  - 미리보기 비트맵 하나: 열 때 디코딩한 이미지를 미리보기 영역 크기(물리 픽셀)로 줄여 만든다.
-  - 회전·반전: 그리기 변환 행렬. 흑백: D2D Grayscale 효과. 자르기: 앞선 자르기들은 원본 좌표로 되돌린 잘라 그리기 영역.
+  - 미리보기 비트맵 둘(컬러·흑백): 열 때 디코딩한 이미지를 미리보기 영역 크기(물리 픽셀, 90° 회전에도 맞도록 긴 변 기준)로 줄여 만든다.
+  - 회전·반전·자르기: `to_result()` 변환 행렬로 그리고 결과 사각형으로 잘라 그린다(모든 편집이 축에 맞춰져 있어 마지막 사각형 하나로 충분하다). 흑백: 흑백 비트맵으로 바꿔 그린다.
   - 자르기 모드: 바깥 어둡게, 3분할 격자, 손잡이, 크기 글자.
   - 도구 모음·칩·하단 줄은 `theme.rs`의 색과 글래스 루틴, `fonts.rs`의 Pretendard, 아이콘은 휠과 같은 시스템 아이콘 글꼴.
 - `editor/mod.rs` — 패널 하나의 수명:
-  - `Editor::open(path, owner) -> Result<Editor>`: 창을 만들고 "불러오는 중"을 그린 뒤, 백그라운드 스레드에서 `engines::image::decode`(EXIF 방향 적용)를 부른다. 결과는 창 메시지로 받아 미리보기 비트맵을 만든다.
+  - 열기: 파일 헤더만 읽어 크기(방향 적용)를 얻어 패널 크기를 정하고, 창을 만들어 "불러오는 중"을 그린 뒤, 백그라운드 스레드에서 `engines::image::decode`(EXIF 방향 적용)를 부른다. 결과는 창 메시지로 받아 미리보기 비트맵을 만든다.
   - 상태: `EditSession`, 자르기 모드(지금 사각형, 끄는 손잡이, 비율), 취소 확인 중 여부와 시각.
   - 앱으로 보내는 신호(창 메시지): `Saved(path, EditPlan)`, `Closed`, `Failed(message)`.
   - `EditPlan { ops: Vec<EditOp>, kind: SaveKind }`.
 - `app.rs`: 연결만 한다(이미 2,300줄이 넘는다).
-  - `submit`에서 `Operation::Tool(Tool::Edit)`이면 작업 대신 `Editor::open`. 이미 열려 있으면 앞으로 가져오고 카드(2.9).
+  - `submit`에서 `Operation::Tool(Tool::Edit)`이면 작업 대신 편집기 열기를 **메시지로 미룬다**(OLE `Drop` 안에서 창을 열면 끌던 앱이 멈추고 포커스를 되가져간다). 이미 열려 있으면 앞으로 가져오고 카드(2.9).
   - `Saved`를 받으면 `Job { op: Tool::Edit, inputs: [path], edits: Some(plan), .. }`를 제출. `Closed`/`Failed`는 패널을 치우고, `Failed`는 실패 카드.
   - 패널이 열리고 닫힐 때 `hook::set_editor_open`.
   - 재시작·업데이트 거절 조건에 "패널 열림"을 더한다.
