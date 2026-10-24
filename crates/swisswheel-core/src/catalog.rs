@@ -38,6 +38,8 @@ pub enum Tool {
     CompressVideo,
     ExtractAudio,
     Mute,
+    /// Puts the dragged items into a new folder beside them.
+    Bundle,
 }
 
 impl Tool {
@@ -48,6 +50,7 @@ impl Tool {
             Tool::CompressVideo => "영상 압축",
             Tool::ExtractAudio => "오디오 추출",
             Tool::Mute => "음소거",
+            Tool::Bundle => "폴더로 묶기",
         }
     }
 
@@ -56,7 +59,7 @@ impl Tool {
         match self {
             Tool::Shrink => Some("50%"),
             Tool::CompressImage | Tool::CompressVideo => Some("compressed"),
-            Tool::ExtractAudio => None,
+            Tool::ExtractAudio | Tool::Bundle => None,
             Tool::Mute => Some("muted"),
         }
     }
@@ -146,6 +149,10 @@ pub fn items_for(wheel: WheelKind, inputs: &[InputItem]) -> Vec<Operation> {
     for input in rest {
         let other = items_for_one(wheel, input);
         items.retain(|op| other.contains(op));
+    }
+    // Any two or more items can go into a new folder, last in the Tools wheel.
+    if wheel == WheelKind::Tools && inputs.len() >= 2 {
+        items.push(Operation::Tool(Tool::Bundle));
     }
     items
 }
@@ -303,7 +310,10 @@ mod tests {
         // image + audio -> only actions
         let mixed = [file(Png), file(Mp3)];
         assert!(items_for(WheelKind::Convert, &mixed).is_empty());
-        assert!(items_for(WheelKind::Tools, &mixed).is_empty());
+        assert_eq!(
+            items_for(WheelKind::Tools, &mixed),
+            vec![Operation::Tool(Tool::Bundle)]
+        );
         assert_eq!(items_for(WheelKind::Actions, &mixed).len(), 5);
         // folder included, unknown extension
         assert!(items_for(WheelKind::Convert, &[file(Png), InputItem::Folder]).is_empty());
@@ -316,6 +326,26 @@ mod tests {
         // empty input
         assert!(items_for(WheelKind::Actions, &[]).is_empty());
         assert_eq!(initial_wheel(&[]), None);
+    }
+
+    #[test]
+    fn bundle_for_two_or_more_of_anything() {
+        use Format::*;
+        let bundle = Operation::Tool(Tool::Bundle);
+        let tools = |inputs: &[InputItem]| items_for(WheelKind::Tools, inputs);
+        assert_eq!(tools(&[file(Png), file(Jpg)]).last(), Some(&bundle));
+        assert_eq!(tools(&[file(Png), file(Mp3)]), vec![bundle]);
+        assert_eq!(tools(&[InputItem::Folder, InputItem::Folder]), vec![bundle]);
+        assert!(!tools(&[file(Png)]).contains(&bundle));
+        assert!(!tools(&[InputItem::Folder]).contains(&bundle));
+        assert!(!items_for(WheelKind::Convert, &[file(Png), file(Jpg)]).contains(&bundle));
+        // a mixed selection now has a Tools wheel
+        assert_eq!(
+            next_wheel(WheelKind::Actions, &[file(Png), file(Mp3)]),
+            WheelKind::Tools
+        );
+        assert_eq!(Tool::Bundle.label(), "폴더로 묶기");
+        assert_eq!(Tool::Bundle.suffix(), None);
     }
 
     #[test]

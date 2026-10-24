@@ -4,6 +4,7 @@
 mod logging;
 mod app;
 mod autostart;
+mod bundle;
 mod config_file;
 mod dnd;
 mod engines;

@@ -18,6 +18,14 @@ pub enum Preset {
     /// Percent of the original width and height.
     Scale(u8),
     Quality(Level),
+    /// How "폴더로 묶기" puts the items into the new folder.
+    Bundle(Transfer),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Transfer {
+    Move,
+    Copy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -151,9 +159,22 @@ static QUALITY: OptionSet = OptionSet {
     default: 1,
 };
 
-/// The options `op` offers for these inputs. Only a selection of one media
-/// kind gets options; mixed selections and animated GIFs get none.
+static BUNDLE: OptionSet = OptionSet {
+    title: "묶는 방법",
+    choices: &[
+        choice(Preset::Bundle(Transfer::Move), "이동", "원래 자리에서 옮김"),
+        choice(Preset::Bundle(Transfer::Copy), "복사", "원본은 그대로"),
+    ],
+    default: 0,
+};
+
+/// The options `op` offers for these inputs. Bundling offers them for any
+/// selection; otherwise only a selection of one media kind gets options, and
+/// mixed selections and animated GIFs get none.
 pub fn options_for(op: &Operation, inputs: &[InputItem]) -> Option<&'static OptionSet> {
+    if *op == Operation::Tool(Tool::Bundle) {
+        return Some(&BUNDLE);
+    }
     match (common_kind(inputs)?, op) {
         (MediaKind::Video, Operation::Convert(Format::Gif)) => Some(&GIF),
         (MediaKind::Video, Operation::Convert(target)) if target.kind() == MediaKind::Video => {
@@ -298,5 +319,17 @@ mod tests {
         assert_eq!(compress.default_index(&tools), 0);
         let gif = options_for(&Operation::Convert(Format::Gif), &[video()]).unwrap();
         assert_eq!(gif.default_index(&tools), gif.default); // not a tool set
+    }
+
+    #[test]
+    fn bundle_offers_move_or_copy_for_any_selection() {
+        let op = Operation::Tool(Tool::Bundle);
+        let set = options_for(&op, &[image(), audio(), InputItem::Folder]).unwrap();
+        assert_eq!(set.title, "묶는 방법");
+        let labels: Vec<_> = set.choices.iter().map(|c| c.label).collect();
+        assert_eq!(labels, ["이동", "복사"]);
+        assert_eq!(set.default_preset(), Preset::Bundle(Transfer::Move));
+        assert_eq!(set.choices[1].preset, Preset::Bundle(Transfer::Copy));
+        assert_eq!(set.default_index(&Tools::default()), 0);
     }
 }
