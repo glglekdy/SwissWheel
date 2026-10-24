@@ -258,12 +258,23 @@ impl Fit {
 }
 
 /// The crop handle under a view point: corners first, then edges, then the inside (`Move`).
+///
+/// An edge reaches [`HANDLE_REACH`] outward but at most a third of the
+/// crop's size inward, so the two sides of an axis never overlap: on a
+/// small crop the nearer side wins and the middle third still moves.
 pub fn handle_at(fit: &Fit, crop: PixelRect, x: f32, y: f32, scale: f32) -> Option<CropHandle> {
     let v = fit.to_view(crop);
     let reach = HANDLE_REACH * scale;
-    let near = |a: f32, b: f32| (a - b).abs() <= reach;
-    let (nl, nr) = (near(x, v.left), near(x, v.right));
-    let (nt, nb) = (near(y, v.top), near(y, v.bottom));
+    let inward_x = reach.min((v.right - v.left) / 3.0);
+    let inward_y = reach.min((v.bottom - v.top) / 3.0);
+    let (nl, nr) = (
+        x >= v.left - reach && x <= v.left + inward_x,
+        x <= v.right + reach && x >= v.right - inward_x,
+    );
+    let (nt, nb) = (
+        y >= v.top - reach && y <= v.top + inward_y,
+        y <= v.bottom + reach && y >= v.bottom - inward_y,
+    );
     match (nl, nr, nt, nb) {
         (true, _, true, _) => return Some(CropHandle::TopLeft),
         (_, true, true, _) => return Some(CropHandle::TopRight),
@@ -372,6 +383,53 @@ mod tests {
             Some(CropHandle::Move)
         );
         assert_eq!(handle_at(&f, crop, area.right, area.bottom, 1.0), None);
+    }
+
+    #[test]
+    fn every_handle_reachable_on_a_tiny_crop() {
+        let area = Box2 {
+            left: 10.0,
+            top: 20.0,
+            right: 410.0,
+            bottom: 320.0,
+        };
+        let f = Fit::new(area, (800, 600)); // 0.5 view px per image px
+        let crop = PixelRect {
+            x: 100,
+            y: 100,
+            w: 20,
+            h: 20,
+        };
+        let v = f.to_view(crop);
+        assert!((v.right - v.left - 10.0).abs() < 1e-3, "a 10×10 view rect");
+        let mid_x = (v.left + v.right) / 2.0;
+        let mid_y = (v.top + v.bottom) / 2.0;
+        let at = |x: f32, y: f32| handle_at(&f, crop, x, y, 1.0);
+        // Outside the rect: the nearer side wins.
+        assert_eq!(at(v.left - 2.0, v.top - 2.0), Some(CropHandle::TopLeft));
+        assert_eq!(at(v.right + 2.0, v.top - 2.0), Some(CropHandle::TopRight));
+        assert_eq!(
+            at(v.right + 2.0, v.bottom + 2.0),
+            Some(CropHandle::BottomRight)
+        );
+        assert_eq!(
+            at(v.left - 2.0, v.bottom + 2.0),
+            Some(CropHandle::BottomLeft)
+        );
+        assert_eq!(at(v.right + 2.0, mid_y), Some(CropHandle::Right));
+        assert_eq!(at(mid_x, v.bottom + 2.0), Some(CropHandle::Bottom));
+        assert_eq!(at(v.left - 2.0, mid_y), Some(CropHandle::Left));
+        assert_eq!(at(mid_x, v.top - 2.0), Some(CropHandle::Top));
+        // Inside: the outer thirds belong to the edges, the center moves.
+        assert_eq!(at(v.left + 1.0, v.top + 1.0), Some(CropHandle::TopLeft));
+        assert_eq!(
+            at(v.right - 1.0, v.bottom - 1.0),
+            Some(CropHandle::BottomRight)
+        );
+        assert_eq!(at(v.right - 1.0, mid_y), Some(CropHandle::Right));
+        assert_eq!(at(mid_x, v.bottom - 1.0), Some(CropHandle::Bottom));
+        assert_eq!(at(mid_x, mid_y), Some(CropHandle::Move));
+        assert_eq!(at(v.right + HANDLE_REACH + 1.0, mid_y), None);
     }
 
     #[test]
