@@ -7,14 +7,15 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 
-use swisswheel_core::catalog::Operation;
+use swisswheel_core::catalog::{Operation, Tool};
 use swisswheel_core::config::Quality;
 use swisswheel_core::format::Format;
 use swisswheel_core::media;
 use swisswheel_core::naming::{suffix_for, temp_path};
-use swisswheel_core::options::Preset;
+use swisswheel_core::options::{Preset, Transfer};
 use swisswheel_core::summary::progress_title;
 
+use crate::bundle::Bundle;
 use crate::engines::ffmpeg::{self, Tools};
 use crate::engines::{self, EngineError};
 use crate::fsutil::{Reservations, finalize};
@@ -65,6 +66,8 @@ struct JobState {
     files: Mutex<Vec<FileState>>,
     names: Vec<String>,
     remaining: AtomicUsize,
+    /// The new folder of a "폴더로 묶기" job; its files go there, not through an engine.
+    bundle: Option<Bundle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -189,6 +192,7 @@ impl Runner {
             files: Mutex::new(vec![FileState::Waiting; n]),
             names: job.inputs.iter().map(|p| file_name(p)).collect(),
             remaining: AtomicUsize::new(n),
+            bundle: (job.op == Operation::Tool(Tool::Bundle)).then(|| Bundle::new(&job.inputs[0])),
         });
         self.shared.active.lock().unwrap().push(Arc::clone(&state));
         for (index, input) in job.inputs.into_iter().enumerate() {
@@ -288,6 +292,9 @@ fn worker(rx: &Mutex<Receiver<Work>>, shared: &Shared) {
         work.job.results.lock().unwrap()[work.index] = Some(result);
         work.job.files.lock().unwrap()[work.index] = FileState::Done;
         if work.job.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            if let Some(bundle) = &work.job.bundle {
+                bundle.finish();
+            }
             shared
                 .active
                 .lock()
@@ -331,6 +338,13 @@ enum Engine {
 /// place without replacing anything. The temp file never survives a failure.
 fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     let (op, preset, input) = (&work.job.op, work.job.preset, work.input.as_path());
+    if let Some(bundle) = &work.job.bundle {
+        let transfer = match preset {
+            Some(Preset::Bundle(transfer)) => transfer,
+            _ => Transfer::Move,
+        };
+        return bundle.place(work.index, input, transfer);
+    }
     let quality = shared
         .quality
         .read()
@@ -408,7 +422,7 @@ mod tests {
     use swisswheel_core::catalog::{Operation, Tool};
     use swisswheel_core::config::Quality;
     use swisswheel_core::format::Format;
-    use swisswheel_core::options::Preset;
+    use swisswheel_core::options::{Preset, Transfer};
 
     /// A 2+2-worker runner whose reports arrive on the returned channel.
     fn runner() -> (Runner, mpsc::Receiver<JobReport>) {
@@ -752,6 +766,127 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!dir.path().join("clip.webm").exists());
         assert!(temp_files(dir.path()).is_empty());
+    }
+
+    fn bundle(transfer: Option<Transfer>, inputs: Vec<PathBuf>) -> Job {
+        Job {
+            op: Operation::Tool(Tool::Bundle),
+            preset: transfer.map(Preset::Bundle),
+            inputs,
+        }
+    }
+
+    #[test]
+    fn bundle_moves_files_and_folders_into_a_new_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, album) = (
+            dir.path().join("a.png"),
+            dir.path().join("메모.txt"),
+            dir.path().join("사진"),
+        );
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        std::fs::create_dir(&album).unwrap();
+        std::fs::write(album.join("1.jpg"), "1").unwrap();
+        // dropping on the tile itself moves
+        let r = &run_jobs(vec![bundle(
+            None,
+            vec![a.clone(), b.clone(), album.clone()],
+        )])[0];
+        let folder = dir.path().join("새 폴더");
+        assert_eq!(
+            r.outputs,
+            vec![
+                folder.join("a.png"),
+                folder.join("메모.txt"),
+                folder.join("사진")
+            ]
+        );
+        assert!(r.failures.is_empty());
+        assert!(!a.exists() && !b.exists() && !album.exists());
+        assert_eq!(
+            std::fs::read_to_string(folder.join("메모.txt")).unwrap(),
+            "b"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("사진").join("1.jpg")).unwrap(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn bundle_copies_into_the_next_free_folder_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("새 폴더")).unwrap();
+        let (a, album) = (dir.path().join("a.txt"), dir.path().join("앨범"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::create_dir_all(album.join("안쪽")).unwrap();
+        std::fs::write(album.join("안쪽").join("2.jpg"), "2").unwrap();
+        let r = &run_jobs(vec![bundle(
+            Some(Transfer::Copy),
+            vec![a.clone(), album.clone()],
+        )])[0];
+        let folder = dir.path().join("새 폴더 (1)");
+        assert_eq!(r.outputs, vec![folder.join("a.txt"), folder.join("앨범")]);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(folder.join("a.txt")).unwrap(), "a");
+        let copied = folder.join("앨범").join("안쪽").join("2.jpg");
+        assert_eq!(std::fs::read_to_string(copied).unwrap(), "2");
+        assert!(album.join("안쪽").join("2.jpg").exists());
+        assert!(temp_files(&folder).is_empty());
+    }
+
+    #[test]
+    fn bundle_numbers_same_names_from_different_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let (x, y) = (dir.path().join("x"), dir.path().join("y"));
+        std::fs::create_dir(&x).unwrap();
+        std::fs::create_dir(&y).unwrap();
+        std::fs::write(x.join("a.txt"), "x").unwrap();
+        std::fs::write(y.join("a.txt"), "y").unwrap();
+        for transfer in [Transfer::Copy, Transfer::Move] {
+            let r = &run_jobs(vec![bundle(
+                Some(transfer),
+                vec![x.join("a.txt"), y.join("a.txt")],
+            )])[0];
+            // the folder goes beside the first item
+            let folder = r.outputs[0].parent().unwrap().to_path_buf();
+            assert_eq!(folder.parent(), Some(x.as_path()), "{transfer:?}");
+            let mut names: Vec<_> = r.outputs.iter().map(|p| file_name(p)).collect();
+            names.sort();
+            assert_eq!(names, ["a (1).txt", "a.txt"], "{transfer:?}");
+            let mut contents: Vec<_> = r
+                .outputs
+                .iter()
+                .map(|p| std::fs::read_to_string(p).unwrap())
+                .collect();
+            contents.sort();
+            assert_eq!(contents, ["x", "y"], "{transfer:?}");
+        }
+    }
+
+    #[test]
+    fn bundle_failures_stay_put_and_an_empty_folder_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.txt");
+        std::fs::write(&good, "g").unwrap();
+        let gone = dir.path().join("없는.txt");
+        let r = &run_jobs(vec![bundle(None, vec![gone.clone(), good])])[0];
+        assert_eq!(r.outputs, vec![dir.path().join("새 폴더").join("good.txt")]);
+        assert_eq!(r.failures, vec!["없는.txt: 옮길 수 없습니다".to_string()]);
+
+        let other = tempfile::tempdir().unwrap();
+        let missing = vec![other.path().join("1.txt"), other.path().join("2.txt")];
+        let r = &run_jobs(vec![bundle(Some(Transfer::Copy), missing)])[0];
+        assert!(r.outputs.is_empty());
+        assert_eq!(
+            r.failures,
+            vec![
+                "1.txt: 복사할 수 없습니다".to_string(),
+                "2.txt: 복사할 수 없습니다".to_string()
+            ]
+        );
+        assert!(!other.path().join("새 폴더").exists());
     }
 
     fn temp_files(dir: &Path) -> Vec<PathBuf> {

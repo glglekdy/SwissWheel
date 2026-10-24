@@ -1500,11 +1500,7 @@ impl AppState {
                 kind,
                 title,
                 body,
-                action: report
-                    .outputs
-                    .first()
-                    .cloned()
-                    .map(NoticeAction::OpenFolder),
+                action: shown_result(&report).map(NoticeAction::OpenFolder),
                 buttons: Vec::new(),
             };
             self.notify_job(notice, self.active_jobs == 0);
@@ -2036,6 +2032,17 @@ impl AppState {
     }
 }
 
+/// What a job's result card selects in Explorer: the first output, or for
+/// "폴더로 묶기" the new folder itself, so it can be renamed right away.
+fn shown_result(report: &JobReport) -> Option<PathBuf> {
+    let first = report.outputs.first()?;
+    if report.op == Operation::Tool(swisswheel_core::catalog::Tool::Bundle) {
+        first.parent().map(std::path::Path::to_path_buf)
+    } else {
+        Some(first.clone())
+    }
+}
+
 /// Center label for the dragged paths, e.g. "2.4 MB" or "3개 · 7.1 MB".
 fn selection_summary(paths: &[PathBuf]) -> String {
     let (mut files, mut folders, mut bytes) = (0, 0, 0);
@@ -2283,6 +2290,29 @@ fn open_page(url: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use swisswheel_core::format::Format;
+
+    #[test]
+    fn result_card_selects_the_bundle_folder_itself() {
+        let report = |op, outputs: &[&str]| JobReport {
+            op,
+            outputs: outputs.iter().map(PathBuf::from).collect(),
+            failures: Vec::new(),
+        };
+        let bundle = Operation::Tool(swisswheel_core::catalog::Tool::Bundle);
+        assert_eq!(
+            shown_result(&report(
+                bundle,
+                &[r"C:\p\새 폴더\a.png", r"C:\p\새 폴더\b.png"]
+            )),
+            Some(PathBuf::from(r"C:\p\새 폴더"))
+        );
+        assert_eq!(
+            shown_result(&report(Operation::Convert(Format::Jpg), &[r"C:\p\a.jpg"])),
+            Some(PathBuf::from(r"C:\p\a.jpg"))
+        );
+        assert_eq!(shown_result(&report(bundle, &[])), None);
+    }
 
     #[test]
     fn a_waiting_update_keeps_downloads_and_restarts_off() {

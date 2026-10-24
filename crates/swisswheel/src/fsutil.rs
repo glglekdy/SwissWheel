@@ -5,7 +5,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use swisswheel_core::naming;
-use windows::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
+use windows::Win32::Storage::FileSystem::{
+    MOVEFILE_COPY_ALLOWED, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+};
 use windows::core::HSTRING;
 
 /// Moves `temp` to `final_path`, failing with `AlreadyExists` rather than
@@ -16,6 +18,20 @@ pub fn finalize(temp: &Path, final_path: &Path) -> std::io::Result<()> {
             &HSTRING::from(temp),
             &HSTRING::from(final_path),
             MOVEFILE_WRITE_THROUGH,
+        )
+    }
+    .map_err(|e| io_error(&e))
+}
+
+/// Moves a file or folder to `to`, failing with `AlreadyExists` rather than
+/// replacing anything. A file may cross drives (copied, then deleted); a
+/// folder can't, and fails with `CrossesDevices`.
+pub fn move_no_replace(from: &Path, to: &Path) -> std::io::Result<()> {
+    unsafe {
+        MoveFileExW(
+            &HSTRING::from(from),
+            &HSTRING::from(to),
+            MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH,
         )
     }
     .map_err(|e| io_error(&e))
