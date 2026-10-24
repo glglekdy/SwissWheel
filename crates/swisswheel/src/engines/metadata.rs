@@ -5,17 +5,30 @@ use std::path::Path;
 
 use super::EngineError;
 
-/// Writes a copy of `input` without its metadata blocks.
+/// Writes a copy of `input` (JPEG, PNG, or WebP) without its metadata blocks.
 // Wired by Task 10 (the editor's info-only save).
 #[allow(dead_code)]
 pub fn strip(input: &Path, output: &Path) -> Result<(), EngineError> {
     let bytes =
         std::fs::read(input).map_err(|e| EngineError::Read(format!("{}: {e}", input.display())))?;
+    let read_err = |e: String| EngineError::Read(format!("{}: {e}", input.display()));
     let stripped = if bytes.starts_with(&[0xFF, 0xD8]) {
-        strip_jpeg(&bytes).map_err(|e| EngineError::Read(format!("{}: {e}", input.display())))?
+        strip_jpeg(&bytes).map_err(read_err)?
+    } else if bytes.starts_with(&PNG_SIGNATURE) || is_webp(&bytes) {
+        if is_tilted(&bytes) {
+            // Dropping the EXIF would leave it lying down: decode (which
+            // applies the orientation) and save again.
+            return super::image::apply_edits(&[], input, output);
+        }
+        if bytes.starts_with(&PNG_SIGNATURE) {
+            strip_png(&bytes)
+        } else {
+            strip_webp(&bytes)
+        }
+        .map_err(read_err)?
     } else {
         return Err(EngineError::Unsupported(format!(
-            "{}: not a JPEG",
+            "{}: not a JPEG, PNG, or WebP",
             input.display()
         )));
     };
@@ -150,6 +163,100 @@ fn strip_jpeg(bytes: &[u8]) -> Result<Vec<u8>, String> {
             _ => at_segment = true,
         }
     }
+}
+
+fn is_webp(bytes: &[u8]) -> bool {
+    bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP"
+}
+
+const PNG_SIGNATURE: [u8; 8] = [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+
+/// Copies a PNG without text, EXIF, and timestamp chunks; every other chunk
+/// (including `iCCP` and all `IDAT`) is copied byte for byte. Anything after
+/// `IEND` is dropped.
+fn strip_png(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if !bytes.starts_with(&PNG_SIGNATURE) {
+        return Err("not a PNG".into());
+    }
+    let truncated = || "truncated PNG".to_string();
+    let mut out = Vec::with_capacity(bytes.len());
+    out.extend_from_slice(&PNG_SIGNATURE);
+    let mut i = PNG_SIGNATURE.len();
+    loop {
+        let head = bytes.get(i..i + 8).ok_or_else(truncated)?;
+        let len = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
+        let ty = &head[4..8];
+        let end = i
+            .checked_add(12)
+            .and_then(|n| n.checked_add(len))
+            .filter(|&end| end <= bytes.len())
+            .ok_or_else(truncated)?;
+        if !matches!(ty, b"tEXt" | b"zTXt" | b"iTXt" | b"eXIf" | b"tIME") {
+            out.extend_from_slice(&bytes[i..end]);
+        }
+        i = end;
+        if ty == b"IEND" {
+            return Ok(out);
+        }
+    }
+}
+
+/// Copies a WebP without its EXIF and XMP chunks, clearing their VP8X flags
+/// and fixing the RIFF size. A simple (non-VP8X) file has no such chunks and
+/// is copied unchanged.
+fn strip_webp(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WEBP" {
+        return Err("not a WebP".into());
+    }
+    let truncated = || "truncated WebP".to_string();
+    let riff = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
+    let limit = riff.checked_add(8).ok_or_else(truncated)?;
+    if limit > bytes.len() || limit < 12 {
+        return Err(truncated());
+    }
+    if &bytes[12..16.min(limit)] != b"VP8X" {
+        return Ok(bytes.to_vec());
+    }
+    let mut out = bytes[..12].to_vec();
+    let mut i = 12;
+    while i < limit {
+        let head = bytes.get(i..i + 8).filter(|_| i + 8 <= limit);
+        let head = head.ok_or_else(truncated)?;
+        let len = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as usize;
+        let data_end = (i + 8).checked_add(len).filter(|&e| e <= limit);
+        let data_end = data_end.ok_or_else(truncated)?;
+        // The pad byte may be missing only at the very end of the file.
+        let end = (data_end + len % 2).min(limit);
+        match &head[..4] {
+            b"EXIF" | b"XMP " => {}
+            b"VP8X" => {
+                if len < 10 {
+                    return Err("bad VP8X chunk".into());
+                }
+                let start = out.len();
+                out.extend_from_slice(&bytes[i..end]);
+                out[start + 8] &= !0x0C;
+            }
+            _ => out.extend_from_slice(&bytes[i..end]),
+        }
+        i = end;
+    }
+    let size = (out.len() - 8) as u32;
+    out[4..8].copy_from_slice(&size.to_le_bytes());
+    Ok(out)
+}
+
+/// Whether the image crate's decoder reports an EXIF orientation that has to
+/// be applied. A decoder error counts as upright: the byte stripper checks the
+/// structure itself.
+fn is_tilted(bytes: &[u8]) -> bool {
+    use ::image::ImageDecoder;
+    ::image::ImageReader::new(std::io::Cursor::new(bytes))
+        .with_guessed_format()
+        .ok()
+        .and_then(|r| r.into_decoder().ok())
+        .and_then(|mut d| d.orientation().ok())
+        .is_some_and(|o| o != ::image::metadata::Orientation::NoTransforms)
 }
 
 /// The orientation (tag 0x0112) in IFD0 of a TIFF block, either byte order.
@@ -523,5 +630,156 @@ mod tests {
             strip(&p, &dir.path().join("o.jpg")),
             Err(EngineError::Read(_))
         ));
+    }
+
+    fn png_chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = (data.len() as u32).to_be_bytes().to_vec();
+        out.extend_from_slice(ty);
+        out.extend_from_slice(data);
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(ty);
+        crc.update(data);
+        out.extend_from_slice(&crc.finalize().to_be_bytes());
+        out
+    }
+
+    /// (type, data) of every chunk after the signature.
+    fn png_chunks(bytes: &[u8]) -> Vec<([u8; 4], Vec<u8>)> {
+        let mut out = Vec::new();
+        let mut i = 8;
+        while i < bytes.len() {
+            let len = u32::from_be_bytes(bytes[i..i + 4].try_into().unwrap()) as usize;
+            let ty: [u8; 4] = bytes[i + 4..i + 8].try_into().unwrap();
+            out.push((ty, bytes[i + 8..i + 8 + len].to_vec()));
+            i += 12 + len;
+        }
+        out
+    }
+
+    fn png_with(w: u32, h: u32, exif_orientation: u16) -> Vec<u8> {
+        use ::image::ImageEncoder;
+        let rgba: Vec<u8> = (0..w * h * 4).map(|n| (n * 13) as u8).collect();
+        let mut plain = Vec::new();
+        ::image::codecs::png::PngEncoder::new(&mut plain)
+            .write_image(&rgba, w, h, ::image::ExtendedColorType::Rgba8)
+            .unwrap();
+        let exif = exif_app1(exif_orientation, false, true);
+        // After IHDR: tIME, iCCP-like, tEXt, eXIf; then IDAT and the rest.
+        let ihdr_end = 8 + 12 + 13;
+        let mut out = plain[..ihdr_end].to_vec();
+        out.extend_from_slice(&png_chunk(b"tIME", &[7, 234, 10, 25, 1, 2, 3]));
+        out.extend_from_slice(&png_chunk(b"iCCP", b"icc  profile-bytes"));
+        out.extend_from_slice(&png_chunk(b"tEXt", b"Comment hi"));
+        out.extend_from_slice(&png_chunk(b"eXIf", &exif[6..]));
+        out.extend_from_slice(&plain[ihdr_end..]);
+        out
+    }
+
+    #[test]
+    fn png_text_and_exif_go_idat_stays() {
+        let src = png_with(8, 8, 1);
+        let out = strip_png(&src).unwrap();
+        let (before, after) = (png_chunks(&src), png_chunks(&out));
+        let types: Vec<_> = after.iter().map(|c| c.0).collect();
+        for gone in [b"tEXt", b"zTXt", b"iTXt", b"eXIf", b"tIME"] {
+            assert!(!types.contains(gone));
+        }
+        assert!(types.contains(b"iCCP"));
+        let idat = |c: &[([u8; 4], Vec<u8>)]| -> Vec<Vec<u8>> {
+            c.iter()
+                .filter(|c| &c.0 == b"IDAT")
+                .map(|c| c.1.clone())
+                .collect()
+        };
+        assert_eq!(idat(&before), idat(&after));
+        assert_eq!(types.last(), Some(b"IEND"));
+        let a = ::image::load_from_memory(&src).unwrap();
+        let b = ::image::load_from_memory(&out).unwrap();
+        assert_eq!(a.as_bytes(), b.as_bytes());
+    }
+
+    fn webp_chunk(ty: &[u8; 4], data: &[u8]) -> Vec<u8> {
+        let mut out = ty.to_vec();
+        out.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        out.extend_from_slice(data);
+        if data.len() % 2 == 1 {
+            out.push(0);
+        }
+        out
+    }
+
+    fn simple_webp() -> Vec<u8> {
+        let rgba: Vec<u8> = (0..16 * 16 * 4).map(|n| (n * 5) as u8).collect();
+        webp::Encoder::from_rgba(&rgba, 16, 16)
+            .encode(80.0)
+            .to_vec()
+    }
+
+    #[test]
+    fn webp_exif_goes_and_header_is_fixed() {
+        let simple = simple_webp();
+        let mut vp8x = vec![0x08 | 0x04, 0, 0, 0];
+        vp8x.extend_from_slice(&[15, 0, 0, 15, 0, 0]); // canvas 16x16, minus one
+        let mut body = b"WEBP".to_vec();
+        body.extend_from_slice(&webp_chunk(b"VP8X", &vp8x));
+        body.extend_from_slice(&simple[12..]); // the VP8 chunk
+        body.extend_from_slice(&webp_chunk(b"EXIF", &[1, 2, 3, 4, 5]));
+        body.extend_from_slice(&webp_chunk(b"XMP ", b"<x/>!!!"));
+        let mut src = b"RIFF".to_vec();
+        src.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        src.extend_from_slice(&body);
+
+        let out = strip_webp(&src).unwrap();
+        assert!(!out.windows(4).any(|w| w == b"EXIF" || w == b"XMP "));
+        assert_eq!(&out[12..16], b"VP8X");
+        assert_eq!(out[20] & 0x0C, 0);
+        assert_eq!(
+            u32::from_le_bytes(out[4..8].try_into().unwrap()) as usize,
+            out.len() - 8
+        );
+        assert_eq!(out.len() % 2, 0);
+        assert_eq!(out.len(), 12 + 18 + simple[12..].len());
+        let a = ::image::load_from_memory(&src).unwrap();
+        let b = ::image::load_from_memory(&out).unwrap();
+        assert_eq!((b.width(), b.height()), (16, 16));
+        assert_eq!(a.as_bytes(), b.as_bytes());
+    }
+
+    #[test]
+    fn simple_webp_is_copied_unchanged() {
+        let simple = simple_webp();
+        assert_eq!(strip_webp(&simple).unwrap(), simple);
+    }
+
+    #[test]
+    fn broken_png_and_webp_are_read_errors() {
+        let png = png_with(8, 8, 1);
+        assert!(strip_png(&png[..png.len() - 5]).is_err());
+        assert!(strip_png(b"not a png").is_err());
+        let webp = simple_webp();
+        assert!(strip_webp(&webp[..webp.len() - 5]).is_err());
+        assert!(strip_webp(b"RIFF").is_err());
+    }
+
+    #[test]
+    fn rotated_png_falls_back_to_reencode() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dst) = (dir.path().join("r.png"), dir.path().join("o.png"));
+        std::fs::write(&src, png_with(4, 2, 6)).unwrap();
+        strip(&src, &dst).unwrap();
+        let out = std::fs::read(&dst).unwrap();
+        let img = ::image::load_from_memory(&out).unwrap();
+        assert_eq!((img.width(), img.height()), (2, 4));
+        assert!(!png_chunks(&out).iter().any(|c| &c.0 == b"eXIf"));
+    }
+
+    #[test]
+    fn upright_png_through_strip_is_byte_stripped() {
+        let dir = tempfile::tempdir().unwrap();
+        let (src, dst) = (dir.path().join("u.png"), dir.path().join("o.png"));
+        let bytes = png_with(4, 2, 1);
+        std::fs::write(&src, &bytes).unwrap();
+        strip(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), strip_png(&bytes).unwrap());
     }
 }
