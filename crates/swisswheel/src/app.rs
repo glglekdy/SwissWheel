@@ -1446,8 +1446,10 @@ impl AppState {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_SWAP);
                 }
-                // A job started meanwhile: its end sets the timer again.
+                // A job started or the editor opened meanwhile: the job's
+                // end or the editor's close sets the timer again.
                 if self.active_jobs == 0
+                    && !editor::is_open()
                     && let Some(version) = self.pending_swap.take()
                 {
                     self.apply_swap(version);
@@ -1545,12 +1547,20 @@ impl AppState {
             };
             self.notify_job(notice, self.active_jobs == 0);
         }
-        if let Some(delay) =
-            release::on_jobs_finished(self.pending_swap.is_some(), self.active_jobs)
-        {
+        self.arm_swap();
+        self.update_busy(); // draws the new cards with the remaining rows
+    }
+
+    /// A job finished or the editor closed: a waiting swap starts its timer
+    /// once nothing runs and the editor is closed.
+    fn arm_swap(&self) {
+        if let Some(delay) = release::on_jobs_finished(
+            self.pending_swap.is_some(),
+            self.active_jobs,
+            editor::is_open(),
+        ) {
             unsafe { SetTimer(Some(self.hwnd), TIMER_SWAP, delay.as_millis() as u32, None) };
         }
-        self.update_busy(); // draws the new cards with the remaining rows
     }
 
     /// Shows a notice: a card, or a balloon without the notice window.
@@ -1749,16 +1759,22 @@ impl AppState {
                 open_page(&page_url);
                 None
             }
-            Some(Outcome::Ready { version }) => match release::on_ready(self.active_jobs) {
-                ReadyDecision::SwapNow => {
-                    self.apply_swap(version);
-                    None
+            Some(Outcome::Ready { version }) => {
+                match release::on_ready(self.active_jobs, editor::is_open()) {
+                    ReadyDecision::SwapNow => {
+                        self.apply_swap(version);
+                        None
+                    }
+                    ReadyDecision::WaitForJobs => {
+                        self.pending_swap = Some(version);
+                        Some(info(title, text::WAITING))
+                    }
+                    ReadyDecision::WaitForEditor => {
+                        self.pending_swap = Some(version);
+                        Some(info(title, text::WAITING_EDITOR))
+                    }
                 }
-                ReadyDecision::WaitForJobs => {
-                    self.pending_swap = Some(version);
-                    Some(info(title, text::WAITING))
-                }
-            },
+            }
         };
         if let Some(notice) = notice {
             self.notify(notice);
@@ -2138,6 +2154,9 @@ impl AppState {
             }
         }
         hook::set_editor_open(editor::is_open());
+        if !editor::is_open() {
+            self.arm_swap(); // an update downloaded meanwhile (spec 2.9)
+        }
     }
 }
 

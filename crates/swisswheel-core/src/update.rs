@@ -179,25 +179,34 @@ pub fn on_tile(update_running: bool, active_jobs: usize, editor_open: bool) -> T
 pub enum ReadyDecision {
     SwapNow,
     WaitForJobs,
+    /// The editor panel is open: restarting would discard its edits.
+    WaitForEditor,
 }
 
 /// How long a waiting swap holds off after the last conversion ends, so its
 /// notification isn't dismissed by the restart.
 pub const SWAP_AFTER_JOBS: std::time::Duration = std::time::Duration::from_secs(4);
 
-/// A job just finished: when a verified download is waiting (`pending`) and
-/// nothing runs any more, swap after [`SWAP_AFTER_JOBS`].
-pub fn on_jobs_finished(pending: bool, active_jobs: usize) -> Option<std::time::Duration> {
-    (pending && active_jobs == 0).then_some(SWAP_AFTER_JOBS)
+/// A job just finished or the editor just closed: when a verified download
+/// is waiting (`pending`), nothing runs any more and the editor is closed,
+/// swap after [`SWAP_AFTER_JOBS`].
+pub fn on_jobs_finished(
+    pending: bool,
+    active_jobs: usize,
+    editor_open: bool,
+) -> Option<std::time::Duration> {
+    (pending && active_jobs == 0 && !editor_open).then_some(SWAP_AFTER_JOBS)
 }
 
 /// The new exe is downloaded and verified; swapping it in restarts the app,
-/// so it waits for running conversions.
-pub fn on_ready(active_jobs: usize) -> ReadyDecision {
-    if active_jobs == 0 {
-        ReadyDecision::SwapNow
-    } else {
+/// so it waits for running conversions and for an open editor (spec 2.9).
+pub fn on_ready(active_jobs: usize, editor_open: bool) -> ReadyDecision {
+    if active_jobs > 0 {
         ReadyDecision::WaitForJobs
+    } else if editor_open {
+        ReadyDecision::WaitForEditor
+    } else {
+        ReadyDecision::SwapNow
     }
 }
 
@@ -212,6 +221,7 @@ pub mod text {
     pub const DOWNLOAD_FAILED: &str = "업데이트 파일을 받지 못했습니다";
     pub const CORRUPT: &str = "업데이트 파일이 손상되었습니다";
     pub const WAITING: &str = "변환이 끝나면 업데이트합니다";
+    pub const WAITING_EDITOR: &str = "편집기를 닫으면 업데이트합니다";
     pub const SWAP_FAILED: &str = "업데이트하지 못했습니다";
 
     pub fn up_to_date(v: Version) -> String {
@@ -388,16 +398,30 @@ mod tests {
 
     #[test]
     fn ready_waits_for_jobs() {
-        assert_eq!(on_ready(0), ReadyDecision::SwapNow);
-        assert_eq!(on_ready(1), ReadyDecision::WaitForJobs);
+        assert_eq!(on_ready(0, false), ReadyDecision::SwapNow);
+        assert_eq!(on_ready(1, false), ReadyDecision::WaitForJobs);
+    }
+
+    #[test]
+    fn ready_waits_for_an_open_editor() {
+        // The swap restarts the app, which would discard the edits.
+        assert_eq!(on_ready(0, true), ReadyDecision::WaitForEditor);
+        assert_eq!(on_ready(1, true), ReadyDecision::WaitForJobs);
     }
 
     #[test]
     fn swap_waits_after_the_last_jobs_notice() {
-        assert_eq!(on_jobs_finished(true, 0), Some(SWAP_AFTER_JOBS));
+        assert_eq!(on_jobs_finished(true, 0, false), Some(SWAP_AFTER_JOBS));
         assert!(SWAP_AFTER_JOBS >= std::time::Duration::from_secs(3));
-        assert_eq!(on_jobs_finished(true, 1), None);
-        assert_eq!(on_jobs_finished(false, 0), None);
+        assert_eq!(on_jobs_finished(true, 1, false), None);
+        assert_eq!(on_jobs_finished(false, 0, false), None);
+    }
+
+    #[test]
+    fn swap_waits_for_the_editor_to_close() {
+        assert_eq!(on_jobs_finished(true, 0, true), None);
+        assert_eq!(on_jobs_finished(true, 1, true), None);
+        assert_eq!(on_jobs_finished(false, 0, true), None);
     }
 
     #[test]
