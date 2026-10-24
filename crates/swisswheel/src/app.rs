@@ -2030,7 +2030,12 @@ impl AppState {
         let Some(runner) = &self.runner else {
             return;
         };
-        runner.submit(Job { op, preset, inputs });
+        runner.submit(Job {
+            op,
+            preset,
+            inputs,
+            edits: None,
+        });
         self.active_jobs += 1;
         self.update_busy();
     }

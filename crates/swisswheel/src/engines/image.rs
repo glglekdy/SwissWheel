@@ -122,8 +122,6 @@ pub(crate) fn decode(input: &Path) -> Result<DynamicImage, EngineError> {
 
 /// Replays the editor's `ops` on the full-resolution image and writes it in
 /// the input's own format at high quality.
-// Wired by Task 10 (the editor's save job).
-#[allow(dead_code)]
 pub fn apply_edits(ops: &[EditOp], input: &Path, output: &Path) -> Result<(), EngineError> {
     let format = Format::from_path(input)
         .ok_or_else(|| EngineError::Unsupported(input.display().to_string()))?;
@@ -254,9 +252,17 @@ fn encode(
             img.color().into(),
         )
         .map_err(|e| write(&e))?,
-        Format::Tiff => img
-            .write_to(&mut out, ImageFormat::Tiff)
-            .map_err(|e| write(&e))?,
+        Format::Tiff => {
+            // The TIFF encoder has no gray-with-alpha mode.
+            let img = match img {
+                DynamicImage::ImageLumaA8(_) | DynamicImage::ImageLumaA16(_) => {
+                    &DynamicImage::ImageRgba8(img.to_rgba8())
+                }
+                _ => img,
+            };
+            img.write_to(&mut out, ImageFormat::Tiff)
+                .map_err(|e| write(&e))?
+        }
         Format::Gif => DynamicImage::ImageRgba8(img.to_rgba8())
             .write_to(&mut out, ImageFormat::Gif)
             .map_err(|e| write(&e))?,
@@ -825,6 +831,32 @@ pub(crate) mod tests {
         drop(f);
         let low = mean_error(&rotated, &open(&low_out).to_rgb8());
         assert!(high < low, "high {high:.2} vs q75 {low:.2}");
+    }
+
+    #[test]
+    fn edits_grayscale_works_for_tiff_with_alpha_and_for_jpg() {
+        let dir = tempfile::tempdir().unwrap();
+        let tiff = dir.path().join("a.tif");
+        ::image::RgbaImage::from_pixel(8, 8, ::image::Rgba([30, 120, 200, 128]))
+            .save(&tiff)
+            .unwrap();
+        let out = dir.path().join("a_out.tif");
+        apply_edits(&[EditOp::Grayscale(true)], &tiff, &out).unwrap();
+        for p in open(&out).to_rgba8().pixels() {
+            assert_eq!(p.0[0], p.0[1]);
+            assert_eq!(p.0[1], p.0[2]);
+        }
+
+        let jpg = dir.path().join("c.jpg");
+        write_jpg(&gradient(16, 16), 95, &mut File::create(&jpg).unwrap()).unwrap();
+        let out = dir.path().join("c_out.jpg");
+        apply_edits(&[EditOp::Grayscale(true)], &jpg, &out).unwrap();
+        for p in open(&out).to_rgb8().pixels() {
+            assert!(
+                p.0[0].abs_diff(p.0[1]) <= 2 && p.0[1].abs_diff(p.0[2]) <= 2,
+                "{p:?}"
+            );
+        }
     }
 
     #[test]

@@ -6,8 +6,6 @@ use std::path::Path;
 use super::EngineError;
 
 /// Writes a copy of `input` (JPEG, PNG, or WebP) without its metadata blocks.
-// Wired by Task 10 (the editor's info-only save).
-#[allow(dead_code)]
 pub fn strip(input: &Path, output: &Path) -> Result<(), EngineError> {
     let bytes =
         std::fs::read(input).map_err(|e| EngineError::Read(format!("{}: {e}", input.display())))?;
