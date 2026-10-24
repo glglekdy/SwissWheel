@@ -167,16 +167,19 @@ fn exif_orientation(tiff: &[u8]) -> Option<u16> {
             u16::from_le_bytes(b)
         })
     };
-    let b: [u8; 4] = tiff.get(4..8)?.try_into().ok()?;
-    let ifd = (if big {
-        u32::from_be_bytes(b)
-    } else {
-        u32::from_le_bytes(b)
-    }) as usize;
+    let u32_at = |at: usize| -> Option<u32> {
+        let b: [u8; 4] = tiff.get(at..at + 4)?.try_into().ok()?;
+        Some(if big {
+            u32::from_be_bytes(b)
+        } else {
+            u32::from_le_bytes(b)
+        })
+    };
+    let ifd = u32_at(4)? as usize;
     let count = u16_at(ifd)? as usize;
     (0..count).find_map(|n| {
         let entry = ifd + 2 + n * 12;
-        if u16_at(entry)? == 0x0112 && u16_at(entry + 2)? == 3 {
+        if u16_at(entry)? == 0x0112 && u16_at(entry + 2)? == 3 && u32_at(entry + 4)? == 1 {
             u16_at(entry + 8)
         } else {
             None
@@ -358,6 +361,79 @@ mod tests {
     fn big_endian_orientation_is_kept() {
         let out = strip_jpeg(&jpeg_with(&[(1, exif_app1(8, true, false))])).unwrap();
         assert_eq!(orientation_of(&out), Orientation::Rotate270);
+    }
+
+    /// A TIFF block with one orientation entry whose count field, IFD offset,
+    /// and length can be broken.
+    fn tiff_entry(big: bool, ifd: u32, count: u32, keep: usize) -> Vec<u8> {
+        let u16b = |v: u16| {
+            if big {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
+        let u32b = |v: u32| {
+            if big {
+                v.to_be_bytes()
+            } else {
+                v.to_le_bytes()
+            }
+        };
+        let mut t = Vec::new();
+        t.extend_from_slice(if big { b"MM *" } else { b"II* " });
+        t.extend_from_slice(&u32b(ifd));
+        t.extend_from_slice(&u16b(1));
+        t.extend_from_slice(&u16b(0x0112));
+        t.extend_from_slice(&u16b(3));
+        t.extend_from_slice(&u32b(count));
+        t.extend_from_slice(&u16b(6));
+        t.extend_from_slice(&[0, 0]);
+        t.truncate(keep);
+        t
+    }
+
+    #[test]
+    fn malformed_exif_orientation_is_none() {
+        for big in [false, true] {
+            let full = tiff_entry(big, 8, 1, usize::MAX);
+            assert_eq!(exif_orientation(&full), Some(6));
+            assert_eq!(exif_orientation(&tiff_entry(big, 8, 2, usize::MAX)), None);
+            assert_eq!(exif_orientation(&tiff_entry(big, 8, 0, usize::MAX)), None);
+            assert_eq!(
+                exif_orientation(&tiff_entry(big, 1000, 1, usize::MAX)),
+                None
+            );
+            // Cut inside the entry, before its value.
+            for keep in [9, 12, 16, 18, 19] {
+                assert_eq!(exif_orientation(&tiff_entry(big, 8, 1, keep)), None);
+            }
+        }
+    }
+
+    #[test]
+    fn orientation_app1_sits_right_after_app0() {
+        let src = jpeg_with(&[(1, exif_app1(6, false, false))]);
+        let out = strip_jpeg(&src).unwrap();
+        // SOI, APP0 (JFIF), then the inserted APP1.
+        assert_eq!(&out[2..4], [0xFF, 0xE0]);
+        let app0_len = u16::from_be_bytes([out[4], out[5]]) as usize;
+        let at = 4 + app0_len;
+        assert_eq!(&out[at..at + 2], [0xFF, 0xE1]);
+        assert_eq!(&out[at + 4..at + 10], b"Exif  ");
+    }
+
+    #[test]
+    fn orientation_app1_follows_soi_without_app0() {
+        let src = jpeg_with(&[(1, exif_app1(6, false, false))]);
+        let app0_len = u16::from_be_bytes([src[4], src[5]]) as usize;
+        assert_eq!(&src[2..4], [0xFF, 0xE0]);
+        let mut no_app0 = src[..2].to_vec();
+        no_app0.extend_from_slice(&src[4 + app0_len..]);
+        let out = strip_jpeg(&no_app0).unwrap();
+        assert_eq!(&out[2..4], [0xFF, 0xE1]);
+        assert_eq!(&out[6..12], b"Exif  ");
+        assert_eq!(orientation_of(&out), Orientation::Rotate90);
     }
 
     #[test]
