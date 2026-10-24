@@ -13,6 +13,7 @@ use ::image::{
 };
 use swisswheel_core::catalog::{Operation, Tool};
 use swisswheel_core::config::Quality;
+use swisswheel_core::editor::{Axis, EditOp, Turn};
 use swisswheel_core::format::{Format, MediaKind};
 use swisswheel_core::options::{Level, Preset};
 
@@ -101,7 +102,7 @@ pub fn run(
 }
 
 /// Decodes by content (a misnamed file still works) and applies EXIF orientation.
-fn decode(input: &Path) -> Result<DynamicImage, EngineError> {
+pub(crate) fn decode(input: &Path) -> Result<DynamicImage, EngineError> {
     let read = |e: &dyn std::fmt::Display| EngineError::Read(format!("{}: {e}", input.display()));
     let bytes = std::fs::read(input).map_err(|e| read(&e))?;
     let reader = ImageReader::new(std::io::Cursor::new(&bytes))
@@ -117,6 +118,65 @@ fn decode(input: &Path) -> Result<DynamicImage, EngineError> {
     };
     img.apply_orientation(orientation);
     Ok(img)
+}
+
+/// Replays the editor's `ops` on the full-resolution image and writes it in
+/// the input's own format at high quality.
+// Wired by Task 10 (the editor's save job).
+#[allow(dead_code)]
+pub fn apply_edits(ops: &[EditOp], input: &Path, output: &Path) -> Result<(), EngineError> {
+    let format = Format::from_path(input)
+        .ok_or_else(|| EngineError::Unsupported(input.display().to_string()))?;
+    let mut img = decode(input)?;
+    let mut gray = false;
+    for op in ops {
+        match *op {
+            EditOp::Crop(r) => {
+                let inside = r.w > 0
+                    && r.h > 0
+                    && r.x.checked_add(r.w).is_some_and(|x| x <= img.width())
+                    && r.y.checked_add(r.h).is_some_and(|y| y <= img.height());
+                if !inside {
+                    return Err(EngineError::Failed(format!(
+                        "crop {r:?} outside {}x{}",
+                        img.width(),
+                        img.height()
+                    )));
+                }
+                img = img.crop_imm(r.x, r.y, r.w, r.h);
+            }
+            EditOp::Rotate(Turn::Cw) => img = img.rotate90(),
+            EditOp::Rotate(Turn::Ccw) => img = img.rotate270(),
+            EditOp::Flip(Axis::Horizontal) => img = img.fliph(),
+            EditOp::Flip(Axis::Vertical) => img = img.flipv(),
+            EditOp::Grayscale(on) => gray = on,
+            EditOp::StripInfo(_) => {}
+        }
+    }
+    if gray {
+        // Keeps alpha: images with it come back as LumaA.
+        img = img.grayscale();
+    }
+    encode(&img, format, HIGH_JPG_QUALITY, HIGH_WEBP_QUALITY, output)
+}
+
+/// Pixel size after EXIF orientation, from the header alone.
+// Wired by Task 11 (the editor panel's preview load).
+#[allow(dead_code)]
+pub(crate) fn dimensions(input: &Path) -> Result<(u32, u32), EngineError> {
+    let read = |e: &dyn std::fmt::Display| EngineError::Read(format!("{}: {e}", input.display()));
+    let reader = ImageReader::open(input)
+        .map_err(|e| read(&e))?
+        .with_guessed_format()
+        .map_err(|e| read(&e))?;
+    let mut decoder = reader.into_decoder().map_err(|e| read(&e))?;
+    let (w, h) = decoder.dimensions();
+    let orientation = decoder.orientation().map_err(|e| read(&e))?;
+    use ::image::metadata::Orientation::*;
+    Ok(match orientation {
+        Rotate90 | Rotate270 | Rotate90FlipH | Rotate270FlipH => (h, w),
+        _ => (w, h),
+    })
 }
 
 /// Whether a sequential JPEG stores its channels in separate scans, as this
@@ -283,6 +343,7 @@ pub(crate) mod tests {
     use std::path::Path;
     use swisswheel_core::catalog::{Operation, Tool};
     use swisswheel_core::config::Quality;
+    use swisswheel_core::editor::PixelRect;
     use swisswheel_core::format::Format;
 
     /// Writes a `w`x`h` PNG filled with one color at the given alpha.
@@ -670,5 +731,107 @@ pub(crate) mod tests {
             .unwrap()
             .decode()
             .unwrap()
+    }
+
+    #[test]
+    fn edits_rotate_then_crop_moves_marks() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("m.png");
+        let mut img = ::image::RgbaImage::from_pixel(40, 20, ::image::Rgba([0, 0, 0, 255]));
+        img.put_pixel(0, 0, ::image::Rgba([255, 0, 0, 255])); // top-left red
+        img.put_pixel(39, 19, ::image::Rgba([0, 255, 0, 255])); // bottom-right green
+        img.save(&src).unwrap();
+        let out = dir.path().join("o.png");
+        let ops = [
+            EditOp::Rotate(Turn::Cw), // 20x40, red at (19, 0)
+            EditOp::Crop(PixelRect {
+                x: 10,
+                y: 0,
+                w: 10,
+                h: 40,
+            }), // red at (9, 0)
+            EditOp::Flip(Axis::Horizontal), // red at (0, 0)
+        ];
+        apply_edits(&ops, &src, &out).unwrap();
+        let got = open(&out).to_rgba8();
+        assert_eq!(got.dimensions(), (10, 40));
+        assert_eq!(got.get_pixel(0, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn edits_ccw_vertical_flip_and_last_grayscale_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("m.png");
+        let mut img = ::image::RgbaImage::from_pixel(40, 20, ::image::Rgba([0, 0, 0, 255]));
+        img.put_pixel(0, 0, ::image::Rgba([255, 0, 0, 255]));
+        img.save(&src).unwrap();
+        let out = dir.path().join("o.png");
+        let ops = [
+            EditOp::Rotate(Turn::Ccw),    // 20x40, red at (0, 39)
+            EditOp::Flip(Axis::Vertical), // red at (0, 0)
+            EditOp::Grayscale(true),
+            EditOp::StripInfo(true),
+            EditOp::Grayscale(false),
+        ];
+        apply_edits(&ops, &src, &out).unwrap();
+        let got = open(&out).to_rgba8();
+        assert_eq!(got.dimensions(), (20, 40));
+        assert_eq!(got.get_pixel(0, 0).0, [255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn edits_crop_outside_the_image_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("m.png");
+        rgba_png(&src, 8, 8, 255);
+        let out = dir.path().join("o.png");
+        let crop = EditOp::Crop(PixelRect {
+            x: 4,
+            y: 0,
+            w: 8,
+            h: 8,
+        });
+        assert!(matches!(
+            apply_edits(&[crop], &src, &out),
+            Err(EngineError::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn edits_grayscale_keeps_alpha_and_jpg_is_high_quality() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("a.png");
+        rgba_png(&src, 8, 8, 128);
+        let out = dir.path().join("a_out.png");
+        apply_edits(&[EditOp::Grayscale(true)], &src, &out).unwrap();
+        let got = open(&out).to_rgba8();
+        for p in got.pixels() {
+            assert_eq!(p.0[0], p.0[1]);
+            assert_eq!(p.0[1], p.0[2]);
+            assert_eq!(p.0[3], 128);
+        }
+
+        let pixels = gradient(256, 256);
+        let jpg = dir.path().join("g.jpg");
+        write_jpg(&pixels, 100, &mut File::create(&jpg).unwrap()).unwrap();
+        let source = open(&jpg).to_rgb8();
+        let out = dir.path().join("g_out.jpg");
+        apply_edits(&[EditOp::Rotate(Turn::Cw)], &jpg, &out).unwrap();
+        let rotated = ::image::imageops::rotate90(&source);
+        let high = mean_error(&rotated, &open(&out).to_rgb8());
+        let low_out = dir.path().join("g_low.jpg");
+        let mut f = File::create(&low_out).unwrap();
+        write_jpg(&rotated, 75, &mut f).unwrap();
+        drop(f);
+        let low = mean_error(&rotated, &open(&low_out).to_rgb8());
+        assert!(high < low, "high {high:.2} vs q75 {low:.2}");
+    }
+
+    #[test]
+    fn dimensions_reads_a_plain_png_header() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("d.png");
+        rgba_png(&src, 37, 11, 255);
+        assert_eq!(dimensions(&src).unwrap(), (37, 11));
     }
 }
