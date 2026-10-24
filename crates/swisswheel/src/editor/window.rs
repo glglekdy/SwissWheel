@@ -21,7 +21,7 @@ use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VK_CONTROL, VK_SHIFT,
+    VK_CONTROL, VK_F4, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, PCWSTR, Result, w};
@@ -336,6 +336,24 @@ unsafe extern "system" fn panel_proc(
             }
             with_editor(|ed| ed.key(wparam.0 as u16, now))
         }
+        WM_SYSKEYDOWN => {
+            // Handled here, not by DefWindowProc: it would turn every
+            // auto-repeat of Alt+F4 into another WM_CLOSE, and the panel
+            // has no system menu for Alt or F10 to open.
+            if lparam.0 & KEY_REPEAT != 0 {
+                return LRESULT(0);
+            }
+            with_editor(|ed| {
+                if wparam.0 as u16 == VK_F4.0 {
+                    ed.state.command(EditorCommand::Escape, now)
+                } else {
+                    ed.state.key_other(now)
+                }
+            })
+        }
+        // No menu to pick from: no mnemonic beep, no menu mode.
+        WM_SYSCHAR => return LRESULT(0),
+        WM_SYSCOMMAND if wparam.0 & 0xFFF0 == SC_KEYMENU as usize => return LRESULT(0),
         WM_CLOSE => with_editor(|ed| ed.state.command(EditorCommand::Escape, now)),
         WM_LBUTTONDOWN => {
             let (x, y) = client_point(lparam);
@@ -408,9 +426,14 @@ unsafe extern "system" fn dim_proc(
 ) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
-        // A click beside the panel doesn't close it; it hands focus back.
+        // A click beside the panel doesn't close it; it hands focus back
+        // and, like any click, clears the discard prompt.
         WM_LBUTTONDOWN => {
             focus();
+            let now = Instant::now();
+            if let Some(outcome) = with_editor(|ed| ed.state.click(EditorHit::Nothing, now)) {
+                settle(outcome);
+            }
             LRESULT(0)
         }
         // Closing is the panel's business (Esc, or the app quitting).
