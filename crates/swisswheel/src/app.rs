@@ -79,7 +79,7 @@ const WM_APP_ESSENTIALS: u32 = WM_APP + 35;
 const WM_APP_FFMPEG_REMOVE: u32 = WM_APP + 36;
 /// The startup check found (or failed to find) the newest SwissWheel.
 const WM_APP_AUTO_CHECK: u32 = WM_APP + 37;
-/// Open the editor for `edit_pending` (posted: never inside OLE `Drop`).
+/// Open the editor for the next `edit_pending` (posted: never inside OLE `Drop`).
 const WM_APP_EDITOR_OPEN: u32 = WM_APP + 38;
 /// The editor panel ended; its events are in `editor::take_events`.
 const WM_APP_EDITOR: u32 = WM_APP + 39;
@@ -219,8 +219,8 @@ pub(crate) struct AppState {
     last_output: Option<PathBuf>,
     hooks_installed_at: Instant,
     taskbar_created: u32,
-    /// The image the ✎편집 tile got, until `WM_APP_EDITOR_OPEN` opens it.
-    edit_pending: Option<PathBuf>,
+    /// Images the ✎편집 tile got, one per posted `WM_APP_EDITOR_OPEN`.
+    edit_pending: VecDeque<PathBuf>,
     /// The `notices` preview's cards and progress rows.
     #[cfg(debug_assertions)]
     preview_notices: Option<(Notices, Vec<ProgressRow>)>,
@@ -422,7 +422,7 @@ pub fn run() -> Result<()> {
         last_output: None,
         hooks_installed_at: Instant::now(),
         taskbar_created,
-        edit_pending: None,
+        edit_pending: VecDeque::new(),
         #[cfg(debug_assertions)]
         preview_notices: None,
     }));
@@ -2080,28 +2080,31 @@ impl AppState {
         self.update_busy();
     }
 
-    /// ✎편집: brings an open panel forward with a card (spec 2.9), or
-    /// stashes the image and posts `WM_APP_EDITOR_OPEN`. `submit` runs
-    /// inside OLE `Drop`, where a new window would stall the dragging app.
+    /// ✎편집: queues the image and posts `WM_APP_EDITOR_OPEN`. `submit`
+    /// runs inside OLE `Drop`, where opening or raising a window would stall
+    /// the dragging app and let it take the focus back.
     fn request_editor(&mut self, inputs: Vec<PathBuf>) {
-        if editor::is_open() {
-            editor::focus();
-            self.notify(info(editor_text::TITLE, editor_text::ALREADY_OPEN));
-            return;
-        }
         let Some(path) = inputs.into_iter().next() else {
             return;
         };
-        self.edit_pending = Some(path);
+        self.edit_pending.push_back(path);
         unsafe {
             let _ = PostMessageW(Some(self.hwnd), WM_APP_EDITOR_OPEN, WPARAM(0), LPARAM(0));
         }
     }
 
+    /// One queued image per message: opens it, or brings the open panel
+    /// forward with a card (spec 2.9).
     fn open_editor(&mut self) {
-        let Some(path) = self.edit_pending.take() else {
+        let Some(path) = self.edit_pending.pop_front() else {
             return;
         };
+        if editor::is_open() {
+            log_info!("편집기가 이미 열려 있어 {}는 열지 않습니다", path.display());
+            editor::focus();
+            self.notify(info(editor_text::TITLE, editor_text::ALREADY_OPEN));
+            return;
+        }
         let accent = self.config.appearance.accent;
         if let Err(e) = editor::open(path, self.hwnd, WM_APP_EDITOR, accent) {
             log_error!("편집기를 열 수 없습니다: {e}");
