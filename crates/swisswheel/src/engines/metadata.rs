@@ -488,7 +488,7 @@ mod tests {
             }
         };
         let mut t = Vec::new();
-        t.extend_from_slice(if big { b"MM *" } else { b"II* " });
+        t.extend_from_slice(if big { b"MM\0*" } else { b"II*\0" });
         t.extend_from_slice(&u32b(ifd));
         t.extend_from_slice(&u16b(1));
         t.extend_from_slice(&u16b(0x0112));
@@ -527,7 +527,7 @@ mod tests {
         let app0_len = u16::from_be_bytes([out[4], out[5]]) as usize;
         let at = 4 + app0_len;
         assert_eq!(&out[at..at + 2], [0xFF, 0xE1]);
-        assert_eq!(&out[at + 4..at + 10], b"Exif  ");
+        assert_eq!(&out[at + 4..at + 10], b"Exif\0\0");
     }
 
     #[test]
@@ -539,7 +539,7 @@ mod tests {
         no_app0.extend_from_slice(&src[4 + app0_len..]);
         let out = strip_jpeg(&no_app0).unwrap();
         assert_eq!(&out[2..4], [0xFF, 0xE1]);
-        assert_eq!(&out[6..12], b"Exif  ");
+        assert_eq!(&out[6..12], b"Exif\0\0");
         assert_eq!(orientation_of(&out), Orientation::Rotate90);
     }
 
@@ -668,8 +668,8 @@ mod tests {
         let ihdr_end = 8 + 12 + 13;
         let mut out = plain[..ihdr_end].to_vec();
         out.extend_from_slice(&png_chunk(b"tIME", &[7, 234, 10, 25, 1, 2, 3]));
-        out.extend_from_slice(&png_chunk(b"iCCP", b"icc  profile-bytes"));
-        out.extend_from_slice(&png_chunk(b"tEXt", b"Comment hi"));
+        out.extend_from_slice(&png_chunk(b"iCCP", b"icc\0\0profile-bytes"));
+        out.extend_from_slice(&png_chunk(b"tEXt", b"Comment\0hi"));
         out.extend_from_slice(&png_chunk(b"eXIf", &exif[6..]));
         out.extend_from_slice(&plain[ihdr_end..]);
         out
