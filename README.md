@@ -47,11 +47,11 @@ Shown but not yet implemented (they say "다음 버전에서 지원 예정입니
    | **I** | Strip location and camera info on/off (JPG, PNG, WebP) |
    | **Ctrl+Z** / **Ctrl+Y** (or **Ctrl+Shift+Z**) | Undo / redo |
    | **Enter** | Save |
-   | **Esc** | Cancel; with edits, press **Esc** again within 3 seconds to discard them |
+   | **Esc** (or **Alt+F4**) | Cancel; with edits, press **Esc** again within 3 seconds to discard them |
 
-4. Saving closes the panel and runs like any other job: the result is `photo (edited).jpg` next to the original (same format; JPG quality 95, WebP 92, other formats lossless). With only **I** on, the file is copied without re-compressing and without its info, as `photo (no info).jpg`; any other edit re-saves the picture and drops the info too. Phone portrait photos stay upright.
+4. Saving closes the panel and runs like any other job: the result is `photo (edited).jpg` next to the original (same format; JPG quality 95, WebP 92, other formats lossless). With only **I** on, the file is copied without re-compressing and without its info, as `photo (no info).jpg` (a JPG keeps its orientation and color profile); any other edit re-saves the picture and drops the info too. Phone portrait photos stay upright.
 
-Only one panel can be open at a time. While it is open, double-tapping Ctrl does nothing, and the menu's **재시작** and **업데이트** wait until you close it. Quitting SwissWheel discards unsaved edits.
+Only one panel can be open at a time. While it is open, double-tapping Ctrl does nothing, and **재시작** and **업데이트** refuse with "편집기를 닫은 뒤 다시 시도하세요". An update that finishes downloading in the background while the panel is open waits to install until you close it. Quitting SwissWheel discards unsaved edits.
 
 ## Updates
 
