@@ -19,9 +19,10 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
+use windows::Win32::UI::Input::Ime::{HIMC, ImmAssociateContext, ImmGetVirtualKey};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, ReleaseCapture, SetCapture, SetFocus, TME_LEAVE, TRACKMOUSEEVENT, TrackMouseEvent,
-    VK_CONTROL, VK_F4, VK_SHIFT,
+    VK_CONTROL, VK_F4, VK_PROCESSKEY, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, PCWSTR, Result, w};
@@ -142,6 +143,9 @@ impl Windows {
                 Some(instance.into()),
                 None,
             )?;
+            // No IME for the panel: in 한글 mode the letter shortcuts would
+            // reach WM_KEYDOWN as VK_PROCESSKEY and do nothing.
+            ImmAssociateContext(windows.panel, HIMC::default());
             let enable = BOOL::from(true);
             windows.glass_supported = DwmSetWindowAttribute(
                 windows.panel,
@@ -334,7 +338,12 @@ unsafe extern "system" fn panel_proc(
             if lparam.0 & KEY_REPEAT != 0 {
                 return LRESULT(0);
             }
-            with_editor(|ed| ed.key(wparam.0 as u16, now))
+            let mut vk = wparam.0 as u16;
+            // Should an IME still be attached, ask it for the real key.
+            if vk == VK_PROCESSKEY.0 {
+                vk = unsafe { ImmGetVirtualKey(hwnd) } as u16;
+            }
+            with_editor(|ed| ed.key(vk, now))
         }
         WM_SYSKEYDOWN => {
             // Handled here, not by DefWindowProc: it would turn every
