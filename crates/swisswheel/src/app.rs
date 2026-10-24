@@ -8,9 +8,10 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use swisswheel_core::catalog::Operation;
+use swisswheel_core::catalog::{Operation, Tool};
 use swisswheel_core::config::{Config, Key};
 use swisswheel_core::drag::{DragCommand, DragEvent, KeyBindings};
+use swisswheel_core::editor::text as editor_text;
 use swisswheel_core::essentials::{
     self, Essential, EssentialAction, EssentialState, Installed, Latest,
 };
@@ -52,6 +53,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{HSTRING, PCWSTR, Result, w};
 
 use crate::dnd::DropTarget;
+use crate::editor::{self, EditorEvent};
 use crate::engines::ffmpeg as ffmpeg_tools;
 use crate::essentials_status;
 use crate::ffmpeg_install::{self, RemoveOutcome};
@@ -77,6 +79,10 @@ const WM_APP_ESSENTIALS: u32 = WM_APP + 35;
 const WM_APP_FFMPEG_REMOVE: u32 = WM_APP + 36;
 /// The startup check found (or failed to find) the newest SwissWheel.
 const WM_APP_AUTO_CHECK: u32 = WM_APP + 37;
+/// Open the editor for the next `edit_pending` (posted: never inside OLE `Drop`).
+const WM_APP_EDITOR_OPEN: u32 = WM_APP + 38;
+/// The editor panel ended; its events are in `editor::take_events`.
+const WM_APP_EDITOR: u32 = WM_APP + 39;
 /// How long a successful check for the newest FFmpeg is trusted.
 const LATEST_TTL: Duration = Duration::from_secs(3600);
 /// How long a freshly updated app waits for the old one to exit.
@@ -213,6 +219,8 @@ pub(crate) struct AppState {
     last_output: Option<PathBuf>,
     hooks_installed_at: Instant,
     taskbar_created: u32,
+    /// Images the ✎편집 tile got, one per posted `WM_APP_EDITOR_OPEN`.
+    edit_pending: VecDeque<PathBuf>,
     /// The `notices` preview's cards and progress rows.
     #[cfg(debug_assertions)]
     preview_notices: Option<(Notices, Vec<ProgressRow>)>,
@@ -414,6 +422,7 @@ pub fn run() -> Result<()> {
         last_output: None,
         hooks_installed_at: Instant::now(),
         taskbar_created,
+        edit_pending: VecDeque::new(),
         #[cfg(debug_assertions)]
         preview_notices: None,
     }));
@@ -505,6 +514,12 @@ unsafe extern "system" fn wnd_proc(
         WM_APP_AUTO_CHECK => {
             with_state(AppState::on_auto_checked);
         }
+        WM_APP_EDITOR_OPEN => {
+            with_state(AppState::open_editor);
+        }
+        WM_APP_EDITOR => {
+            with_state(AppState::on_editor_events);
+        }
         WM_APP_FOREGROUND => {
             with_state(|s| s.on_foreground(HWND(wparam.0 as *mut _)));
         }
@@ -553,6 +568,7 @@ unsafe extern "system" fn wnd_proc(
                 if let Some(watch) = state.foreground_hook.take() {
                     hook::unwatch_foreground(watch);
                 }
+                editor::close(); // its edits are dropped (spec 2.9)
                 log_info!("종료 중: 작업 대기");
                 if let Some(runner) = state.runner.take() {
                     runner.shutdown(); // finish queued files before exiting
@@ -1082,7 +1098,7 @@ impl AppState {
 
     /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`,
     /// `progress`, `notices`, `menu`, `menu-settings`, `menu-tools`, `menu-capture`,
-    /// `menu-notifications`, `menu-general`, or `menu-download` shows that UI at startup
+    /// `menu-notifications`, `menu-general`, `menu-download`, or `editor` shows that UI at startup
     /// without a drag or key press, so the drawing can be checked by eye.
     #[cfg(debug_assertions)]
     fn preview(&mut self, what: &str) {
@@ -1260,6 +1276,26 @@ impl AppState {
                     self.notify(key_prompt(item));
                 }
             }
+            // A gradient with a colored mark in each corner, so turns and
+            // flips show which way they went.
+            "editor" => {
+                let path = std::env::temp_dir().join("swisswheel-editor-preview.png");
+                let image = ::image::RgbaImage::from_fn(1600, 1000, |x, y| {
+                    let mark = 160;
+                    let rgb = match (x < mark, x >= 1600 - mark, y < mark, y >= 1000 - mark) {
+                        (true, _, true, _) => [230, 40, 40],
+                        (_, true, true, _) => [40, 200, 60],
+                        (true, _, _, true) => [40, 80, 230],
+                        (_, true, _, true) => [250, 220, 40],
+                        _ => [(x * 255 / 1600) as u8, (y * 255 / 1000) as u8, 140],
+                    };
+                    ::image::Rgba([rgb[0], rgb[1], rgb[2], 255])
+                });
+                match image.save(&path) {
+                    Ok(()) => self.request_editor(vec![path]),
+                    Err(e) => log_error!("편집기 미리보기 이미지를 쓸 수 없습니다: {e}"),
+                }
+            }
             other => log_error!("SWISSWHEEL_PREVIEW: 알 수 없는 값 {other}"),
         }
     }
@@ -1410,8 +1446,10 @@ impl AppState {
                 unsafe {
                     let _ = KillTimer(Some(self.hwnd), TIMER_SWAP);
                 }
-                // A job started meanwhile: its end sets the timer again.
+                // A job started or the editor opened meanwhile: the job's
+                // end or the editor's close sets the timer again.
                 if self.active_jobs == 0
+                    && !editor::is_open()
                     && let Some(version) = self.pending_swap.take()
                 {
                     self.apply_swap(version);
@@ -1505,12 +1543,20 @@ impl AppState {
             };
             self.notify_job(notice, self.active_jobs == 0);
         }
-        if let Some(delay) =
-            release::on_jobs_finished(self.pending_swap.is_some(), self.active_jobs)
-        {
+        self.arm_swap();
+        self.update_busy(); // draws the new cards with the remaining rows
+    }
+
+    /// A job finished or the editor closed: a waiting swap starts its timer
+    /// once nothing runs and the editor is closed.
+    fn arm_swap(&self) {
+        if let Some(delay) = release::on_jobs_finished(
+            self.pending_swap.is_some(),
+            self.active_jobs,
+            editor::is_open(),
+        ) {
             unsafe { SetTimer(Some(self.hwnd), TIMER_SWAP, delay.as_millis() as u32, None) };
         }
-        self.update_busy(); // draws the new cards with the remaining rows
     }
 
     /// Shows a notice: a card, or a balloon without the notice window.
@@ -1679,7 +1725,7 @@ impl AppState {
 
     fn start_update(&mut self) {
         let background = self.update.is_some() || self.ffmpeg.is_some() || self.removing;
-        match release::on_tile(background, self.active_jobs) {
+        match release::on_tile(background, self.active_jobs, editor::is_open()) {
             TileDecision::Refuse(notice) => {
                 self.notify(info(release::TITLE, notice));
             }
@@ -1709,16 +1755,22 @@ impl AppState {
                 open_page(&page_url);
                 None
             }
-            Some(Outcome::Ready { version }) => match release::on_ready(self.active_jobs) {
-                ReadyDecision::SwapNow => {
-                    self.apply_swap(version);
-                    None
+            Some(Outcome::Ready { version }) => {
+                match release::on_ready(self.active_jobs, editor::is_open()) {
+                    ReadyDecision::SwapNow => {
+                        self.apply_swap(version);
+                        None
+                    }
+                    ReadyDecision::WaitForJobs => {
+                        self.pending_swap = Some(version);
+                        Some(info(title, text::WAITING))
+                    }
+                    ReadyDecision::WaitForEditor => {
+                        self.pending_swap = Some(version);
+                        Some(info(title, text::WAITING_EDITOR))
+                    }
                 }
-                ReadyDecision::WaitForJobs => {
-                    self.pending_swap = Some(version);
-                    Some(info(title, text::WAITING))
-                }
-            },
+            }
         };
         if let Some(notice) = notice {
             self.notify(notice);
@@ -1905,7 +1957,7 @@ impl AppState {
     /// Starts a fresh copy that waits for this one to exit, then closes
     /// normally (posted, like `apply_swap`).
     fn restart(&mut self) {
-        match restart::on_tile(self.active_jobs, self.background_busy()) {
+        match restart::on_tile(self.active_jobs, self.background_busy(), editor::is_open()) {
             TileDecision::Refuse(notice) => {
                 self.notify(info(restart::TITLE, notice));
             }
@@ -2022,13 +2074,86 @@ impl AppState {
             return;
         }
         let inputs = std::mem::take(&mut self.dragged);
+        if op == Operation::Tool(Tool::Edit) {
+            self.request_editor(inputs);
+            return;
+        }
         log_info!("작업 시작: {} · 파일 {}개", op.label(), inputs.len());
         let Some(runner) = &self.runner else {
             return;
         };
-        runner.submit(Job { op, preset, inputs });
+        runner.submit(Job {
+            op,
+            preset,
+            inputs,
+            edits: None,
+        });
         self.active_jobs += 1;
         self.update_busy();
+    }
+
+    /// ✎편집: queues the image and posts `WM_APP_EDITOR_OPEN`. `submit`
+    /// runs inside OLE `Drop`, where opening or raising a window would stall
+    /// the dragging app and let it take the focus back.
+    fn request_editor(&mut self, inputs: Vec<PathBuf>) {
+        let Some(path) = inputs.into_iter().next() else {
+            return;
+        };
+        self.edit_pending.push_back(path);
+        unsafe {
+            let _ = PostMessageW(Some(self.hwnd), WM_APP_EDITOR_OPEN, WPARAM(0), LPARAM(0));
+        }
+    }
+
+    /// One queued image per message: opens it, or brings the open panel
+    /// forward with a card (spec 2.9).
+    fn open_editor(&mut self) {
+        let Some(path) = self.edit_pending.pop_front() else {
+            return;
+        };
+        if editor::is_open() {
+            log_info!("편집기가 이미 열려 있어 {}는 열지 않습니다", path.display());
+            editor::focus();
+            self.notify(info(editor_text::TITLE, editor_text::ALREADY_OPEN));
+            return;
+        }
+        let accent = self.config.appearance.accent;
+        // An unreadable image comes back as an event with its own card.
+        if let Err(e) = editor::open(path, self.hwnd, WM_APP_EDITOR, accent) {
+            log_error!("편집기를 열 수 없습니다: {e}");
+            self.notify(warning_notice(editor_text::TITLE, editor_text::OPEN_FAILED));
+        }
+        hook::set_editor_open(editor::is_open());
+    }
+
+    /// The panel closed: a save becomes an ordinary job.
+    fn on_editor_events(&mut self) {
+        for event in editor::take_events() {
+            match event {
+                EditorEvent::Saved(path, plan) => {
+                    log_info!("작업 시작: 편집 · {}", path.display());
+                    let Some(runner) = &self.runner else {
+                        continue;
+                    };
+                    runner.submit(Job {
+                        op: Operation::Tool(Tool::Edit),
+                        preset: None,
+                        inputs: vec![path],
+                        edits: Some(plan),
+                    });
+                    self.active_jobs += 1;
+                    self.update_busy();
+                }
+                EditorEvent::Failed(message) => {
+                    self.notify(warning_notice(editor_text::TITLE, &message));
+                }
+                EditorEvent::Closed => {}
+            }
+        }
+        hook::set_editor_open(editor::is_open());
+        if !editor::is_open() {
+            self.arm_swap(); // an update downloaded meanwhile (spec 2.9)
+        }
     }
 }
 

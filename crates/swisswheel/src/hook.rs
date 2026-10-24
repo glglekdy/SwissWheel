@@ -188,6 +188,11 @@ pub fn set_menu_enabled(enabled: bool) {
     with_tracker(|t| t.set_menu_enabled(enabled));
 }
 
+/// The image editor opened or closed: while open, the menu stays shut.
+pub fn set_editor_open(open: bool) {
+    with_tracker(|t| t.set_editor_open(open));
+}
+
 /// The settings panel waits for a key: the next press comes back as
 /// `MenuCapture` instead of reaching any window.
 pub fn set_capture(on: bool) {

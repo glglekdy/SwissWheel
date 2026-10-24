@@ -40,6 +40,7 @@ pub enum Tool {
     Mute,
     /// Puts the dragged items into a new folder beside them.
     Bundle,
+    Edit,
 }
 
 impl Tool {
@@ -51,6 +52,7 @@ impl Tool {
             Tool::ExtractAudio => "오디오 추출",
             Tool::Mute => "음소거",
             Tool::Bundle => "폴더로 묶기",
+            Tool::Edit => "편집",
         }
     }
 
@@ -61,6 +63,7 @@ impl Tool {
             Tool::CompressImage | Tool::CompressVideo => Some("compressed"),
             Tool::ExtractAudio | Tool::Bundle => None,
             Tool::Mute => Some("muted"),
+            Tool::Edit => Some("edited"),
         }
     }
 }
@@ -153,6 +156,18 @@ pub fn items_for(wheel: WheelKind, inputs: &[InputItem]) -> Vec<Operation> {
     // Any two or more items can go into a new folder, last in the Tools wheel.
     if wheel == WheelKind::Tools && inputs.len() >= 2 {
         items.push(Operation::Tool(Tool::Bundle));
+    }
+    // Editing is for exactly one still image, last in the Tools wheel.
+    if wheel == WheelKind::Tools
+        && let [
+            InputItem::File {
+                format: Some(f),
+                animated_gif: false,
+            },
+        ] = inputs
+        && f.kind() == MediaKind::Image
+    {
+        items.push(Operation::Tool(Tool::Edit));
     }
     items
 }
@@ -272,17 +287,42 @@ mod tests {
     }
 
     #[test]
+    fn edit_only_for_one_still_image() {
+        use Format::*;
+        let tools = |inputs: &[InputItem]| items_for(WheelKind::Tools, inputs);
+        assert_eq!(
+            tools(&[file(Png)]).last(),
+            Some(&Operation::Tool(Tool::Edit))
+        );
+        assert_eq!(
+            tools(&[file(Bmp)]),
+            [Tool::Shrink, Tool::Edit].map(Operation::Tool).to_vec()
+        );
+        assert!(!tools(&[file(Png), file(Jpg)]).contains(&Operation::Tool(Tool::Edit)));
+        let animated = InputItem::File {
+            format: Some(Gif),
+            animated_gif: true,
+        };
+        assert!(tools(&[animated]).is_empty());
+        assert!(!tools(&[file(Mp4)]).contains(&Operation::Tool(Tool::Edit)));
+        assert!(tools(&[InputItem::Folder]).is_empty());
+        assert_eq!(Tool::Edit.label(), "편집");
+        assert_eq!(Tool::Edit.suffix(), Some("edited"));
+    }
+
+    #[test]
     fn tools_per_kind() {
         use Format::*;
         assert_eq!(
             items_for(WheelKind::Tools, &[file(Bmp)]),
-            vec![Operation::Tool(Tool::Shrink)]
+            vec![Operation::Tool(Tool::Shrink), Operation::Tool(Tool::Edit)]
         );
         assert_eq!(
             items_for(WheelKind::Tools, &[file(Jpg)]),
             vec![
                 Operation::Tool(Tool::Shrink),
-                Operation::Tool(Tool::CompressImage)
+                Operation::Tool(Tool::CompressImage),
+                Operation::Tool(Tool::Edit)
             ]
         );
         assert_eq!(

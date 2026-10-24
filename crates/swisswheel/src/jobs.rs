@@ -9,6 +9,7 @@ use std::thread::JoinHandle;
 
 use swisswheel_core::catalog::{Operation, Tool};
 use swisswheel_core::config::Quality;
+use swisswheel_core::editor::{EditPlan, SaveKind};
 use swisswheel_core::format::Format;
 use swisswheel_core::media;
 use swisswheel_core::naming::{suffix_for, temp_path};
@@ -26,6 +27,8 @@ pub struct Job {
     /// The option chosen in the side panel; `None` means the defaults.
     pub preset: Option<Preset>,
     pub inputs: Vec<PathBuf>,
+    /// The editor's save: output keeps the input's format and is named after the plan.
+    pub edits: Option<EditPlan>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,6 +64,7 @@ struct Shared {
 struct JobState {
     op: Operation,
     preset: Option<Preset>,
+    edits: Option<EditPlan>,
     results: Mutex<Vec<Option<Result<PathBuf, String>>>>,
     /// Per file, for `Runner::progress` and `Runner::rows`.
     files: Mutex<Vec<FileState>>,
@@ -188,6 +192,7 @@ impl Runner {
         let state = Arc::new(JobState {
             op: job.op,
             preset: job.preset,
+            edits: job.edits,
             results: Mutex::new(vec![None; n]),
             files: Mutex::new(vec![FileState::Waiting; n]),
             names: job.inputs.iter().map(|p| file_name(p)).collect(),
@@ -329,8 +334,10 @@ fn file_name(path: &Path) -> String {
 
 /// Which engine converts a file, decided before its output name is reserved
 /// (for media the output format depends on what ffprobe finds).
-enum Engine {
+enum Engine<'a> {
     Image,
+    /// The editor's save: pixel edits, or a lossless info strip.
+    Edit(&'a EditPlan),
     Media(Tools, media::MediaPlan),
 }
 
@@ -357,7 +364,10 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     };
     let format =
         Format::from_path(input).ok_or_else(|| fail(EngineError::Unsupported(name.clone())))?;
-    let (engine, extension) = if engines::image::supports(op, format) {
+    // Checked first: an edit job never goes to the converters.
+    let (engine, extension) = if let Some(plan) = &work.job.edits {
+        (Engine::Edit(plan), format.extension())
+    } else if engines::image::supports(op, format) {
         (
             Engine::Image,
             engines::image::output_format(op, format).extension(),
@@ -372,7 +382,10 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     } else {
         return Err(fail(EngineError::Unsupported(format!("{op:?} on {name}"))));
     };
-    let suffix = suffix_for(op, preset);
+    let suffix = match &work.job.edits {
+        Some(plan) => Some(plan.kind.suffix().to_string()),
+        None => suffix_for(op, preset),
+    };
 
     let mut target = shared
         .reservations
@@ -380,6 +393,10 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     let temp = temp_path(&target);
     let result = match &engine {
         Engine::Image => engines::image::run(op, preset, input, &temp, &quality),
+        Engine::Edit(plan) => match plan.kind {
+            SaveKind::Edited => engines::image::apply_edits(&plan.ops, input, &temp),
+            SaveKind::StripOnly => engines::metadata::strip(input, &temp),
+        },
         Engine::Media(tools, plan) => {
             let progress =
                 |p: f32| work.job.files.lock().unwrap()[work.index] = FileState::Running(p);
@@ -454,6 +471,7 @@ mod tests {
             op,
             preset: None,
             inputs,
+            edits: None,
         }
     }
 
@@ -653,6 +671,44 @@ mod tests {
     }
 
     #[test]
+    fn edit_jobs_name_their_outputs() {
+        use swisswheel_core::editor::{EditOp, Turn};
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("사진.png");
+        rgba_png(&src, 8, 4, 255);
+        let (runner, rx) = runner();
+        let edited = EditPlan {
+            ops: vec![EditOp::Rotate(Turn::Cw)],
+            kind: SaveKind::Edited,
+        };
+        runner.submit(Job {
+            op: Operation::Tool(Tool::Edit),
+            preset: None,
+            inputs: vec![src.clone()],
+            edits: Some(edited),
+        });
+        let report = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(report.outputs, vec![dir.path().join("사진 (edited).png")]);
+        assert_eq!(
+            ::image::image_dimensions(&report.outputs[0]).unwrap(),
+            (4, 8)
+        );
+        let strip = EditPlan {
+            ops: vec![EditOp::StripInfo(true)],
+            kind: SaveKind::StripOnly,
+        };
+        runner.submit(Job {
+            op: Operation::Tool(Tool::Edit),
+            preset: None,
+            inputs: vec![src.clone()],
+            edits: Some(strip),
+        });
+        let report = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(report.outputs, vec![dir.path().join("사진 (no info).png")]);
+        assert!(src.exists());
+    }
+
+    #[test]
     fn option_suffixes_reach_file_names() {
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("a.png");
@@ -663,11 +719,13 @@ mod tests {
                 op: Operation::Tool(Tool::Shrink),
                 preset: Some(Preset::Scale(25)),
                 inputs: vec![png],
+                edits: None,
             },
             Job {
                 op: Operation::Convert(Format::Mkv),
                 preset: Some(Preset::Resolution(Some(480))),
                 inputs: vec![clip],
+                edits: None,
             },
         ]);
         let mut outs: Vec<_> = reports.into_iter().flat_map(|r| r.outputs).collect();
@@ -773,6 +831,7 @@ mod tests {
             op: Operation::Tool(Tool::Bundle),
             preset: transfer.map(Preset::Bundle),
             inputs,
+            edits: None,
         }
     }
 
