@@ -159,8 +159,6 @@ pub fn apply_edits(ops: &[EditOp], input: &Path, output: &Path) -> Result<(), En
 }
 
 /// Pixel size after EXIF orientation, from the header alone.
-// Wired by Task 11 (the editor panel's preview load).
-#[allow(dead_code)]
 pub(crate) fn dimensions(input: &Path) -> Result<(u32, u32), EngineError> {
     let read = |e: &dyn std::fmt::Display| EngineError::Read(format!("{}: {e}", input.display()));
     let reader = ImageReader::open(input)
