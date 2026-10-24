@@ -152,15 +152,16 @@ pub fn drag(
 }
 
 /// The largest rectangle of `ratio` inside `bounds`, centered on `crop`'s
-/// center and shifted to stay inside.
+/// center and shifted to stay inside. Each side is at least its minimum
+/// ([`min_side`]): on narrow bounds the ratio yields.
 pub fn fit_ratio(crop: PixelRect, bounds: (u32, u32), ratio: f64) -> PixelRect {
     let (bw, bh) = (bounds.0 as f64, bounds.1 as f64);
     let w = bw.min(bh * ratio);
     let h = w / ratio;
     let cx = crop.x as f64 + crop.w as f64 / 2.0;
     let cy = crop.y as f64 + crop.h as f64 / 2.0;
-    let w = (w.round() as u32).clamp(1, bounds.0);
-    let h = (h.round() as u32).clamp(1, bounds.1);
+    let w = (w.round() as u32).clamp(min_side(bounds.0), bounds.0);
+    let h = (h.round() as u32).clamp(min_side(bounds.1), bounds.1);
     let x = ((cx - w as f64 / 2.0).round().max(0.0) as u32).min(bounds.0 - w);
     let y = ((cy - h as f64 / 2.0).round().max(0.0) as u32).min(bounds.1 - h);
     PixelRect { x, y, w, h }
@@ -234,6 +235,18 @@ mod tests {
     fn fit_ratio_in_narrow_bounds_stays_inside() {
         let out = fit_ratio(r(0, 0, 100, 20), (100, 20), 9.0 / 16.0);
         assert!(out.x + out.w <= 100 && out.y + out.h <= 20 && out.w >= 1 && out.h >= 1);
+    }
+
+    #[test]
+    fn fit_ratio_keeps_the_minimum_crop() {
+        // 9:16 in 1000×20 would be 11×20: the ratio yields to MIN_CROP.
+        let out = fit_ratio(r(0, 0, 1000, 20), (1000, 20), 9.0 / 16.0);
+        assert!(out.w >= MIN_CROP && out.h >= MIN_CROP, "{out:?}");
+        assert!(out.x + out.w <= 1000 && out.y + out.h <= 20);
+        // Bounds still win over the minimum.
+        let tiny = fit_ratio(r(0, 0, 10, 300), (10, 300), 16.0 / 9.0);
+        assert_eq!(tiny.w, 10);
+        assert!(tiny.h >= MIN_CROP && tiny.y + tiny.h <= 300, "{tiny:?}");
     }
 
     #[test]
