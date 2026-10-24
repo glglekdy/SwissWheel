@@ -163,9 +163,11 @@ pub enum TileDecision {
 
 /// The update tile was pressed. Running conversions come first: the user
 /// has to wait for them either way.
-pub fn on_tile(update_running: bool, active_jobs: usize) -> TileDecision {
+pub fn on_tile(update_running: bool, active_jobs: usize, editor_open: bool) -> TileDecision {
     if active_jobs > 0 {
         TileDecision::Refuse(text::BUSY)
+    } else if editor_open {
+        TileDecision::Refuse(crate::editor::text::CLOSE_FIRST)
     } else if update_running {
         TileDecision::Refuse(text::RUNNING)
     } else {
@@ -369,10 +371,19 @@ mod tests {
 
     #[test]
     fn tile_refuses_while_busy() {
-        assert_eq!(on_tile(false, 1), TileDecision::Refuse(text::BUSY));
-        assert_eq!(on_tile(true, 0), TileDecision::Refuse(text::RUNNING));
-        assert_eq!(on_tile(true, 2), TileDecision::Refuse(text::BUSY));
-        assert_eq!(on_tile(false, 0), TileDecision::Start);
+        assert_eq!(on_tile(false, 1, false), TileDecision::Refuse(text::BUSY));
+        assert_eq!(on_tile(true, 0, false), TileDecision::Refuse(text::RUNNING));
+        assert_eq!(on_tile(true, 2, false), TileDecision::Refuse(text::BUSY));
+        assert_eq!(on_tile(false, 0, false), TileDecision::Start);
+        assert_eq!(
+            on_tile(false, 0, true),
+            TileDecision::Refuse(crate::editor::text::CLOSE_FIRST)
+        );
+        assert_eq!(
+            on_tile(true, 0, true),
+            TileDecision::Refuse(crate::editor::text::CLOSE_FIRST)
+        );
+        assert_eq!(on_tile(false, 1, true), TileDecision::Refuse(text::BUSY));
     }
 
     #[test]

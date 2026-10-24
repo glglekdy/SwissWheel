@@ -1683,7 +1683,7 @@ impl AppState {
 
     fn start_update(&mut self) {
         let background = self.update.is_some() || self.ffmpeg.is_some() || self.removing;
-        match release::on_tile(background, self.active_jobs) {
+        match release::on_tile(background, self.active_jobs, false) {
             TileDecision::Refuse(notice) => {
                 self.notify(info(release::TITLE, notice));
             }
@@ -1909,7 +1909,7 @@ impl AppState {
     /// Starts a fresh copy that waits for this one to exit, then closes
     /// normally (posted, like `apply_swap`).
     fn restart(&mut self) {
-        match restart::on_tile(self.active_jobs, self.background_busy()) {
+        match restart::on_tile(self.active_jobs, self.background_busy(), false) {
             TileDecision::Refuse(notice) => {
                 self.notify(info(restart::TITLE, notice));
             }
