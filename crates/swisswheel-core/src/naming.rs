@@ -1,6 +1,6 @@
 //! Output file names: next to the input, never overwriting anything.
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 
 use crate::catalog::{Operation, Tool};
@@ -49,6 +49,39 @@ pub fn output_path(
         .expect("u32 range exhausted")
 }
 
+/// The folder "폴더로 묶기" makes; numbered like any other result.
+pub const NEW_FOLDER: &str = "새 폴더";
+
+/// `dir` + `name`, or `stem (n).extension` counting `n` up from 1 while the
+/// candidate `exists`. A folder's `name` (`is_file` false) has no extension,
+/// so the number goes at its end: `v1.2 (1)`.
+pub fn free_path(
+    dir: &Path,
+    name: &OsStr,
+    is_file: bool,
+    exists: &dyn Fn(&Path) -> bool,
+) -> PathBuf {
+    let as_path = Path::new(name);
+    let (stem, extension) = match (is_file, as_path.file_stem(), as_path.extension()) {
+        (true, Some(stem), Some(extension)) => (stem, Some(extension)),
+        _ => (name, None),
+    };
+    (0u32..)
+        .map(|n| {
+            let mut candidate = stem.to_owned();
+            if n > 0 {
+                candidate.push(format!(" ({n})"));
+            }
+            if let Some(extension) = extension {
+                candidate.push(".");
+                candidate.push(extension);
+            }
+            dir.join(candidate)
+        })
+        .find(|candidate| !exists(candidate))
+        .expect("u32 range exhausted")
+}
+
 /// Where a job writes before renaming to `final_path` on success.
 pub fn temp_path(final_path: &Path) -> PathBuf {
     let mut name = final_path.as_os_str().to_owned();
@@ -63,6 +96,28 @@ mod tests {
 
     fn none(_: &Path) -> bool {
         false
+    }
+
+    #[test]
+    fn free_paths_count_up() {
+        let taken = |p: &Path| {
+            [
+                r"C:\p\새 폴더",
+                r"C:\p\a.png",
+                r"C:\p\a (1).png",
+                r"C:\p\v1.2",
+            ]
+            .iter()
+            .any(|t| Path::new(t) == p)
+        };
+        let free =
+            |name: &str, is_file| free_path(Path::new(r"C:\p"), OsStr::new(name), is_file, &taken);
+        assert_eq!(free(NEW_FOLDER, false), PathBuf::from(r"C:\p\새 폴더 (1)"));
+        assert_eq!(free("a.png", true), PathBuf::from(r"C:\p\a (2).png"));
+        assert_eq!(free("b.png", true), PathBuf::from(r"C:\p\b.png"));
+        // a folder's name keeps its dot: no extension to put the number before
+        assert_eq!(free("v1.2", false), PathBuf::from(r"C:\p\v1.2 (1)"));
+        assert_eq!(free("README", true), PathBuf::from(r"C:\p\README"));
     }
 
     #[test]
