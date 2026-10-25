@@ -1,4 +1,4 @@
-//! Edit history for the image editor: ops, undo/redo and the original-to-result transform.
+//! Edit history for the editors: ops, undo/redo and the original-to-result transform.
 
 /// A quarter turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -115,41 +115,31 @@ impl Affine {
     }
 }
 
-/// The edits made so far on one image, with undo and redo.
+/// Recorded ops with undo and redo.
 #[derive(Debug, Clone)]
-pub struct EditSession {
-    original: (u32, u32),
-    strip_available: bool,
-    ops: Vec<EditOp>,
-    redo: Vec<EditOp>,
+pub struct History<Op> {
+    ops: Vec<Op>,
+    redo: Vec<Op>,
 }
 
-impl EditSession {
-    /// A session over a `width`×`height` image; `strip_available` says whether info can be stripped.
-    pub fn new(width: u32, height: u32, strip_available: bool) -> Self {
+impl<Op> Default for History<Op> {
+    fn default() -> Self {
         Self {
-            original: (width, height),
-            strip_available,
             ops: Vec::new(),
             redo: Vec::new(),
         }
     }
+}
 
-    /// Records `op`. Returns false (recording nothing) for a no-op: a toggle equal to its
-    /// current value, a strip when unavailable, or a crop of the whole image.
-    pub fn push(&mut self, op: EditOp) -> bool {
-        let ignored = match op {
-            EditOp::Grayscale(on) => on == self.grayscale(),
-            EditOp::StripInfo(on) => !self.strip_available || on == self.strip_info(),
-            EditOp::Crop(r) => r == PixelRect::full(self.size()),
-            EditOp::Rotate(_) | EditOp::Flip(_) => false,
-        };
-        if ignored {
-            return false;
-        }
+impl<Op> History<Op> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records `op` and clears the redo stack.
+    pub fn push(&mut self, op: Op) {
         self.ops.push(op);
         self.redo.clear();
-        true
     }
 
     /// Undoes the last op. Returns false when there is nothing to undo.
@@ -183,8 +173,120 @@ impl EditSession {
     }
 
     /// The recorded ops, oldest first.
-    pub fn ops(&self) -> &[EditOp] {
+    pub fn ops(&self) -> &[Op] {
         &self.ops
+    }
+}
+
+/// Folds the crops, turns and flips in `ops` over an `original`-sized frame: the result size
+/// and the map from original coordinates to result coordinates. Other ops are skipped.
+pub fn frame_geometry<'a>(
+    original: (u32, u32),
+    ops: impl IntoIterator<Item = &'a EditOp>,
+) -> ((u32, u32), Affine) {
+    let mut size = original;
+    let mut total = Affine::IDENTITY;
+    for op in ops {
+        let (w, h) = (f64::from(size.0), f64::from(size.1));
+        let step = match op {
+            EditOp::Rotate(Turn::Cw) => Affine {
+                xx: 0.0,
+                xy: -1.0,
+                yx: 1.0,
+                yy: 0.0,
+                x0: h,
+                y0: 0.0,
+            },
+            EditOp::Rotate(Turn::Ccw) => Affine {
+                xx: 0.0,
+                xy: 1.0,
+                yx: -1.0,
+                yy: 0.0,
+                x0: 0.0,
+                y0: w,
+            },
+            EditOp::Flip(Axis::Horizontal) => Affine {
+                xx: -1.0,
+                x0: w,
+                ..Affine::IDENTITY
+            },
+            EditOp::Flip(Axis::Vertical) => Affine {
+                yy: -1.0,
+                y0: h,
+                ..Affine::IDENTITY
+            },
+            EditOp::Crop(r) => Affine {
+                x0: -f64::from(r.x),
+                y0: -f64::from(r.y),
+                ..Affine::IDENTITY
+            },
+            EditOp::Grayscale(_) | EditOp::StripInfo(_) => continue,
+        };
+        total = total.then(&step);
+        size = match op {
+            EditOp::Crop(r) => (r.w, r.h),
+            EditOp::Rotate(_) => (size.1, size.0),
+            _ => size,
+        };
+    }
+    (size, total)
+}
+
+/// The edits made so far on one image, with undo and redo.
+#[derive(Debug, Clone)]
+pub struct EditSession {
+    original: (u32, u32),
+    strip_available: bool,
+    history: History<EditOp>,
+}
+
+impl EditSession {
+    /// A session over a `width`×`height` image; `strip_available` says whether info can be stripped.
+    pub fn new(width: u32, height: u32, strip_available: bool) -> Self {
+        Self {
+            original: (width, height),
+            strip_available,
+            history: History::new(),
+        }
+    }
+
+    /// Records `op`. Returns false (recording nothing) for a no-op: a toggle equal to its
+    /// current value, a strip when unavailable, or a crop of the whole image.
+    pub fn push(&mut self, op: EditOp) -> bool {
+        let ignored = match op {
+            EditOp::Grayscale(on) => on == self.grayscale(),
+            EditOp::StripInfo(on) => !self.strip_available || on == self.strip_info(),
+            EditOp::Crop(r) => r == PixelRect::full(self.size()),
+            EditOp::Rotate(_) | EditOp::Flip(_) => false,
+        };
+        if ignored {
+            return false;
+        }
+        self.history.push(op);
+        true
+    }
+
+    /// Undoes the last op. Returns false when there is nothing to undo.
+    pub fn undo(&mut self) -> bool {
+        self.history.undo()
+    }
+
+    /// Redoes the last undone op. Returns false when there is nothing to redo.
+    pub fn redo(&mut self) -> bool {
+        self.history.redo()
+    }
+
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    /// The recorded ops, oldest first.
+    pub fn ops(&self) -> &[EditOp] {
+        self.history.ops()
     }
 
     /// The size of the image before any edit.
@@ -194,11 +296,7 @@ impl EditSession {
 
     /// The size of the result after all recorded ops.
     pub fn size(&self) -> (u32, u32) {
-        self.ops.iter().fold(self.original, |(w, h), op| match op {
-            EditOp::Crop(r) => (r.w, r.h),
-            EditOp::Rotate(_) => (h, w),
-            _ => (w, h),
-        })
+        frame_geometry(self.original, self.ops()).0
     }
 
     /// Whether the result is grayscale.
@@ -225,7 +323,7 @@ impl EditSession {
     pub fn has_pixel_edits(&self) -> bool {
         self.grayscale()
             || self
-                .ops
+                .ops()
                 .iter()
                 .any(|op| matches!(op, EditOp::Crop(_) | EditOp::Rotate(_) | EditOp::Flip(_)))
     }
@@ -244,63 +342,18 @@ impl EditSession {
     /// The ops and kind to save, or `None` when there is nothing to save.
     pub fn plan(&self) -> Option<EditPlan> {
         self.save_kind().map(|kind| EditPlan {
-            ops: self.ops.clone(),
+            ops: self.ops().to_vec(),
             kind,
         })
     }
 
     /// The map from original image coordinates to result coordinates.
     pub fn to_result(&self) -> Affine {
-        let mut size = self.original;
-        let mut total = Affine::IDENTITY;
-        for op in &self.ops {
-            let (w, h) = (f64::from(size.0), f64::from(size.1));
-            let step = match op {
-                EditOp::Rotate(Turn::Cw) => Affine {
-                    xx: 0.0,
-                    xy: -1.0,
-                    yx: 1.0,
-                    yy: 0.0,
-                    x0: h,
-                    y0: 0.0,
-                },
-                EditOp::Rotate(Turn::Ccw) => Affine {
-                    xx: 0.0,
-                    xy: 1.0,
-                    yx: -1.0,
-                    yy: 0.0,
-                    x0: 0.0,
-                    y0: w,
-                },
-                EditOp::Flip(Axis::Horizontal) => Affine {
-                    xx: -1.0,
-                    x0: w,
-                    ..Affine::IDENTITY
-                },
-                EditOp::Flip(Axis::Vertical) => Affine {
-                    yy: -1.0,
-                    y0: h,
-                    ..Affine::IDENTITY
-                },
-                EditOp::Crop(r) => Affine {
-                    x0: -f64::from(r.x),
-                    y0: -f64::from(r.y),
-                    ..Affine::IDENTITY
-                },
-                EditOp::Grayscale(_) | EditOp::StripInfo(_) => continue,
-            };
-            total = total.then(&step);
-            size = match op {
-                EditOp::Crop(r) => (r.w, r.h),
-                EditOp::Rotate(_) => (size.1, size.0),
-                _ => size,
-            };
-        }
-        total
+        frame_geometry(self.original, self.ops()).1
     }
 
     fn last_toggle(&self, pick: impl Fn(&EditOp) -> Option<bool>) -> bool {
-        self.ops.iter().rev().find_map(pick).unwrap_or(false)
+        self.ops().iter().rev().find_map(pick).unwrap_or(false)
     }
 }
 
@@ -365,5 +418,37 @@ mod tests {
         s.push(EditOp::Flip(Axis::Vertical));
         assert_eq!(s.plan().unwrap().kind, SaveKind::Edited);
         assert_eq!(SaveKind::StripOnly.suffix(), "no info");
+    }
+
+    #[test]
+    fn history_undo_redo_and_new_push_clears_redo() {
+        let mut h = History::new();
+        h.push(1);
+        h.push(2);
+        assert!(h.undo());
+        assert_eq!(h.ops(), &[1]);
+        assert!(h.can_redo());
+        h.push(3);
+        assert!(!h.can_redo());
+        assert_eq!(h.ops(), &[1, 3]);
+        assert!(h.undo() && h.undo() && !h.undo());
+    }
+
+    #[test]
+    fn frame_geometry_skips_non_frame_ops() {
+        let ops = [
+            EditOp::Rotate(Turn::Cw),
+            EditOp::Grayscale(true),
+            EditOp::Crop(PixelRect {
+                x: 10,
+                y: 20,
+                w: 30,
+                h: 40,
+            }),
+        ];
+        let (size, a) = frame_geometry((200, 100), &ops);
+        assert_eq!(size, (30, 40));
+        // original (0, 0) → rotated (100, 0) → cropped (90, -20)
+        assert_eq!(a.apply(0.0, 0.0), (90.0, -20.0));
     }
 }

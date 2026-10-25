@@ -8,8 +8,36 @@ use crate::crop::{CHIPS, CropHandle, drag, fit_ratio};
 use crate::editor::{Axis, EditOp, EditPlan, EditSession, PixelRect, Turn, text};
 use crate::editor_geometry::{EditorHit, EditorTool};
 
-/// How long the discard prompt stays armed.
-const DISCARD_WINDOW: Duration = Duration::from_secs(3);
+/// How long the discard prompt and other footer notices stay up.
+pub const NOTICE_WINDOW: Duration = Duration::from_secs(3);
+
+/// The "discard edits?" prompt armed by a first Escape.
+#[derive(Debug, Clone, Default)]
+pub struct DiscardPrompt {
+    until: Option<Instant>,
+}
+
+impl DiscardPrompt {
+    /// Arms the prompt for [`NOTICE_WINDOW`] from `now`.
+    pub fn arm(&mut self, now: Instant) {
+        self.until = Some(now + NOTICE_WINDOW);
+    }
+
+    /// Whether the prompt is armed and not yet expired.
+    pub fn is_up(&self, now: Instant) -> bool {
+        self.until.is_some_and(|deadline| now < deadline)
+    }
+
+    /// Disarms the prompt. True if it was set, expired or not.
+    pub fn clear(&mut self) -> bool {
+        self.until.take().is_some()
+    }
+
+    /// When the armed prompt expires.
+    pub fn deadline(&self) -> Option<Instant> {
+        self.until
+    }
+}
 
 /// Something the user asked the editor to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,7 +111,7 @@ pub enum Outcome {
 pub struct EditorState {
     session: Option<EditSession>,
     crop: Option<CropMode>,
-    discard_until: Option<Instant>,
+    discard: DiscardPrompt,
 }
 
 impl EditorState {
@@ -92,7 +120,7 @@ impl EditorState {
         Self {
             session: None,
             crop: None,
-            discard_until: None,
+            discard: DiscardPrompt::default(),
         }
     }
 
@@ -111,7 +139,7 @@ impl EditorState {
 
     /// When the armed discard prompt expires.
     pub fn discard_deadline(&self) -> Option<Instant> {
-        self.discard_until
+        self.discard.deadline()
     }
 
     /// Applies `cmd`.
@@ -128,17 +156,15 @@ impl EditorState {
             if session.save_kind().is_none() {
                 return Outcome::Close;
             }
-            return match self.discard_until {
-                Some(deadline) if now < deadline => Outcome::Close,
-                _ => {
-                    self.discard_until = Some(now + DISCARD_WINDOW);
-                    Outcome::Redraw
-                }
-            };
+            if self.discard.is_up(now) {
+                return Outcome::Close;
+            }
+            self.discard.arm(now);
+            return Outcome::Redraw;
         }
 
         // Anything else disarms the prompt; that alone is worth a redraw.
-        let prompt_cleared = self.discard_until.take().is_some();
+        let prompt_cleared = self.discard.clear();
         let outcome = match self.crop.take() {
             Some(crop) => self.crop_command(crop, cmd),
             None => self.normal_command(cmd),
@@ -208,8 +234,8 @@ impl EditorState {
     /// Called by the panel for a key press that [`key_command`] does not map; it disarms the
     /// discard prompt like any other key.
     pub fn key_other(&mut self, now: Instant) -> Outcome {
-        let was_up = self.discard_until.is_some_and(|deadline| now < deadline);
-        self.discard_until = None;
+        let was_up = self.discard.is_up(now);
+        self.discard.clear();
         if was_up {
             Outcome::Redraw
         } else {
@@ -238,7 +264,7 @@ impl EditorState {
 
     /// Clears the discard prompt; a redraw is due only if it was up.
     fn disarm(&mut self) -> Outcome {
-        if self.discard_until.take().is_some() {
+        if self.discard.clear() {
             Outcome::Redraw
         } else {
             Outcome::Nothing
@@ -298,7 +324,7 @@ impl EditorState {
 
     /// The footer message to show instead of the image size, if any.
     pub fn footer_text(&self, hover: EditorHit, now: Instant) -> Option<&'static str> {
-        if self.discard_until.is_some_and(|deadline| now < deadline) {
+        if self.discard.is_up(now) {
             return Some(text::DISCARD);
         }
         let locked = self.session.as_ref().is_some_and(|s| s.has_pixel_edits());
