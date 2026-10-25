@@ -28,7 +28,7 @@
 
 ### 2.1 여는 방법
 - 영상 **한 개**(MP4·MKV·WebM·MOV·AVI·WMV)를 드래그해 Space → 도구 휠 맨 끝에 **✎편집** 타일. 여러 개·폴더·움직이는 GIF·오디오면 없다.
-- FFmpeg가 필요하다. 다른 영상 도구 타일과 같은 확인 경로(없으면 기존 설치 안내, 설치 중이면 기존 거절 문구)를 탄다.
+- FFmpeg가 필요하다. 열 때 찾지 못하면 패널을 열지 않고 다른 영상 작업이 FFmpeg 없이 실패할 때와 같은 카드("`이름`: FFmpeg를 찾을 수 없습니다")를 띄운다.
 - 놓으면 패널이 열린다(사진 편집기 2.1·2.2와 같은 창, 같은 열기 흐름). 영상 정보를 읽고 재생 엔진을 여는 동안 미리보기 자리에 "불러오는 중", 도구는 눌리지 않는다.
 
 ### 2.2 패널
@@ -120,7 +120,7 @@
 - **`editor.rs` 정리** (사진 동작은 바꾸지 않는다, 기존 테스트로 지킨다):
   - 되돌리기 기록을 `History<Op>`(`push`, `undo`, `redo`, `can_undo`, `can_redo`, `ops`)로 떼어 `EditSession`이 쓴다.
   - 자르기·회전·반전을 접어 결과 크기와 `Affine`을 구하는 계산을 `frame_geometry(original, ops) -> (size, Affine)`(`EditOp::Crop/Rotate/Flip`만 보고 나머지는 건너뜀)로 뗀다. `EditSession::size()`·`to_result()`가 이를 부른다.
-- **`catalog.rs`:** `items_for`가 입력이 정확히 하나이고 영상(`MediaKind::Video`)일 때도 끝에 `Edit`. FFmpeg 필요 여부는 다른 영상 도구와 같은 판정(`essentials`의 타일 결정)이 `Tool::Edit` + 영상 입력을 FFmpeg 작업으로 본다.
+- **`catalog.rs`:** `items_for`가 입력이 정확히 하나이고 영상(`MediaKind::Video`)일 때도 끝에 `Edit`. FFmpeg 확인은 패널을 열 때 한다(2.1).
 - **새 `video_edit.rs`:**
   - `Speed { Half, Normal, OneHalf, Double }` (`factor()`), `AudioMode { Keep, Mute, Normalize }`.
   - `VideoOp { Frame(EditOp), Split(f64), Toggle(f64), Speed(Speed), Audio(AudioMode), Reverse(bool) }`. `Frame`은 `Crop`·`Rotate`·`Flip`만. `Toggle(t)`는 시각 `t`가 든 조각의 남김/뺌을 뒤집는다(조각 번호는 나누기로 바뀌므로 시각으로 가리킨다).
@@ -149,7 +149,7 @@
     - 출력 형식: 입력과 같은 컨테이너, WMV는 MP4.
     - 구간: 남은 조각이 하나면 입력 앞 `-ss a -to b`(다시 인코딩이므로 정확), 여럿이면 `filter_complex`에서 `split`/`asplit` 후 조각마다 `trim=start:end,setpts=PTS-STARTPTS` / `atrim=…,asetpts=PTS-STARTPTS`, `concat=n=N:v=1:a=1`(소리 끄기·소리 없음이면 `a=0`).
     - 영상 사슬(위 다음): `frame` 순서대로 `crop=w:h:x:y`, `transpose=1`(시계)/`transpose=2`(반시계), `hflip`, `vflip` → 역재생이면 `reverse` → 배속이 1×가 아니면 `setpts=PTS/f` → 마지막에 짝수 크기 보정(`scale=trunc(iw/2)*2:trunc(ih/2)*2`).
-    - 소리 사슬: 역재생이면 `areverse` → 배속이면 `atempo=f` → 크기 맞추기면 `loudnorm=I=-16:TP=-1.5:LRA=11` + 출력 `-ar 원본 샘플레이트`(모르면 48000). WebM은 기존 `OPUS_LAYOUTS` 변환을 이 사슬 끝에 붙인다(별도 `-af`를 쓰지 않는다). 소리 끄기면 `-an`.
+    - 소리 사슬: 역재생이면 `areverse` → 배속이면 `atempo=f` → 크기 맞추기면 `loudnorm=I=-16:TP=-1.5:LRA=11` + 출력 `-ar 원본 샘플레이트`(모르면 48000, WebM은 Opus가 48 kHz만 받으므로 항상 48000). WebM은 기존 `OPUS_LAYOUTS` 변환을 이 사슬 끝에 붙인다(별도 `-af`를 쓰지 않는다). 소리 끄기면 `-an`.
     - 코덱 인자는 기존 `Video` 설정을 쓰되, `-vf`/`-af` 대신 이 그래프의 출력 라벨을 `-map`한다(기존 `Video::args`를 그래프 입력을 받도록 나눈다, 기존 변환 인자는 바뀌지 않음을 테스트로 지킨다).
     - `duration_secs`: 남은 길이 ÷ 배속. 시도는 하나.
   - `video_frame_plan(info, t, frame: &[EditOp]) -> MediaPlan`: `-ss t` 입력 앞, `-frames:v 1`, 영상 사슬(자르기·회전·반전만), PNG 출력.
@@ -157,8 +157,8 @@
 - **`naming.rs`:** 장면 저장 suffix `frame 0m12.40s`(`frame_suffix(t)`), 편집은 기존 `edited`.
 
 ### 3.2 앱 (`swisswheel`)
-- **`editor/mod.rs`:** 패널 하나의 수명 틀은 그대로 두고 내용을 `enum Content { Image(..), Video(..) }`로 나눈다. `open(path, owner, notify, accent)`이 형식으로 고른다. 앱으로 보내는 신호에 `SavedVideo(path, VideoPlan, Format)`, `SaveFrame(path, t, Vec<EditOp>)`를 더한다. `window.rs`(어둡게 하는 창·패널·IME 끄기·포커스)는 함께 쓴다.
-- **새 `editor/video.rs`:** 영상 패널의 상태(`VideoState`), 메시지 처리(키·마우스·타이머·플레이어 알림), 플레이어/대체 모드 전환. 열기: 백그라운드에서 `ffmpeg::probe`(실패면 닫고 실패 카드) → 패널 크기 → 창 → 플레이어 열기.
+- **`editor/mod.rs`:** 사진 패널 코드는 그대로 두고, 영상 패널은 `editor/video.rs`의 별도 슬롯(자기 창 프로시저)으로 둔다. 공개 함수(`open`, `is_open`, `focus`, `close`, `take_events`)는 두 슬롯을 함께 보며 한 번에 하나만 열린다. `open(path, owner, notify, accent)`이 형식으로 고른다. 앱으로 보내는 신호에 `SavedVideo(path, VideoPlan, Format)`, `SaveFrame(path, t, Vec<EditOp>)`를 더한다. `window.rs`(어둡게 하는 창·패널·IME 끄기·포커스)는 함께 쓴다.
+- **새 `editor/video.rs`:** 영상 패널의 상태(`VideoState`), 메시지 처리(키·마우스·타이머·플레이어 알림), 플레이어/대체 모드 전환. 열기: `ffmpeg::probe`를 바로 부른다(사진 쪽 헤더 읽기처럼, 패널을 만들기 전; 실패면 열지 않고 실패 카드) → 패널 크기 → 창("불러오는 중") → 플레이어 열기(비동기, 준비되면 첫 장면).
 - **새 `editor/player.rs`** — Media Foundation:
   - 처음 쓸 때 `MFStartup` 한 번(앱 종료까지 유지).
   - 패널 전용 D3D11 장치(`BGRA_SUPPORT | VIDEO_SUPPORT`, `ID3D10Multithread::SetMultithreadProtected`)와 `MFCreateDXGIDeviceManager`. 패널의 D2D 장치 컨텍스트도 이 장치 위에 만든다.
