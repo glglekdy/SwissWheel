@@ -25,4 +25,5 @@ pub mod settings;
 pub mod summary;
 pub mod update;
 pub mod update_notice;
+pub mod video_control;
 pub mod video_edit;

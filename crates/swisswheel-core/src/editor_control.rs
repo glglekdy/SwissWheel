@@ -87,7 +87,7 @@ pub struct CropMode {
     /// Index into [`CHIPS`].
     pub chip: usize,
     /// The grabbed handle, the rectangle at the press and the press point.
-    drag: Option<(CropHandle, PixelRect, (f64, f64))>,
+    pub(crate) drag: Option<(CropHandle, PixelRect, (f64, f64))>,
 }
 
 impl CropMode {
