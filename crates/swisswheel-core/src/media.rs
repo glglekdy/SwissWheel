@@ -3,8 +3,10 @@
 
 use crate::catalog::{ANIMATED_GIF_TARGETS, AUDIO_TARGETS, Operation, Tool, VIDEO_TARGETS};
 use crate::config::Quality;
+use crate::editor::{Axis, EditOp, Turn};
 use crate::format::{Format, MediaKind};
 use crate::options::{Preset, Strength};
+use crate::video_edit::{AudioMode, Speed, VideoPlan};
 
 /// What to run for one file. `input_args` go before `-i <input>`; each attempt goes
 /// between `-i <input>` and the output path, and a later attempt runs only if the one
@@ -189,73 +191,274 @@ impl Video {
         if self.audio {
             a.extend(strings(&["-map", "0:a?"]));
         }
+        a.extend(video_codec(target, self.crf));
         let scale = self.max_short_side.map(max_short_side_filter);
-        match target {
-            Format::Webm => {
-                a.extend(strings(&[
-                    "-c:v",
-                    "libvpx-vp9",
-                    "-crf",
-                    "32",
-                    "-b:v",
-                    "0",
-                    "-deadline",
-                    "good",
-                    "-cpu-used",
-                    "4",
-                    "-row-mt",
-                    "1",
-                    // GIFs decode to RGB with alpha, which libvpx-vp9 refuses;
-                    // yuv420p is also what every player handles.
-                    "-pix_fmt",
-                    "yuv420p",
-                ]));
-                if let Some(vf) = scale {
-                    a.extend(["-vf".to_string(), vf]);
-                }
-                if self.audio {
-                    a.extend(strings(&[
-                        "-c:a",
-                        "libopus",
-                        "-b:a",
-                        "128k",
-                        "-af",
-                        OPUS_LAYOUTS,
-                    ]));
-                }
-            }
-            Format::Avi => {
-                a.extend(strings(&["-c:v", "mpeg4", "-q:v", "4"]));
-                if let Some(vf) = scale {
-                    a.extend(["-vf".to_string(), vf]);
-                }
-                if self.audio {
-                    a.extend(strings(&["-c:a", "libmp3lame", "-b:a"]));
-                    a.push(format!("{}k", quality.mp3_kbps));
-                }
-            }
-            // MP4, MOV, MKV
-            _ => {
-                a.extend(strings(&["-c:v", "libx264", "-preset", "medium", "-crf"]));
-                a.push(self.crf.to_string());
-                a.extend(strings(&["-pix_fmt", "yuv420p", "-vf"]));
-                a.push(scale.unwrap_or_else(|| EVEN_SIZE.to_string()));
-                if self.audio {
-                    a.extend(strings(&["-c:a", "aac", "-b:a"]));
-                    a.push(format!("{}k", self.aac_kbps));
-                } else {
-                    a.push("-an".to_string());
-                }
-                if matches!(target, Format::Mp4 | Format::Mov) {
-                    a.extend(strings(&["-movflags", "+faststart"]));
-                }
-            }
+        let vf = match target {
+            Format::Webm | Format::Avi => scale,
+            // MP4, MOV, MKV: libx264 needs even sizes even without scaling.
+            _ => Some(scale.unwrap_or_else(|| EVEN_SIZE.to_string())),
+        };
+        if let Some(vf) = vf {
+            a.extend(["-vf".to_string(), vf]);
         }
-        if !self.audio && matches!(target, Format::Webm | Format::Avi) {
+        if self.audio {
+            a.extend(audio_codec(target, self.aac_kbps, quality));
+            if target == Format::Webm {
+                a.extend(strings(&["-af", OPUS_LAYOUTS]));
+            }
+        } else {
             a.push("-an".to_string());
         }
+        a.extend(faststart(target));
         finish(a, target)
     }
+}
+
+/// The video encoder for `target` (`crf` is H.264's; VP9 and MPEG-4 use their own).
+fn video_codec(target: Format, crf: u8) -> Vec<String> {
+    match target {
+        Format::Webm => strings(&[
+            "-c:v",
+            "libvpx-vp9",
+            "-crf",
+            "32",
+            "-b:v",
+            "0",
+            "-deadline",
+            "good",
+            "-cpu-used",
+            "4",
+            "-row-mt",
+            "1",
+            // GIFs decode to RGB with alpha, which libvpx-vp9 refuses;
+            // yuv420p is also what every player handles.
+            "-pix_fmt",
+            "yuv420p",
+        ]),
+        Format::Avi => strings(&["-c:v", "mpeg4", "-q:v", "4"]),
+        // MP4, MOV, MKV
+        _ => {
+            let mut a = strings(&["-c:v", "libx264", "-preset", "medium", "-crf"]);
+            a.push(crf.to_string());
+            a.extend(strings(&["-pix_fmt", "yuv420p"]));
+            a
+        }
+    }
+}
+
+/// The audio encoder for `target`; WebM's Opus also needs [`OPUS_LAYOUTS`] in the filters.
+fn audio_codec(target: Format, aac_kbps: u32, quality: &Quality) -> Vec<String> {
+    match target {
+        Format::Webm => strings(&["-c:a", "libopus", "-b:a", "128k"]),
+        Format::Avi => {
+            let mut a = strings(&["-c:a", "libmp3lame", "-b:a"]);
+            a.push(format!("{}k", quality.mp3_kbps));
+            a
+        }
+        _ => {
+            let mut a = strings(&["-c:a", "aac", "-b:a"]);
+            a.push(format!("{aac_kbps}k"));
+            a
+        }
+    }
+}
+
+fn faststart(target: Format) -> Vec<String> {
+    if matches!(target, Format::Mp4 | Format::Mov) {
+        strings(&["-movflags", "+faststart"])
+    } else {
+        Vec::new()
+    }
+}
+
+/// The container a video edit saves to: the input's, except WMV (no encoder settings),
+/// which saves as MP4.
+pub fn video_edit_output(input: Format) -> Format {
+    match input {
+        Format::Wmv => Format::Mp4,
+        other => other,
+    }
+}
+
+/// The loudness target for "크기 맞춤".
+const LOUDNORM: &str = "loudnorm=I=-16:TP=-1.5:LRA=11";
+
+/// The FFmpeg arguments that save `plan` on an `input` video: one exact re-encode through
+/// a filter graph that keeps `plan.kept`, then applies the frame ops, reverse and speed to
+/// the picture and reverse, speed and loudness to the sound.
+pub fn video_edit_plan(
+    input: Format,
+    info: &MediaInfo,
+    plan: &VideoPlan,
+    quality: &Quality,
+) -> Result<MediaPlan, PlanError> {
+    if info.video.is_none() {
+        return Err(PlanError::NoVideo);
+    }
+    if plan.kept.is_empty() {
+        return Err(PlanError::Unsupported);
+    }
+    let output = video_edit_output(input);
+    let audio = info.audio.is_some() && plan.audio != AudioMode::Mute;
+    let factor = plan.speed.factor();
+
+    let mut input_args = Vec::new();
+    let mut graph = Vec::new();
+    let (v_in, a_in) = if let [(a, b)] = plan.kept[..] {
+        let whole = a <= 0.0 && info.duration_secs.is_none_or(|d| b >= d);
+        if !whole {
+            input_args = vec!["-ss".into(), secs(a), "-t".into(), secs(b - a)];
+        }
+        ("[0:v:0]".to_string(), "[0:a:0]".to_string())
+    } else {
+        let n = plan.kept.len();
+        let labels = |prefix: &str| (0..n).map(|i| format!("[{prefix}{i}]")).collect::<String>();
+        graph.push(format!("[0:v:0]split={n}{}", labels("v")));
+        for (i, (a, b)) in plan.kept.iter().enumerate() {
+            graph.push(format!(
+                "[v{i}]trim=start={}:end={},setpts=PTS-STARTPTS[pv{i}]",
+                secs(*a),
+                secs(*b)
+            ));
+        }
+        if audio {
+            graph.push(format!("[0:a:0]asplit={n}{}", labels("a")));
+            for (i, (a, b)) in plan.kept.iter().enumerate() {
+                graph.push(format!(
+                    "[a{i}]atrim=start={}:end={},asetpts=PTS-STARTPTS[pa{i}]",
+                    secs(*a),
+                    secs(*b)
+                ));
+            }
+        }
+        let pieces: String = (0..n)
+            .map(|i| {
+                if audio {
+                    format!("[pv{i}][pa{i}]")
+                } else {
+                    format!("[pv{i}]")
+                }
+            })
+            .collect();
+        let (a_flag, outs) = if audio { (1, "[cv][ca]") } else { (0, "[cv]") };
+        graph.push(format!("{pieces}concat=n={n}:v=1:a={a_flag}{outs}"));
+        ("[cv]".to_string(), "[ca]".to_string())
+    };
+
+    let mut video = frame_filters(&plan.frame);
+    if plan.reverse {
+        video.push("reverse".into());
+    }
+    if plan.speed != Speed::Normal {
+        video.push(format!("setpts=PTS/{factor}"));
+    }
+    video.push(EVEN_SIZE.into());
+    graph.push(format!("{v_in}{}[vout]", video.join(",")));
+
+    if audio {
+        let mut sound = Vec::new();
+        if plan.reverse {
+            sound.push("areverse".to_string());
+        }
+        if plan.speed != Speed::Normal {
+            sound.push(format!("atempo={factor}"));
+        }
+        if plan.audio == AudioMode::Normalize {
+            sound.push(LOUDNORM.into());
+        }
+        if output == Format::Webm {
+            sound.push(OPUS_LAYOUTS.into());
+        }
+        if sound.is_empty() {
+            sound.push("anull".into());
+        }
+        graph.push(format!("{a_in}{}[aout]", sound.join(",")));
+    }
+
+    let mut a = strings(&["-filter_complex"]);
+    a.push(graph.join(";"));
+    a.extend(strings(&["-map", "[vout]"]));
+    if audio {
+        a.extend(strings(&["-map", "[aout]"]));
+    } else {
+        a.push("-an".into());
+    }
+    a.extend(video_codec(output, 23));
+    if audio {
+        a.extend(audio_codec(output, 192, quality));
+        if plan.audio == AudioMode::Normalize {
+            // loudnorm resamples to 192 kHz; Opus only takes 48 kHz.
+            let rate = match output {
+                Format::Webm => 48_000,
+                _ => info.sample_rate.unwrap_or(48_000),
+            };
+            a.extend(["-ar".to_string(), rate.to_string()]);
+        }
+    }
+    a.extend(faststart(output));
+
+    let kept: f64 = plan.kept.iter().map(|(a, b)| b - a).sum();
+    Ok(MediaPlan {
+        output,
+        input_args,
+        attempts: vec![finish(a, output)],
+        duration_secs: Some(kept / factor),
+    })
+}
+
+/// The arguments that save the picture at `t` seconds, with the frame ops applied, as PNG.
+pub fn video_frame_plan(t: f64, frame: &[EditOp]) -> MediaPlan {
+    let mut a = strings(&["-map", "0:v:0", "-frames:v", "1"]);
+    let filters = frame_filters(frame);
+    if !filters.is_empty() {
+        a.extend(["-vf".to_string(), filters.join(",")]);
+    }
+    a.extend(strings(&["-c:v", "png", "-f", "image2", "-update", "1"]));
+    MediaPlan {
+        output: Format::Png,
+        input_args: vec!["-ss".into(), secs(t)],
+        attempts: vec![a],
+        duration_secs: None,
+    }
+}
+
+/// The size a scrub frame is decoded at: `display` fitted inside `longest` pixels, never
+/// scaled up, both sides even and at least 2.
+pub fn scrub_size(display: (u32, u32), longest: u32) -> (u32, u32) {
+    let (w, h) = display;
+    let scale = (f64::from(longest) / f64::from(w.max(h).max(1))).min(1.0);
+    let side = |v: u32| (((f64::from(v) * scale) as u32) & !1).max(2);
+    (side(w), side(h))
+}
+
+/// The arguments that decode one BGRA frame of `size` at `t` seconds to stdout: the part
+/// before `-i` and the part after the input path.
+pub fn scrub_args(t: f64, size: (u32, u32)) -> (Vec<String>, Vec<String>) {
+    let mut after = strings(&["-frames:v", "1", "-vf"]);
+    after.push(format!("scale={}:{}", size.0, size.1));
+    after.extend(strings(&["-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"]));
+    (vec!["-ss".into(), secs(t)], after)
+}
+
+/// FFmpeg filters for crops, turns and flips, in order. Crop sizes are floored to even
+/// (H.264 and VP9 need even sizes).
+fn frame_filters(frame: &[EditOp]) -> Vec<String> {
+    frame
+        .iter()
+        .filter_map(|op| match op {
+            EditOp::Crop(r) => Some(format!("crop={}:{}:{}:{}", r.w & !1, r.h & !1, r.x, r.y)),
+            EditOp::Rotate(Turn::Cw) => Some("transpose=1".into()),
+            EditOp::Rotate(Turn::Ccw) => Some("transpose=2".into()),
+            EditOp::Flip(Axis::Horizontal) => Some("hflip".into()),
+            EditOp::Flip(Axis::Vertical) => Some("vflip".into()),
+            EditOp::Grayscale(_) | EditOp::StripInfo(_) => None,
+        })
+        .collect()
+}
+
+/// Seconds as FFmpeg reads them, to the millisecond.
+fn secs(t: f64) -> String {
+    format!("{t:.3}")
 }
 
 /// Stream copy into `target`, when its streams can go there as they are.
@@ -465,6 +668,8 @@ pub fn muxer(format: Format) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::editor::{Axis, EditOp, PixelRect, Turn};
+    use crate::video_edit::{AudioMode, Speed, VideoPlan};
 
     #[test]
     fn parses_probe_output() {
@@ -573,6 +778,296 @@ mod tests {
     fn has(args: &[String], seq: &[&str]) -> bool {
         args.windows(seq.len())
             .any(|w| w.iter().zip(seq).all(|(a, b)| a == b))
+    }
+
+    fn sv(parts: &[&str]) -> Vec<String> {
+        strings(parts)
+    }
+
+    fn vinfo(audio: bool) -> MediaInfo {
+        MediaInfo {
+            video: Some("h264".into()),
+            audio: audio.then(|| "aac".into()),
+            width: Some(1920),
+            height: Some(1080),
+            fps: Some(30.0),
+            sample_rate: audio.then_some(44100),
+            duration_secs: Some(10.0),
+            ..Default::default()
+        }
+    }
+
+    fn vplan(kept: Vec<(f64, f64)>) -> VideoPlan {
+        VideoPlan {
+            kept,
+            frame: vec![],
+            speed: Speed::Normal,
+            audio: AudioMode::Keep,
+            reverse: false,
+        }
+    }
+
+    fn graph(p: &MediaPlan) -> String {
+        let a = &p.attempts[0];
+        a[a.iter().position(|s| s == "-filter_complex").unwrap() + 1].clone()
+    }
+
+    #[test]
+    fn conversion_args_unchanged() {
+        // Recorded from the code before `Video::args` was split for video edits.
+        let input = MediaInfo {
+            video: Some("h264".into()),
+            audio: Some("aac".into()),
+            duration_secs: Some(2.0),
+            ..Default::default()
+        };
+        let attempts = |t| {
+            convert(t, None, Format::Mkv, &input, &Quality::default())
+                .unwrap()
+                .attempts
+        };
+        assert_eq!(
+            attempts(Format::Mp4),
+            vec![
+                sv(&[
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a?",
+                    "-c",
+                    "copy",
+                    "-movflags",
+                    "+faststart",
+                    "-f",
+                    "mp4"
+                ]),
+                sv(&[
+                    "-map",
+                    "0:v:0",
+                    "-map",
+                    "0:a?",
+                    "-c:v",
+                    "libx264",
+                    "-preset",
+                    "medium",
+                    "-crf",
+                    "23",
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-vf",
+                    "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "192k",
+                    "-movflags",
+                    "+faststart",
+                    "-f",
+                    "mp4"
+                ]),
+            ]
+        );
+        assert_eq!(
+            attempts(Format::Webm),
+            vec![sv(&[
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "libvpx-vp9",
+                "-crf",
+                "32",
+                "-b:v",
+                "0",
+                "-deadline",
+                "good",
+                "-cpu-used",
+                "4",
+                "-row-mt",
+                "1",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "libopus",
+                "-b:a",
+                "128k",
+                "-af",
+                "aformat=channel_layouts=7.1|5.1|stereo|mono",
+                "-f",
+                "webm"
+            ])]
+        );
+        assert_eq!(
+            attempts(Format::Avi),
+            vec![sv(&[
+                "-map",
+                "0:v:0",
+                "-map",
+                "0:a?",
+                "-c:v",
+                "mpeg4",
+                "-q:v",
+                "4",
+                "-c:a",
+                "libmp3lame",
+                "-b:a",
+                "192k",
+                "-f",
+                "avi"
+            ])]
+        );
+    }
+
+    #[test]
+    fn one_range_seeks_on_the_input() {
+        let p = video_edit_plan(
+            Format::Mp4,
+            &vinfo(true),
+            &vplan(vec![(2.0, 5.5)]),
+            &Quality::default(),
+        )
+        .unwrap();
+        assert_eq!(p.input_args, ["-ss", "2.000", "-t", "3.500"]);
+        assert!(!graph(&p).contains("trim"));
+        assert_eq!(p.duration_secs, Some(3.5));
+        assert_eq!(p.output, Format::Mp4);
+    }
+
+    #[test]
+    fn several_ranges_trim_and_concat() {
+        let p = video_edit_plan(
+            Format::Mkv,
+            &vinfo(true),
+            &vplan(vec![(0.0, 3.0), (6.0, 10.0)]),
+            &Quality::default(),
+        )
+        .unwrap();
+        let g = graph(&p);
+        assert!(g.contains("split=2") && g.contains("asplit=2"));
+        assert!(g.contains("trim=start=6.000:end=10.000,setpts=PTS-STARTPTS"));
+        assert!(g.contains("concat=n=2:v=1:a=1"));
+        assert!(p.input_args.is_empty());
+        assert_eq!(p.duration_secs, Some(7.0));
+    }
+
+    #[test]
+    fn filters_follow_the_edit_order() {
+        let mut plan = vplan(vec![(0.0, 10.0)]);
+        plan.frame = vec![
+            EditOp::Rotate(Turn::Cw),
+            EditOp::Crop(PixelRect {
+                x: 1,
+                y: 2,
+                w: 100,
+                h: 50,
+            }),
+            EditOp::Flip(Axis::Horizontal),
+        ];
+        plan.reverse = true;
+        plan.speed = Speed::Double;
+        let g =
+            graph(&video_edit_plan(Format::Mp4, &vinfo(true), &plan, &Quality::default()).unwrap());
+        let at = |s: &str| g.find(s).unwrap_or_else(|| panic!("{s} missing in {g}"));
+        assert!(at("transpose=1") < at("crop=100:50:1:2"));
+        assert!(at("crop=100:50:1:2") < at("hflip"));
+        assert!(at("hflip") < at("reverse"));
+        assert!(at("reverse") < at("setpts=PTS/2"));
+        assert!(at("areverse") < at("atempo=2"));
+    }
+
+    #[test]
+    fn odd_crop_is_floored_to_even() {
+        let mut plan = vplan(vec![(0.0, 10.0)]);
+        plan.frame = vec![EditOp::Crop(PixelRect {
+            x: 3,
+            y: 3,
+            w: 101,
+            h: 57,
+        })];
+        let g =
+            graph(&video_edit_plan(Format::Mp4, &vinfo(true), &plan, &Quality::default()).unwrap());
+        assert!(g.contains("crop=100:56:3:3"));
+    }
+
+    #[test]
+    fn plan_without_audio_has_no_audio_graph() {
+        let mut plan = vplan(vec![(0.0, 3.0), (6.0, 10.0)]);
+        plan.speed = Speed::OneHalf;
+        plan.reverse = true;
+        let p = video_edit_plan(Format::Mp4, &vinfo(false), &plan, &Quality::default()).unwrap();
+        let g = graph(&p);
+        assert!(!g.contains("asplit") && !g.contains("atempo") && !g.contains("[aout]"));
+        assert!(g.contains("concat=n=2:v=1:a=0"));
+        assert!(has(&p.attempts[0], &["-an"]));
+    }
+
+    #[test]
+    fn mute_and_normalize() {
+        let mut plan = vplan(vec![(0.0, 10.0)]);
+        plan.audio = AudioMode::Mute;
+        let muted = video_edit_plan(Format::Mp4, &vinfo(true), &plan, &Quality::default()).unwrap();
+        assert!(has(&muted.attempts[0], &["-an"]) && !graph(&muted).contains("[aout]"));
+        plan.audio = AudioMode::Normalize;
+        let loud = video_edit_plan(Format::Mov, &vinfo(true), &plan, &Quality::default()).unwrap();
+        assert!(graph(&loud).contains("loudnorm=I=-16:TP=-1.5:LRA=11"));
+        assert!(has(&loud.attempts[0], &["-ar", "44100"]));
+    }
+
+    #[test]
+    fn webm_normalize_uses_48k() {
+        let mut plan = vplan(vec![(0.0, 10.0)]);
+        plan.audio = AudioMode::Normalize;
+        let p = video_edit_plan(Format::Webm, &vinfo(true), &plan, &Quality::default()).unwrap();
+        assert!(has(&p.attempts[0], &["-ar", "48000"]));
+        assert!(graph(&p).contains("aformat=channel_layouts=7.1|5.1|stereo|mono"));
+        assert!(has(&p.attempts[0], &["-c:v", "libvpx-vp9"]));
+    }
+
+    #[test]
+    fn wmv_saves_as_mp4() {
+        assert_eq!(video_edit_output(Format::Wmv), Format::Mp4);
+        assert_eq!(video_edit_output(Format::Avi), Format::Avi);
+        let p = video_edit_plan(
+            Format::Wmv,
+            &vinfo(true),
+            &vplan(vec![(0.0, 10.0)]),
+            &Quality::default(),
+        )
+        .unwrap();
+        assert_eq!(p.output, Format::Mp4);
+        assert!(has(&p.attempts[0], &["-c:v", "libx264"]));
+    }
+
+    #[test]
+    fn frame_and_scrub_args() {
+        let f = video_frame_plan(12.4, &[EditOp::Rotate(Turn::Ccw)]);
+        assert_eq!(f.output, Format::Png);
+        assert_eq!(f.input_args, ["-ss", "12.400"]);
+        assert!(
+            has(&f.attempts[0], &["-frames:v", "1"])
+                && has(&f.attempts[0], &["-vf", "transpose=2"])
+        );
+        assert!(has(
+            &f.attempts[0],
+            &["-c:v", "png", "-f", "image2", "-update", "1"]
+        ));
+        assert_eq!(scrub_size((1920, 1080), 960), (960, 540));
+        assert_eq!(scrub_size((101, 51), 960), (100, 50));
+        let (before, after) = scrub_args(1.5, (960, 540));
+        assert_eq!(before, ["-ss", "1.500"]);
+        assert!(has(
+            &after,
+            &[
+                "-vf",
+                "scale=960:540",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "bgra",
+                "pipe:1"
+            ]
+        ));
     }
 
     fn ends_with_f(args: &[String], muxer: &str) -> bool {

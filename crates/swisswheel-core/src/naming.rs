@@ -82,6 +82,22 @@ pub fn free_path(
         .expect("u32 range exhausted")
 }
 
+/// The `(suffix)` of a saved video frame: `frame 0m12.40s`, from one hour `frame 1h02m03.40s`.
+pub fn frame_suffix(t: f64) -> String {
+    let hundredths = (t.max(0.0) * 100.0).round() as u64;
+    let (h, m, s, c) = (
+        hundredths / 360_000,
+        hundredths / 6_000 % 60,
+        hundredths / 100 % 60,
+        hundredths % 100,
+    );
+    if h > 0 {
+        format!("frame {h}h{m:02}m{s:02}.{c:02}s")
+    } else {
+        format!("frame {m}m{s:02}.{c:02}s")
+    }
+}
+
 /// Where a job writes before renaming to `final_path` on success.
 pub fn temp_path(final_path: &Path) -> PathBuf {
     let mut name = final_path.as_os_str().to_owned();
@@ -93,6 +109,13 @@ pub fn temp_path(final_path: &Path) -> PathBuf {
 mod tests {
     use super::*;
     use std::path::{Path, PathBuf};
+
+    #[test]
+    fn frame_suffixes() {
+        assert_eq!(frame_suffix(12.4), "frame 0m12.40s");
+        assert_eq!(frame_suffix(59.999), "frame 1m00.00s");
+        assert_eq!(frame_suffix(3723.4), "frame 1h02m03.40s");
+    }
 
     fn none(_: &Path) -> bool {
         false
