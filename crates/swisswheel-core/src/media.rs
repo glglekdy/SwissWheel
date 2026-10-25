@@ -6,11 +6,14 @@ use crate::config::Quality;
 use crate::format::{Format, MediaKind};
 use crate::options::{Preset, Strength};
 
-/// What to run for one file. Each attempt goes between `-i <input>` and the
-/// output path; a later attempt runs only if the one before it failed.
+/// What to run for one file. `input_args` go before `-i <input>`; each attempt goes
+/// between `-i <input>` and the output path, and a later attempt runs only if the one
+/// before it failed.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MediaPlan {
     pub output: Format,
+    /// Arguments placed before `-i <input>`, such as an input seek.
+    pub input_args: Vec<String>,
     pub attempts: Vec<Vec<String>>,
     pub duration_secs: Option<f64>,
 }
@@ -151,6 +154,7 @@ pub fn plan(
     };
     Ok(MediaPlan {
         output,
+        input_args: Vec::new(),
         attempts,
         duration_secs: info.duration_secs,
     })
@@ -331,42 +335,84 @@ fn finish(mut a: Vec<String>, target: Format) -> Vec<String> {
     a
 }
 
-/// What ffprobe says about an input: its length and the codec of the first
-/// video and the first audio stream.
+/// What ffprobe says about an input: its length, the codec of the first video and the
+/// first audio stream, and the first video stream's size, rate and rotation.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct MediaInfo {
     pub duration_secs: Option<f64>,
     pub video: Option<String>,
     pub audio: Option<String>,
+    /// Display width: the stored size turned by `rotation`.
+    pub width: Option<u32>,
+    /// Display height: the stored size turned by `rotation`.
+    pub height: Option<u32>,
+    pub fps: Option<f64>,
+    /// Of the first audio stream.
+    pub sample_rate: Option<u32>,
+    /// Display rotation in degrees: 0, 90, 180 or 270.
+    pub rotation: u32,
 }
 
-/// Parses `ffprobe -v error -show_entries format=duration:stream=codec_type,codec_name
-/// -of default=noprint_wrappers=1`: each stream prints `codec_name=` then
-/// `codec_type=`, and the container's `duration=` comes last.
+/// Parses `ffprobe -v error -show_entries format=duration:stream=codec_type,codec_name,
+/// width,height,avg_frame_rate,r_frame_rate,sample_rate:stream_side_data=rotation
+/// -of default=noprint_wrappers=1`: each stream prints `codec_name=` then `codec_type=`,
+/// then its other fields; the container's `duration=` comes last.
 pub fn parse_probe(text: &str) -> MediaInfo {
+    #[derive(PartialEq)]
+    enum Stream {
+        FirstVideo,
+        FirstAudio,
+        Other,
+    }
     let mut info = MediaInfo::default();
     let mut codec = None;
+    let mut stream = Stream::Other;
+    let (mut avg_rate, mut r_rate) = (None, None);
     for line in text.lines() {
         let Some((key, value)) = line.trim_end().split_once('=') else {
             continue;
         };
+        let video = stream == Stream::FirstVideo;
         match key {
             "codec_name" => codec = Some(value.to_string()),
             "codec_type" => {
-                let slot = match value {
-                    "video" => &mut info.video,
-                    "audio" => &mut info.audio,
+                stream = Stream::Other;
+                let (slot, first) = match value {
+                    "video" => (&mut info.video, Stream::FirstVideo),
+                    "audio" => (&mut info.audio, Stream::FirstAudio),
                     _ => continue,
                 };
                 if slot.is_none() {
                     *slot = codec.take();
+                    stream = first;
                 }
             }
+            "width" if video => info.width = value.parse().ok(),
+            "height" if video => info.height = value.parse().ok(),
+            "avg_frame_rate" if video => avg_rate = parse_rate(value),
+            "r_frame_rate" if video => r_rate = parse_rate(value),
+            "rotation" if video => {
+                if let Ok(degrees) = value.parse::<f64>() {
+                    info.rotation = ((degrees / 90.0).round() as i64 * 90).rem_euclid(360) as u32;
+                }
+            }
+            "sample_rate" if stream == Stream::FirstAudio => info.sample_rate = value.parse().ok(),
             "duration" => info.duration_secs = value.parse().ok(),
             _ => {}
         }
     }
+    info.fps = avg_rate.or(r_rate);
+    if info.rotation % 180 == 90 {
+        std::mem::swap(&mut info.width, &mut info.height);
+    }
     info
+}
+
+/// A rate like `30000/1001`; `None` for `0/0` and other non-positive rates.
+fn parse_rate(value: &str) -> Option<f64> {
+    let (num, den) = value.split_once('/')?;
+    let rate = num.parse::<f64>().ok()? / den.parse::<f64>().ok()?;
+    (rate.is_finite() && rate > 0.0).then_some(rate)
 }
 
 #[derive(Debug, PartialEq)]
@@ -430,7 +476,8 @@ mod tests {
             MediaInfo {
                 duration_secs: Some(2.0),
                 video: Some("h264".into()),
-                audio: Some("aac".into())
+                audio: Some("aac".into()),
+                ..Default::default()
             }
         );
     }
@@ -445,7 +492,8 @@ mod tests {
             MediaInfo {
                 duration_secs: None,
                 video: Some("mjpeg".into()),
-                audio: Some("flac".into())
+                audio: Some("flac".into()),
+                ..Default::default()
             }
         );
         let gif = parse_probe("codec_name=gif\r\ncodec_type=video\r\nduration=1.000000\r\n");
@@ -454,8 +502,38 @@ mod tests {
             MediaInfo {
                 duration_secs: Some(1.0),
                 video: Some("gif".into()),
-                audio: None
+                audio: None,
+                ..Default::default()
             }
+        );
+    }
+
+    #[test]
+    fn probe_reads_video_fields() {
+        let text = "codec_name=h264\ncodec_type=video\nwidth=1920\nheight=1080\nr_frame_rate=30/1\navg_frame_rate=30000/1001\n\
+                    codec_name=aac\ncodec_type=audio\nsample_rate=44100\nr_frame_rate=0/0\navg_frame_rate=0/0\nduration=12.5\n";
+        let i = parse_probe(text);
+        assert_eq!((i.width, i.height), (Some(1920), Some(1080)));
+        assert!((i.fps.unwrap() - 29.97).abs() < 0.01);
+        assert_eq!(i.sample_rate, Some(44100));
+        assert_eq!(i.rotation, 0);
+        assert_eq!(i.duration_secs, Some(12.5));
+    }
+
+    #[test]
+    fn rotation_swaps_display_size() {
+        let text = "codec_name=h264\ncodec_type=video\nwidth=1920\nheight=1080\navg_frame_rate=0/0\nr_frame_rate=25/1\nrotation=-90\nduration=3\n";
+        let i = parse_probe(text);
+        assert_eq!(
+            (i.width, i.height, i.rotation),
+            (Some(1080), Some(1920), 270)
+        );
+        assert_eq!(i.fps, Some(25.0));
+        let upside =
+            parse_probe("codec_name=h264\ncodec_type=video\nwidth=640\nheight=480\nrotation=180\n");
+        assert_eq!(
+            (upside.width, upside.height, upside.rotation),
+            (Some(640), Some(480), 180)
         );
     }
 
@@ -487,6 +565,7 @@ mod tests {
             duration_secs: Some(2.0),
             video: video.map(String::from),
             audio: audio.map(String::from),
+            ..Default::default()
         }
     }
 
