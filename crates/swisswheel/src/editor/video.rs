@@ -46,6 +46,9 @@ use crate::theme::Theme;
 const NOTICE_TIMER: usize = 1;
 const PLAYBACK_TIMER: usize = 2;
 const PLAYBACK_MS: u32 = 16;
+/// No answer at all (neither ready nor an error) this long after opening:
+/// the system's media engine doesn't work (e.g. Windows Server).
+const LOAD_WAIT: Duration = Duration::from_secs(8);
 /// No first frame this long after the player is ready: Windows loaded the
 /// file but can't show its picture (it may still play the sound).
 const FIRST_FRAME_WAIT: Duration = Duration::from_secs(3);
@@ -64,9 +67,16 @@ struct FrameWatch {
 }
 
 impl FrameWatch {
-    /// The player is ready (again).
+    /// The player was just opened: it must answer by `LOAD_WAIT`.
+    fn opened(&mut self, now: Instant) {
+        if !self.got_first {
+            self.first_by = Some(now + LOAD_WAIT);
+        }
+    }
+
+    /// The player is ready (again); the first frame is due within `FIRST_FRAME_WAIT`.
     fn ready(&mut self, now: Instant) {
-        if !self.got_first && self.first_by.is_none() {
+        if !self.got_first {
             self.first_by = Some(now + FIRST_FRAME_WAIT);
         }
         self.due_since = Some(now);
@@ -340,7 +350,10 @@ impl VideoEditor {
             None => Err(windows::core::Error::new(E_FAIL, "장치 없음")),
         });
         match opened {
-            Ok(player) => self.player = Some(player),
+            Ok(player) => {
+                self.player = Some(player);
+                self.watch.opened(now);
+            }
             Err(e) => {
                 log_error!("영상 편집기: 재생할 수 없어 장면만 넘겨봅니다: {e}");
                 self.fall_back(now);
@@ -785,6 +798,16 @@ mod tests {
         w.frame();
         w.ready(at(30_000)); // a second Ready after a seek
         assert!(!w.give_up(at(40_000)));
+        // An engine that never answers at all (no Ready, no Error).
+        let mut w = FrameWatch::default();
+        w.opened(t0);
+        assert!(w.pumping(at(100)) && !w.give_up(at(7900)));
+        assert!(w.give_up(at(8000)));
+        // Once ready, the first-frame wait starts from there.
+        let mut w = FrameWatch::default();
+        w.opened(t0);
+        w.ready(at(7000));
+        assert!(!w.give_up(at(9000)) && w.give_up(at(10_000)));
     }
 
     #[test]
