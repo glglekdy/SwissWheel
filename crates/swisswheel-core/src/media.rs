@@ -392,10 +392,14 @@ pub fn video_edit_plan(
     if audio {
         a.extend(audio_codec(output, 192, quality));
         if plan.audio == AudioMode::Normalize {
-            // loudnorm resamples to 192 kHz; Opus only takes 48 kHz.
+            // loudnorm resamples to 192 kHz; Opus only takes 48 kHz, and AAC and MP3
+            // refuse the high rates some recordings have.
             let rate = match output {
                 Format::Webm => 48_000,
-                _ => info.sample_rate.unwrap_or(48_000),
+                _ => info
+                    .sample_rate
+                    .filter(|r| NORMALIZE_RATES.contains(r))
+                    .unwrap_or(48_000),
             };
             a.extend(["-ar".to_string(), rate.to_string()]);
         }
@@ -410,6 +414,11 @@ pub fn video_edit_plan(
         duration_secs: Some(kept / factor),
     })
 }
+
+/// Sample rates both AAC and MP3 encode; a normalized source at any other rate saves at 48 kHz.
+const NORMALIZE_RATES: [u32; 9] = [
+    8_000, 11_025, 12_000, 16_000, 22_050, 24_000, 32_000, 44_100, 48_000,
+];
 
 /// How far before the asked time the frame save starts decoding.
 const FRAME_LOOKBACK: f64 = 1.0;
@@ -1050,6 +1059,27 @@ mod tests {
         let g =
             graph(&video_edit_plan(Format::Mp4, &vinfo(true), &plan, &Quality::default()).unwrap());
         assert!(!g.contains("fps="), "{g}");
+    }
+
+    #[test]
+    fn normalize_keeps_only_rates_the_encoders_take() {
+        // AAC refuses 192 kHz and MP3 96 kHz: such sources save at 48 kHz.
+        let mut plan = vplan(vec![(0.0, 10.0)]);
+        plan.audio = AudioMode::Normalize;
+        let at = |rate: u32, target| {
+            let info = MediaInfo {
+                sample_rate: Some(rate),
+                ..vinfo(true)
+            };
+            video_edit_plan(target, &info, &plan, &Quality::default()).unwrap()
+        };
+        assert!(has(
+            &at(192_000, Format::Mkv).attempts[0],
+            &["-ar", "48000"]
+        ));
+        assert!(has(&at(96_000, Format::Avi).attempts[0], &["-ar", "48000"]));
+        assert!(has(&at(44_100, Format::Avi).attempts[0], &["-ar", "44100"]));
+        assert!(has(&at(32_000, Format::Mp4).attempts[0], &["-ar", "32000"]));
     }
 
     #[test]

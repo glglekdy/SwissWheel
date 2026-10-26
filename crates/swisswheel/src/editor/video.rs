@@ -46,9 +46,53 @@ use crate::theme::Theme;
 const NOTICE_TIMER: usize = 1;
 const PLAYBACK_TIMER: usize = 2;
 const PLAYBACK_MS: u32 = 16;
-/// How long frames keep being taken after a paused seek or step: the
-/// engine finishes one only once its frame is taken.
-const SEEK_PUMP: Duration = Duration::from_secs(2);
+/// No first frame this long after the player is ready: Windows loaded the
+/// file but can't show its picture (it may still play the sound).
+const FIRST_FRAME_WAIT: Duration = Duration::from_secs(3);
+/// How long frames keep being taken while one is due after a seek: the
+/// engine finishes a paused seek only once its frame is taken.
+const FRAME_WAIT: Duration = Duration::from_secs(15);
+
+/// When a frame is due from the player.
+#[derive(Debug, Default)]
+struct FrameWatch {
+    /// The first frame must come by then, or the panel falls back.
+    first_by: Option<Instant>,
+    got_first: bool,
+    /// A frame is due since then (a seek, a step, a reopen).
+    due_since: Option<Instant>,
+}
+
+impl FrameWatch {
+    /// The player is ready (again).
+    fn ready(&mut self, now: Instant) {
+        if !self.got_first && self.first_by.is_none() {
+            self.first_by = Some(now + FIRST_FRAME_WAIT);
+        }
+        self.due_since = Some(now);
+    }
+
+    /// A seek or step asked for a new frame.
+    fn expect(&mut self, now: Instant) {
+        self.due_since = Some(now);
+    }
+
+    /// A frame arrived.
+    fn frame(&mut self) {
+        self.got_first = true;
+        self.first_by = None;
+        self.due_since = None;
+    }
+
+    fn give_up(&self, now: Instant) -> bool {
+        self.first_by.is_some_and(|by| now >= by)
+    }
+
+    /// Whether frames should still be taken.
+    fn pumping(&self, now: Instant) -> bool {
+        self.first_by.is_some() || self.due_since.is_some_and(|since| now < since + FRAME_WAIT)
+    }
+}
 
 struct VideoEditor {
     path: PathBuf,
@@ -66,8 +110,8 @@ struct VideoEditor {
     hover: VideoHit,
     /// The button a press started on, for a click on release.
     press: Option<VideoHit>,
-    /// Keep taking frames until then.
-    pump_until: Option<Instant>,
+    /// Whether a frame is due from the player.
+    watch: FrameWatch,
     /// The player was rebuilt (device lost): go back here once it is ready.
     resume_at: Option<f64>,
     // Declared before what they draw with, so they are released first.
@@ -135,7 +179,7 @@ pub(super) fn open(
         theme,
         hover: VideoHit::Nothing,
         press: None,
-        pump_until: None,
+        watch: FrameWatch::default(),
         resume_at: None,
         frame: None,
         frame_upright: false,
@@ -337,11 +381,7 @@ impl VideoEditor {
                     PlayerAction::Pause => player.pause(),
                     PlayerAction::Seek(t) => {
                         player.seek(t);
-                        self.pump_until = Some(now + SEEK_PUMP);
-                    }
-                    PlayerAction::StepFrame(forward) => {
-                        player.step_frame(forward);
-                        self.pump_until = Some(now + SEEK_PUMP);
+                        self.watch.expect(now);
                     }
                     PlayerAction::Rate(factor) => player.set_rate(factor),
                     PlayerAction::Mute(muted) => player.set_muted(muted),
@@ -355,7 +395,7 @@ impl VideoEditor {
 
     fn arm_timers(&self, now: Instant) {
         let panel = Some(self.windows.panel);
-        let pumping = self.pump_until.is_some_and(|until| until > now);
+        let pumping = self.watch.pumping(now);
         unsafe {
             if self.player.is_some() && (self.state.playing() || pumping) {
                 SetTimer(panel, PLAYBACK_TIMER, PLAYBACK_MS, None);
@@ -374,14 +414,21 @@ impl VideoEditor {
         }
     }
 
-    /// The playback timer: takes a new frame and follows the player's time.
-    fn on_playback(&mut self) -> VideoOutcome {
+    /// The playback timer: takes a new frame and follows the player's time;
+    /// falls back when the first frame never comes.
+    fn on_playback(&mut self, now: Instant) -> VideoOutcome {
+        if self.player.is_some() && self.watch.give_up(now) {
+            log_error!("영상 편집기: 장면이 오지 않아 장면만 넘겨봅니다");
+            self.fall_back(now);
+            return VideoOutcome::Redraw;
+        }
         let mut redraw = false;
         if let (Some(player), Some(surface)) = (self.player.as_mut(), self.surface.as_ref()) {
             match player.frame(surface.ctx()) {
                 Ok(Some(bitmap)) => {
                     self.frame = Some(bitmap);
                     self.frame_upright = false;
+                    self.watch.frame();
                     redraw = true;
                 }
                 Ok(None) => {}
@@ -410,6 +457,12 @@ impl VideoEditor {
                     log_info!("영상 편집기: 재생 준비됨 {:?}", player.native_size());
                     self.state.loaded(self.info.clone());
                 }
+                if player.native_size().is_none() {
+                    // Ready for the sound only: Windows can't decode the picture.
+                    log_error!("영상 편집기: 장면 크기를 몰라 장면만 넘겨봅니다");
+                    self.fall_back(now);
+                    return VideoOutcome::Redraw;
+                }
                 if let Some(session) = self.state.session() {
                     player.set_rate(session.speed().factor());
                     player.set_muted(session.audio() == AudioMode::Mute);
@@ -417,7 +470,7 @@ impl VideoEditor {
                 if let Some(t) = self.resume_at.take() {
                     player.seek(t);
                 }
-                self.pump_until = Some(now + SEEK_PUMP);
+                self.watch.ready(now);
                 VideoOutcome::Redraw
             }
             PlayerEvent::Seeked => VideoOutcome::Redraw,
@@ -693,7 +746,7 @@ unsafe extern "system" fn video_proc(
             return LRESULT(1);
         }
         WM_TIMER if wparam.0 == NOTICE_TIMER => with_video(|ed| ed.notice_tick(now)),
-        WM_TIMER if wparam.0 == PLAYBACK_TIMER => with_video(|ed| ed.on_playback()),
+        WM_TIMER if wparam.0 == PLAYBACK_TIMER => with_video(|ed| ed.on_playback(now)),
         WM_APP_PLAYER => PlayerEvent::from_wparam(wparam.0)
             .and_then(|event| with_video(|ed| ed.on_player(event, now))),
         WM_APP_SCRUB => with_video(|ed| ed.on_scrub()),
@@ -711,6 +764,28 @@ unsafe extern "system" fn video_proc(
 mod tests {
     use super::*;
     use crate::editor::video_render::turn_matrix;
+
+    #[test]
+    fn no_first_frame_in_time_means_fall_back() {
+        let t0 = Instant::now();
+        let at = |ms| t0 + Duration::from_millis(ms);
+        let mut w = FrameWatch::default();
+        assert!(!w.pumping(t0) && !w.give_up(t0));
+        w.ready(t0);
+        assert!(w.pumping(at(100)) && !w.give_up(at(2900)));
+        assert!(w.give_up(at(3000)), "a file Windows loads but can't show");
+        // Once a frame came, a later slow seek keeps pulling but never gives up.
+        let mut w = FrameWatch::default();
+        w.ready(t0);
+        w.frame();
+        assert!(!w.pumping(at(10)));
+        w.expect(at(20));
+        assert!(w.pumping(at(9000)) && !w.give_up(at(9000)));
+        assert!(!w.pumping(at(20 + 15_000)));
+        w.frame();
+        w.ready(at(30_000)); // a second Ready after a seek
+        assert!(!w.give_up(at(40_000)));
+    }
 
     #[test]
     fn engine_frame_needs_rotation_only_when_transposed() {

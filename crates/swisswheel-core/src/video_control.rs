@@ -17,6 +17,13 @@ const DEFAULT_FPS: f64 = 30.0;
 /// Pressing play this close to the last kept end starts over.
 const END_SLACK: f64 = 0.05;
 
+/// How far into a frame a step lands, so float rounding never shows the one before.
+const STEP_INTO: f64 = 0.001;
+
+/// How far before a removed tail "the end" parks (at most one frame), so it stays on
+/// the last kept frame instead of inside the removed piece.
+const END_PARK: f64 = 0.04;
+
 /// Something the user asked the video editor to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VideoCommand {
@@ -95,8 +102,6 @@ pub enum PlayerAction {
     Pause,
     /// Go to this many seconds of the original.
     Seek(f64),
-    /// One frame forward (`true`) or back.
-    StepFrame(bool),
     Rate(f64),
     Mute(bool),
 }
@@ -228,27 +233,30 @@ impl VideoState {
     /// Playback and seeking, allowed in crop mode too. `None` for other commands.
     fn navigate(&mut self, cmd: VideoCommand) -> Option<VideoOutcome> {
         let session = self.session.as_ref()?;
-        let frame = 1.0 / session.info().fps.unwrap_or(DEFAULT_FPS);
-        let duration = session.info().duration;
-        let (first, last) = (session.first_kept_start(), session.last_kept_end());
+        let fps = session.info().fps.unwrap_or(DEFAULT_FPS);
+        let (first, end) = (session.first_kept_start(), end_position(session));
         let target = match cmd {
             VideoCommand::PlayPause => return Some(self.play_pause()),
             VideoCommand::StepBack | VideoCommand::StepForward => {
-                let forward = cmd == VideoCommand::StepForward;
-                let t = self.position + if forward { frame } else { -frame };
-                if self.fallback {
-                    t
+                // A seek just past the neighboring frame's start: exact on every
+                // player, unlike the engine's own step (always 1/24 s back).
+                let shown = (self.position * fps + 1e-6).floor();
+                let next = if cmd == VideoCommand::StepForward {
+                    shown + 1.0
                 } else {
-                    self.pause();
-                    self.position = t.clamp(0.0, duration);
-                    self.actions.push(PlayerAction::StepFrame(forward));
-                    return Some(VideoOutcome::Redraw);
+                    shown - 1.0
+                };
+                self.pause();
+                if next < 0.0 {
+                    0.0
+                } else {
+                    next / fps + STEP_INTO
                 }
             }
             VideoCommand::BackSecond => self.position - 1.0,
             VideoCommand::ForwardSecond => self.position + 1.0,
             VideoCommand::Start => first,
-            VideoCommand::End => last,
+            VideoCommand::End => end,
             _ => return None,
         };
         self.seek(target);
@@ -505,7 +513,7 @@ impl VideoState {
     fn stop_at_end(&mut self) {
         self.pause();
         if let Some(session) = self.session.as_ref() {
-            self.position = session.last_kept_end();
+            self.position = end_position(session);
         }
     }
 
@@ -585,6 +593,19 @@ impl VideoState {
             self.playing = false;
             self.actions.push(PlayerAction::Pause);
         }
+    }
+}
+
+/// Where "the end" is: the last kept end, or just before it when a removed tail follows
+/// (the end itself lies in the removed piece).
+fn end_position(session: &VideoSession) -> f64 {
+    let last = session.last_kept_end();
+    let info = session.info();
+    if last < info.duration {
+        let frame = 1.0 / info.fps.unwrap_or(DEFAULT_FPS);
+        (last - frame.min(END_PARK)).max(session.first_kept_start())
+    } else {
+        last
     }
 }
 
@@ -753,9 +774,82 @@ mod tests {
         s.set_fallback(now);
         assert_eq!(s.footer_text(VideoHit::Nothing, now), Some(text::FALLBACK));
         s.command(VideoCommand::StepForward, now);
-        assert_eq!(s.take_actions(), vec![PlayerAction::Seek(0.04)]);
+        assert_eq!(s.take_actions(), vec![PlayerAction::Seek(0.041)]);
         s.command(VideoCommand::PlayPause, now);
         assert!(s.take_actions().is_empty());
+    }
+
+    fn seeks(actions: Vec<PlayerAction>) -> Vec<f64> {
+        actions
+            .into_iter()
+            .filter_map(|a| match a {
+                PlayerAction::Seek(t) => Some((t * 1000.0).round() / 1000.0),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn frame_steps_are_exact_seeks_to_frame_starts() {
+        // The engine's backward step moves 1/24 s whatever the rate, so the
+        // shown frame and the position drifted apart; steps seek instead,
+        // just past a frame's start (25 fps here).
+        let now = Instant::now();
+        let mut s = ready(10.0);
+        s.timeline_press(1.0, now);
+        s.timeline_release();
+        s.take_actions();
+        for _ in 0..3 {
+            s.command(VideoCommand::StepBack, now);
+        }
+        assert_eq!(seeks(s.take_actions()), vec![0.961, 0.921, 0.881]);
+        s.command(VideoCommand::StepForward, now);
+        s.command(VideoCommand::StepForward, now);
+        assert_eq!(seeks(s.take_actions()), vec![0.921, 0.961]);
+        assert!((s.position() - 0.961).abs() < 1e-9);
+        // Playing: a step pauses first.
+        s.command(VideoCommand::PlayPause, now);
+        s.take_actions();
+        s.command(VideoCommand::StepForward, now);
+        let actions = s.take_actions();
+        assert_eq!(actions[0], PlayerAction::Pause);
+        assert_eq!(seeks(actions), vec![1.001]);
+        // Never before the start.
+        s.command(VideoCommand::Start, now);
+        s.command(VideoCommand::StepBack, now);
+        assert_eq!(s.position(), 0.0);
+    }
+
+    #[test]
+    fn the_end_before_a_removed_tail_stays_on_the_last_kept_frame() {
+        let now = Instant::now();
+        let mut s = ready(10.0);
+        s.timeline_press(5.0, now);
+        s.timeline_release();
+        s.command(VideoCommand::Split, now);
+        s.timeline_press(7.0, now);
+        s.timeline_release();
+        s.command(VideoCommand::TogglePiece, now); // remove [5, 10]
+        s.command(VideoCommand::End, now);
+        let kept = |s: &VideoState| s.session().unwrap().is_kept(s.position());
+        assert!(
+            kept(&s) && s.position() < 5.0 && s.position() > 4.9,
+            "{}",
+            s.position()
+        );
+        // Playing through stops there too.
+        s.command(VideoCommand::Start, now);
+        s.command(VideoCommand::PlayPause, now);
+        s.tick(5.3, false);
+        assert!(!s.playing());
+        assert!(kept(&s), "{}", s.position());
+        // And play from there starts over.
+        s.take_actions();
+        s.command(VideoCommand::PlayPause, now);
+        assert_eq!(
+            s.take_actions(),
+            vec![PlayerAction::Seek(0.0), PlayerAction::Play]
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
 //! The fallback when Media Foundation can't play a file: single frames
 //! decoded by FFmpeg on a worker thread, newest request first.
 
+use std::io::Read;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -123,22 +124,54 @@ pub(super) fn grab(
         .creation_flags(CREATE_NO_WINDOW.0)
         .spawn()
         .map_err(|e| format!("ffmpeg: {e}"))?;
+    let mut child = child;
     let job = RunJob::new();
     if let Some(job) = &job {
         job.assign(&child);
     }
-    let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    let mut stderr = child.stderr.take().expect("piped");
+    let errors = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = stderr.read_to_string(&mut text);
+        text
+    });
     // Every frame of the second before `t`; the last one is the frame shown at `t`.
     let want = size.0 as usize * size.1 as usize * 4;
-    let mut bytes = out.stdout;
-    if !out.status.success() || bytes.len() < want || bytes.len() % want != 0 {
-        return Err(format!(
-            "{} bytes, frames of {want}: {}",
-            bytes.len(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
+    let mut stdout = child.stdout.take().expect("piped");
+    let frame = last_frame(&mut stdout, want);
+    let status = child.wait().map_err(|e| e.to_string())?;
+    let errors = errors.join().unwrap_or_default();
+    match frame {
+        Ok(frame) if status.success() => Ok(frame),
+        Ok(_) => Err(errors.trim().to_string()),
+        Err(e) => Err(format!("{e}: {}", errors.trim())),
     }
-    Ok(bytes.split_off(bytes.len() - want))
+}
+
+/// Reads `reader` to the end in frames of `size` bytes, holding at most two,
+/// and returns the last one; an error when there is none or one is cut off.
+fn last_frame(reader: &mut impl Read, size: usize) -> Result<Vec<u8>, String> {
+    let (mut last, mut current) = (Vec::new(), vec![0u8; size]);
+    let mut filled = 0;
+    loop {
+        let n = reader
+            .read(&mut current[filled..])
+            .map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        filled += n;
+        if filled == size {
+            std::mem::swap(&mut last, &mut current);
+            current.resize(size, 0);
+            filled = 0;
+        }
+    }
+    match (filled, last.is_empty()) {
+        (0, false) => Ok(last),
+        (0, true) => Err("no frame".into()),
+        (stray, _) => Err(format!("a cut-off frame ({stray} of {size} bytes)")),
+    }
 }
 
 #[cfg(test)]
@@ -158,6 +191,15 @@ mod tests {
         let red = grab(&tools, &clip, 0.2, (32, 32)).unwrap();
         assert!(red[2] > 200 && red[0] < 60, "expected red at 0.2 s");
         assert!(grab(&tools, &dir.path().join("missing.mp4"), 0.0, (32, 32)).is_err());
+    }
+
+    #[test]
+    fn keeps_only_the_last_whole_frame() {
+        // A grab reads a second of frames; only one frame is ever held.
+        let data: Vec<u8> = (0u8..3).flat_map(|i| [i; 4]).collect();
+        assert_eq!(last_frame(&mut &data[..], 4).unwrap(), vec![2; 4]);
+        assert!(last_frame(&mut &data[..10], 4).is_err(), "a cut-off frame");
+        assert!(last_frame(&mut &data[..0], 4).is_err(), "no frame");
     }
 
     #[test]

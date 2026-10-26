@@ -200,15 +200,6 @@ impl Player {
         unsafe { self.engine.IsEnded().as_bool() }
     }
 
-    /// One frame forward or back, paused.
-    pub fn step_frame(&self, forward: bool) {
-        unsafe {
-            if let Ok(ex) = self.engine.cast::<IMFMediaEngineEx>() {
-                let _ = ex.FrameStep(forward);
-            }
-        }
-    }
-
     /// The decoded frame size, once the engine knows the video.
     pub fn native_size(&self) -> Option<(u32, u32)> {
         let (mut w, mut h) = (0, 0);
@@ -447,6 +438,31 @@ mod tests {
             "the same frame twice"
         );
         player.shutdown();
+        unsafe {
+            let _ = DestroyWindow(hwnd);
+        }
+    }
+
+    #[test]
+    fn a_codec_windows_cannot_show_has_no_picture_size() {
+        // FFV1 with sound: the engine gets ready and would play the sound,
+        // but never knows a picture size (or reports an error).
+        let dir = tempfile::tempdir().unwrap();
+        let tone = crate::engines::ffmpeg::tests::tone_clip(dir.path(), "a.mp4", 1);
+        let tone = tone.to_str().unwrap();
+        let ffv1 = crate::engines::ffmpeg::tests::make(
+            dir.path(),
+            "b.mkv",
+            &["-i", tone, "-c:v", "ffv1", "-c:a", "copy"],
+        );
+        let hwnd = test_window();
+        startup().unwrap();
+        let device = video_device().unwrap();
+        if let Ok(player) = Player::open(hwnd, &device, &ffv1) {
+            let ready = pump_until(PlayerEvent::Ready, Duration::from_secs(5), &mut || {});
+            assert!(!ready || player.native_size().is_none());
+            player.shutdown();
+        }
         unsafe {
             let _ = DestroyWindow(hwnd);
         }
