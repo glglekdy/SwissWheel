@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::sync::OnceLock;
 
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, S_OK, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, RECT, S_OK, WPARAM};
 use windows::Win32::Graphics::Direct2D::Common::{D2D1_ALPHA_MODE_IGNORE, D2D1_PIXEL_FORMAT};
 use windows::Win32::Graphics::Direct2D::{
     D2D1_BITMAP_OPTIONS_NONE, D2D1_BITMAP_PROPERTIES1, ID2D1Bitmap1, ID2D1DeviceContext,
@@ -323,6 +323,7 @@ const E_FAIL_HR: windows::core::HRESULT = windows::Win32::Foundation::E_FAIL;
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    use windows::Win32::Foundation::LRESULT;
     use std::time::{Duration, Instant};
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;

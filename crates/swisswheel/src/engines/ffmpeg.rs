@@ -291,10 +291,10 @@ fn wait(child: &mut Child) -> Result<std::process::ExitStatus, EngineError> {
 /// when the app dies) kills whatever is still running. The moment between
 /// spawning and assigning is accepted; a launcher takes far longer than that
 /// to start FFmpeg.
-struct RunJob(HANDLE);
+pub(crate) struct RunJob(HANDLE);
 
 impl RunJob {
-    fn new() -> Option<RunJob> {
+    pub(crate) fn new() -> Option<RunJob> {
         unsafe {
             let job = RunJob(CreateJobObjectW(None, None).ok()?);
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
@@ -310,7 +310,7 @@ impl RunJob {
         }
     }
 
-    fn assign(&self, child: &Child) {
+    pub(crate) fn assign(&self, child: &Child) {
         unsafe {
             let _ = AssignProcessToJobObject(self.0, HANDLE(child.as_raw_handle()));
         }

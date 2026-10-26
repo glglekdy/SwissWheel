@@ -5,6 +5,7 @@
 
 mod player;
 mod render;
+mod scrub;
 mod window;
 
 use std::cell::RefCell;
