@@ -40,6 +40,7 @@ features = [
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    "Win32_Media_MediaFoundation",
     "Win32_Networking_WinHttp",
     "Win32_Security",
     "Win32_Storage_FileSystem",

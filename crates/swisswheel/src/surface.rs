@@ -36,8 +36,19 @@ impl Surface {
     /// `glass_regions`: how many separately shaped glass areas the window has
     /// (all start hidden; see `set_glass`).
     pub fn new(hwnd: HWND, width: u32, height: u32, glass_regions: usize) -> Result<Surface> {
+        Surface::with_device(hwnd, create_d3d_device()?, width, height, glass_regions)
+    }
+
+    /// As `new`, drawing with `device` (which needs BGRA support), so other
+    /// work on that device (e.g. video frames) can be drawn without a copy.
+    pub fn with_device(
+        hwnd: HWND,
+        device: ID3D11Device,
+        width: u32,
+        height: u32,
+        glass_regions: usize,
+    ) -> Result<Surface> {
         unsafe {
-            let device = create_d3d_device()?;
             let dxgi_device: IDXGIDevice = device.cast()?;
             let factory: ID2D1Factory1 =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;

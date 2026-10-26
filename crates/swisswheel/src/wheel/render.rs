@@ -733,13 +733,17 @@ fn ellipse_at(cx: f32, cy: f32, r: f32) -> D2D1_ELLIPSE {
 }
 
 pub(crate) fn create_d3d_device() -> Result<ID3D11Device> {
+    create_d3d_device_with(D3D11_CREATE_DEVICE_BGRA_SUPPORT)
+}
+
+pub(crate) fn create_d3d_device_with(flags: D3D11_CREATE_DEVICE_FLAG) -> Result<ID3D11Device> {
     let mut device = None;
     let mut attempt = |driver: D3D_DRIVER_TYPE| unsafe {
         D3D11CreateDevice(
             None,
             driver,
             HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            flags,
             None,
             D3D11_SDK_VERSION,
             Some(&mut device),

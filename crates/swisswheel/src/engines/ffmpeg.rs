@@ -418,7 +418,8 @@ pub(crate) mod tests {
         )
     }
 
-    /// `secs` of 320×240 test pattern at 10 fps with a 440 Hz tone at 44.1 kHz.
+    /// `secs` of 320×240 test pattern at 10 fps with a 440 Hz tone at 44.1 kHz,
+    /// in 4:2:0 like camera clips (Windows' H.264 decoder refuses 4:4:4).
     pub(crate) fn tone_clip(dir: &Path, name: &str, secs: u32) -> PathBuf {
         let video = format!("testsrc=duration={secs}:size=320x240:rate=10");
         let audio = format!("sine=frequency=440:sample_rate=44100:duration={secs}");
@@ -436,6 +437,8 @@ pub(crate) mod tests {
                 &audio,
                 "-c:v",
                 "libx264",
+                "-pix_fmt",
+                "yuv420p",
                 "-c:a",
                 "aac",
                 "-shortest",

@@ -3,6 +3,7 @@
 //! does; this module keeps the panel's lifetime, decodes the image off the
 //! UI thread, and hands the app what the panel ended with.
 
+mod player;
 mod render;
 mod window;
 
