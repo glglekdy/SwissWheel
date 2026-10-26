@@ -9,12 +9,13 @@ use std::thread::JoinHandle;
 
 use swisswheel_core::catalog::{Operation, Tool};
 use swisswheel_core::config::Quality;
-use swisswheel_core::editor::{EditPlan, SaveKind};
+use swisswheel_core::editor::{EditOp, EditPlan, SaveKind};
 use swisswheel_core::format::Format;
 use swisswheel_core::media;
-use swisswheel_core::naming::{suffix_for, temp_path};
+use swisswheel_core::naming::{frame_suffix, suffix_for, temp_path};
 use swisswheel_core::options::{Preset, Transfer};
 use swisswheel_core::summary::progress_title;
+use swisswheel_core::video_edit::VideoPlan;
 
 use crate::bundle::Bundle;
 use crate::engines::ffmpeg::{self, Tools};
@@ -27,8 +28,18 @@ pub struct Job {
     /// The option chosen in the side panel; `None` means the defaults.
     pub preset: Option<Preset>,
     pub inputs: Vec<PathBuf>,
-    /// The editor's save: output keeps the input's format and is named after the plan.
-    pub edits: Option<EditPlan>,
+    /// An editor's save, which never goes to the converters.
+    pub edits: Option<Edits>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Edits {
+    /// The image editor's save: output keeps the input's format and is named after the plan.
+    Image(EditPlan),
+    /// The video editor's save: `name (edited).ext`, WMV becoming MP4.
+    Video(VideoPlan),
+    /// One frame of a video at `t` seconds, with the frame edits, as `name (frame …).png`.
+    Frame { t: f64, ops: Vec<EditOp> },
 }
 
 #[derive(Debug, Clone)]
@@ -64,7 +75,7 @@ struct Shared {
 struct JobState {
     op: Operation,
     preset: Option<Preset>,
-    edits: Option<EditPlan>,
+    edits: Option<Edits>,
     results: Mutex<Vec<Option<Result<PathBuf, String>>>>,
     /// Per file, for `Runner::progress` and `Runner::rows`.
     files: Mutex<Vec<FileState>>,
@@ -200,8 +211,10 @@ impl Runner {
             bundle: (job.op == Operation::Tool(Tool::Bundle)).then(|| Bundle::new(&job.inputs[0])),
         });
         self.shared.active.lock().unwrap().push(Arc::clone(&state));
+        let video_edit = matches!(state.edits, Some(Edits::Video(_) | Edits::Frame { .. }));
         for (index, input) in job.inputs.into_iter().enumerate() {
-            let is_media = Format::from_path(&input).is_some_and(|f| media::supports(&job.op, f));
+            let is_media = video_edit
+                || Format::from_path(&input).is_some_and(|f| media::supports(&job.op, f));
             let tx = if is_media {
                 &self.media_tx
             } else {
@@ -364,26 +377,41 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     };
     let format =
         Format::from_path(input).ok_or_else(|| fail(EngineError::Unsupported(name.clone())))?;
+    let tools = || {
+        shared
+            .tools()
+            .ok_or_else(|| fail(EngineError::MissingFfmpeg))
+    };
     // Checked first: an edit job never goes to the converters.
-    let (engine, extension) = if let Some(plan) = &work.job.edits {
-        (Engine::Edit(plan), format.extension())
-    } else if engines::image::supports(op, format) {
-        (
+    let (engine, extension) = match &work.job.edits {
+        Some(Edits::Image(plan)) => (Engine::Edit(plan), format.extension()),
+        Some(Edits::Video(plan)) => {
+            let tools = tools()?;
+            let plan = ffmpeg::prepare_video_edit(&tools, plan, input, &quality).map_err(fail)?;
+            let extension = plan.output.extension();
+            (Engine::Media(tools, plan), extension)
+        }
+        Some(Edits::Frame { t, ops }) => {
+            let plan = media::video_frame_plan(*t, ops);
+            let extension = plan.output.extension();
+            (Engine::Media(tools()?, plan), extension)
+        }
+        None if engines::image::supports(op, format) => (
             Engine::Image,
             engines::image::output_format(op, format).extension(),
-        )
-    } else if media::supports(op, format) {
-        let tools = shared
-            .tools()
-            .ok_or_else(|| fail(EngineError::MissingFfmpeg))?;
-        let plan = ffmpeg::prepare(&tools, op, preset, input, &quality).map_err(fail)?;
-        let extension = plan.output.extension();
-        (Engine::Media(tools, plan), extension)
-    } else {
-        return Err(fail(EngineError::Unsupported(format!("{op:?} on {name}"))));
+        ),
+        None if media::supports(op, format) => {
+            let tools = tools()?;
+            let plan = ffmpeg::prepare(&tools, op, preset, input, &quality).map_err(fail)?;
+            let extension = plan.output.extension();
+            (Engine::Media(tools, plan), extension)
+        }
+        None => return Err(fail(EngineError::Unsupported(format!("{op:?} on {name}")))),
     };
     let suffix = match &work.job.edits {
-        Some(plan) => Some(plan.kind.suffix().to_string()),
+        Some(Edits::Image(plan)) => Some(plan.kind.suffix().to_string()),
+        Some(Edits::Video(_)) => Some("edited".to_string()),
+        Some(Edits::Frame { t, .. }) => Some(frame_suffix(*t)),
         None => suffix_for(op, preset),
     };
 
@@ -685,7 +713,7 @@ mod tests {
             op: Operation::Tool(Tool::Edit),
             preset: None,
             inputs: vec![src.clone()],
-            edits: Some(edited),
+            edits: Some(Edits::Image(edited)),
         });
         let report = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(report.outputs, vec![dir.path().join("사진 (edited).png")]);
@@ -701,11 +729,55 @@ mod tests {
             op: Operation::Tool(Tool::Edit),
             preset: None,
             inputs: vec![src.clone()],
-            edits: Some(strip),
+            edits: Some(Edits::Image(strip)),
         });
         let report = rx.recv_timeout(Duration::from_secs(10)).unwrap();
         assert_eq!(report.outputs, vec![dir.path().join("사진 (no info).png")]);
         assert!(src.exists());
+    }
+
+    #[test]
+    fn video_edit_and_frame_jobs_name_their_outputs() {
+        use swisswheel_core::video_edit::{AudioMode, Speed, VideoPlan};
+        let dir = tempfile::tempdir().unwrap();
+        let clip = pattern(dir.path(), "클립.mp4", "320x240", 2);
+        let plan = VideoPlan {
+            kept: vec![(0.0, 1.0)],
+            frame: vec![],
+            speed: Speed::Normal,
+            audio: AudioMode::Keep,
+            reverse: false,
+        };
+        let reports = run_jobs(vec![
+            Job {
+                op: Operation::Tool(Tool::Edit),
+                preset: None,
+                inputs: vec![clip.clone()],
+                edits: Some(Edits::Video(plan)),
+            },
+            Job {
+                op: Operation::Tool(Tool::Edit),
+                preset: None,
+                inputs: vec![clip.clone()],
+                edits: Some(Edits::Frame {
+                    t: 1.0,
+                    ops: vec![],
+                }),
+            },
+        ]);
+        for r in &reports {
+            assert!(r.failures.is_empty(), "{:?}", r.failures);
+        }
+        let mut outs: Vec<_> = reports.iter().flat_map(|r| r.outputs.clone()).collect();
+        outs.sort();
+        assert_eq!(
+            outs,
+            vec![
+                dir.path().join("클립 (edited).mp4"),
+                dir.path().join("클립 (frame 0m01.00s).png")
+            ]
+        );
+        assert!(clip.exists());
     }
 
     #[test]

@@ -58,7 +58,7 @@ use crate::engines::ffmpeg as ffmpeg_tools;
 use crate::essentials_status;
 use crate::ffmpeg_install::{self, RemoveOutcome};
 use crate::hook::{self, Hooks, WM_APP_DRAG, WM_APP_FOREGROUND};
-use crate::jobs::{Job, JobReport, ProgressRow, Runner};
+use crate::jobs::{Edits, Job, JobReport, ProgressRow, Runner};
 use crate::menubar::{self, DownloadView, MenuBar, MenuMouse, MenuView};
 use crate::notice::{NoticeWindow, WM_APP_NOTICE, quiet_now};
 use crate::probe;
@@ -2139,7 +2139,7 @@ impl AppState {
                         op: Operation::Tool(Tool::Edit),
                         preset: None,
                         inputs: vec![path],
-                        edits: Some(plan),
+                        edits: Some(Edits::Image(plan)),
                     });
                     self.active_jobs += 1;
                     self.update_busy();

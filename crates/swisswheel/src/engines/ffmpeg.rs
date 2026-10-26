@@ -15,6 +15,7 @@ use swisswheel_core::config::Quality;
 use swisswheel_core::format::Format;
 use swisswheel_core::media::{self, MediaInfo, MediaPlan, PlanError, Progress};
 use swisswheel_core::options::Preset;
+use swisswheel_core::video_edit::VideoPlan;
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::JobObjects::{
     AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
@@ -79,11 +80,30 @@ pub fn prepare(
     let format = Format::from_path(input)
         .ok_or_else(|| EngineError::Unsupported(input.display().to_string()))?;
     let info = probe(tools, input)?;
-    media::plan(op, preset, format, &info, quality).map_err(|e| match e {
+    media::plan(op, preset, format, &info, quality)
+        .map_err(|e| plan_error(e, || format!("{op:?} on {format:?}")))
+}
+
+/// Reads the input's streams and decides the arguments of a video editor save.
+pub fn prepare_video_edit(
+    tools: &Tools,
+    plan: &VideoPlan,
+    input: &Path,
+    quality: &Quality,
+) -> Result<MediaPlan, EngineError> {
+    let format = Format::from_path(input)
+        .ok_or_else(|| EngineError::Unsupported(input.display().to_string()))?;
+    let info = probe(tools, input)?;
+    media::video_edit_plan(format, &info, plan, quality)
+        .map_err(|e| plan_error(e, || format!("video edit on {format:?}")))
+}
+
+fn plan_error(e: PlanError, what: impl FnOnce() -> String) -> EngineError {
+    match e {
         PlanError::NoAudio => EngineError::NoAudio,
         PlanError::NoVideo => EngineError::NoVideo,
-        PlanError::Unsupported => EngineError::Unsupported(format!("{op:?} on {format:?}")),
-    })
+        PlanError::Unsupported => EngineError::Unsupported(what()),
+    }
 }
 
 pub fn probe(tools: &Tools, input: &Path) -> Result<MediaInfo, EngineError> {
@@ -340,9 +360,11 @@ pub(crate) mod tests {
     use std::time::{Duration, Instant};
     use swisswheel_core::catalog::{Operation, Tool};
     use swisswheel_core::config::Quality;
+    use swisswheel_core::editor::{EditOp, PixelRect, Turn};
     use swisswheel_core::format::Format;
     use swisswheel_core::media::{MediaInfo, MediaPlan};
     use swisswheel_core::options::{Preset, Strength};
+    use swisswheel_core::video_edit::{AudioMode, Speed};
 
     /// Two seconds of 160×120 test pattern with a sine tone.
     pub(crate) const CLIP: &[&str] = &[
@@ -394,6 +416,103 @@ pub(crate) mod tests {
             "rot.mp4",
             &["-display_rotation:v:0", "90", "-i", plain, "-c", "copy"],
         )
+    }
+
+    /// `secs` of 320×240 test pattern at 10 fps with a 440 Hz tone at 44.1 kHz.
+    pub(crate) fn tone_clip(dir: &Path, name: &str, secs: u32) -> PathBuf {
+        let video = format!("testsrc=duration={secs}:size=320x240:rate=10");
+        let audio = format!("sine=frequency=440:sample_rate=44100:duration={secs}");
+        make(
+            dir,
+            name,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                &video,
+                "-f",
+                "lavfi",
+                "-i",
+                &audio,
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+                "-shortest",
+            ],
+        )
+    }
+
+    /// Two seconds of 64×64 at 10 fps: red for the first second, blue for the last.
+    pub(crate) fn color_steps(dir: &Path, name: &str) -> PathBuf {
+        make(
+            dir,
+            name,
+            &[
+                "-f",
+                "lavfi",
+                "-i",
+                "color=red:s=64x64:r=10:d=1",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=blue:s=64x64:r=10:d=1",
+                "-filter_complex",
+                "[0:v][1:v]concat=n=2:v=1:a=0",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ],
+        )
+    }
+
+    /// Probes `input`, plans `plan` on it and runs it into `out`.
+    pub(crate) fn run_video_edit(input: &Path, plan: &VideoPlan, out: &Path) -> MediaPlan {
+        let tools = tools();
+        let media = prepare_video_edit(&tools, plan, input, &Quality::default()).unwrap();
+        run(&tools, &media, input, out, &|_| {}, &AtomicBool::new(false)).unwrap();
+        media
+    }
+
+    fn edit(kept: Vec<(f64, f64)>) -> VideoPlan {
+        VideoPlan {
+            kept,
+            frame: vec![],
+            speed: Speed::Normal,
+            audio: AudioMode::Keep,
+            reverse: false,
+        }
+    }
+
+    fn secs(path: &Path) -> f64 {
+        probe_out(path).duration_secs.unwrap()
+    }
+
+    fn near(actual: f64, expected: f64) {
+        assert!(
+            (actual - expected).abs() <= 0.15,
+            "{actual} s, expected {expected} s"
+        );
+    }
+
+    /// The first decoded pixel of `path` as RGB.
+    fn first_pixel(path: &Path) -> [u8; 3] {
+        let out = Command::new(tools().ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-i"])
+            .arg(path)
+            .args([
+                "-frames:v",
+                "1",
+                "-f",
+                "rawvideo",
+                "-pix_fmt",
+                "rgb24",
+                "pipe:1",
+            ])
+            .output()
+            .unwrap();
+        [out.stdout[0], out.stdout[1], out.stdout[2]]
     }
 
     pub(crate) fn probe_out(path: &Path) -> MediaInfo {
@@ -874,6 +993,186 @@ pub(crate) mod tests {
         .unwrap();
         let secs = probe_out(&out).duration_secs.unwrap();
         assert!((secs - 0.5).abs() < 0.15, "{secs}");
+    }
+
+    #[test]
+    fn removed_pieces_shorten_the_clip() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = tone_clip(dir.path(), "tone.mp4", 6);
+        let out = dir.path().join("o.mp4");
+        run_video_edit(&clip, &edit(vec![(0.0, 2.0), (4.0, 6.0)]), &out);
+        near(secs(&out), 4.0);
+        assert_eq!(probe_out(&out).audio.as_deref(), Some("aac"));
+    }
+
+    #[test]
+    fn crop_then_rotate_sizes() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = tone_clip(dir.path(), "tone.mp4", 1);
+        let mut plan = edit(vec![(0.0, 1.0)]);
+        plan.frame = vec![
+            EditOp::Crop(PixelRect {
+                x: 0,
+                y: 0,
+                w: 200,
+                h: 100,
+            }),
+            EditOp::Rotate(Turn::Cw),
+        ];
+        let out = dir.path().join("o.mp4");
+        run_video_edit(&clip, &plan, &out);
+        assert_eq!(dims(&out), (100, 200));
+    }
+
+    #[test]
+    fn odd_crop_encodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = tone_clip(dir.path(), "tone.mp4", 1);
+        let mut plan = edit(vec![(0.0, 1.0)]);
+        plan.frame = vec![EditOp::Crop(PixelRect {
+            x: 1,
+            y: 1,
+            w: 101,
+            h: 57,
+        })];
+        let out = dir.path().join("o.mp4");
+        run_video_edit(&clip, &plan, &out);
+        assert_eq!(dims(&out), (100, 56));
+    }
+
+    #[test]
+    fn double_speed_halves_duration() {
+        let dir = tempfile::tempdir().unwrap();
+        let four = tone_clip(dir.path(), "four.mp4", 4);
+        let mut plan = edit(vec![(0.0, 4.0)]);
+        plan.speed = Speed::Double;
+        let fast = dir.path().join("fast.mp4");
+        run_video_edit(&four, &plan, &fast);
+        near(secs(&fast), 2.0);
+        let two = tone_clip(dir.path(), "two.mp4", 2);
+        let mut plan = edit(vec![(0.0, 2.0)]);
+        plan.speed = Speed::Half;
+        let slow = dir.path().join("slow.mp4");
+        run_video_edit(&two, &plan, &slow);
+        near(secs(&slow), 4.0);
+    }
+
+    #[test]
+    fn mute_drops_audio_and_normalize_keeps_rate() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = tone_clip(dir.path(), "tone.mp4", 2);
+        let mut plan = edit(vec![(0.0, 2.0)]);
+        plan.audio = AudioMode::Mute;
+        let muted = dir.path().join("muted.mp4");
+        run_video_edit(&clip, &plan, &muted);
+        assert_eq!(probe_out(&muted).audio, None);
+        plan.audio = AudioMode::Normalize;
+        let loud = dir.path().join("loud.mp4");
+        run_video_edit(&clip, &plan, &loud);
+        assert_eq!(probe_out(&loud).sample_rate, Some(44100));
+    }
+
+    #[test]
+    fn webm_normalize_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let tone = tone_clip(dir.path(), "tone.mp4", 2);
+        let tone = tone.to_str().unwrap();
+        let webm = make(
+            dir.path(),
+            "tone.webm",
+            &[
+                "-i",
+                tone,
+                "-c:v",
+                "libvpx-vp9",
+                "-deadline",
+                "realtime",
+                "-c:a",
+                "libopus",
+            ],
+        );
+        let mut plan = edit(vec![(0.0, 2.0)]);
+        plan.audio = AudioMode::Normalize;
+        let out = dir.path().join("o.webm");
+        run_video_edit(&webm, &plan, &out);
+        assert_eq!(probe_out(&out).sample_rate, Some(48000));
+    }
+
+    #[test]
+    fn reverse_starts_with_the_last_frame() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = color_steps(dir.path(), "steps.mp4");
+        assert!(first_pixel(&clip)[0] > 200, "the fixture starts red");
+        let mut plan = edit(vec![(0.0, 2.0)]);
+        plan.reverse = true;
+        let out = dir.path().join("o.mp4");
+        run_video_edit(&clip, &plan, &out);
+        let [r, _, b] = first_pixel(&out);
+        assert!(b > r, "expected blue first, got r={r} b={b}");
+    }
+
+    #[test]
+    fn rotated_input_crops_in_display_space() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = rotated_clip(dir.path()); // shown 240×320
+        let mut plan = edit(vec![(0.0, 1.0)]);
+        plan.frame = vec![EditOp::Crop(PixelRect {
+            x: 0,
+            y: 0,
+            w: 240,
+            h: 100,
+        })];
+        let out = dir.path().join("o.mp4");
+        run_video_edit(&clip, &plan, &out);
+        let info = probe_out(&out);
+        assert_eq!((info.width, info.height), (Some(240), Some(100)));
+    }
+
+    #[test]
+    fn frame_png_has_the_edited_size() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = tone_clip(dir.path(), "tone.mp4", 1);
+        let plan = media::video_frame_plan(0.5, &[EditOp::Rotate(Turn::Cw)]);
+        let out = dir.path().join("frame.png");
+        run(
+            &tools(),
+            &plan,
+            &clip,
+            &out,
+            &|_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        assert_eq!(::image::image_dimensions(&out).unwrap(), (240, 320));
+    }
+
+    #[test]
+    fn every_container_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let tone = tone_clip(dir.path(), "tone.mp4", 1);
+        let tone = tone.to_str().unwrap();
+        for (name, codecs) in [
+            ("t.webm", ["-c:v", "libvpx-vp9", "-c:a", "libopus"]),
+            ("t.avi", ["-c:v", "mpeg4", "-c:a", "libmp3lame"]),
+            ("t.wmv", ["-c:v", "wmv2", "-c:a", "wmav2"]),
+            ("t.mov", ["-c:v", "libx264", "-c:a", "aac"]),
+            ("t.mkv", ["-c:v", "libx264", "-c:a", "aac"]),
+        ] {
+            let mut args = vec!["-i", tone];
+            args.extend(codecs);
+            let input = make(dir.path(), name, &args);
+            let mut plan = edit(vec![(0.0, 1.0)]);
+            plan.speed = Speed::OneHalf;
+            let out = dir.path().join(format!("out-{name}"));
+            let media = run_video_edit(&input, &plan, &out);
+            let expected = if name.ends_with(".wmv") {
+                Format::Mp4
+            } else {
+                Format::from_path(&input).unwrap()
+            };
+            assert_eq!(media.output, expected, "{name}");
+            near(secs(&out), 1.0 / 1.5);
+        }
     }
 
     #[test]

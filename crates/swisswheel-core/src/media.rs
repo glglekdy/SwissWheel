@@ -351,6 +351,11 @@ pub fn video_edit_plan(
     }
     if plan.speed != Speed::Normal {
         video.push(format!("setpts=PTS/{factor}"));
+        // Back onto the source rate, or the encoder rounds the new timestamps
+        // onto the old frame grid and the clip comes out longer.
+        if let Some(fps) = info.fps.filter(|f| *f > 0.0) {
+            video.push(format!("fps={fps}"));
+        }
     }
     video.push(EVEN_SIZE.into());
     graph.push(format!("{v_in}{}[vout]", video.join(",")));
@@ -1012,6 +1017,27 @@ mod tests {
         let loud = video_edit_plan(Format::Mov, &vinfo(true), &plan, &Quality::default()).unwrap();
         assert!(graph(&loud).contains("loudnorm=I=-16:TP=-1.5:LRA=11"));
         assert!(has(&loud.attempts[0], &["-ar", "44100"]));
+    }
+
+    #[test]
+    fn speed_keeps_the_source_frame_rate() {
+        // Without `fps` the encoder rounds the new timestamps onto the old
+        // frame grid and the clip comes out longer than asked.
+        let mut plan = vplan(vec![(0.0, 10.0)]);
+        plan.speed = Speed::Double;
+        let g =
+            graph(&video_edit_plan(Format::Mp4, &vinfo(true), &plan, &Quality::default()).unwrap());
+        assert!(g.contains("setpts=PTS/2,fps=30,"), "{g}");
+        let unknown = MediaInfo {
+            fps: None,
+            ..vinfo(true)
+        };
+        let g = graph(&video_edit_plan(Format::Mp4, &unknown, &plan, &Quality::default()).unwrap());
+        assert!(g.contains("setpts=PTS/2,scale"), "{g}");
+        plan.speed = Speed::Normal;
+        let g =
+            graph(&video_edit_plan(Format::Mp4, &vinfo(true), &plan, &Quality::default()).unwrap());
+        assert!(!g.contains("fps="), "{g}");
     }
 
     #[test]
