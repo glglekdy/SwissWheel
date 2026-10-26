@@ -108,6 +108,8 @@ pub struct DragTracker {
     menu: bool,
     /// Off when the menu window couldn't be created: the open key passes.
     menu_enabled: bool,
+    /// The image editor is open: the menu stays shut.
+    editor_open: bool,
     /// The settings panel waits for a key: presses go to it.
     capture: bool,
 }
@@ -125,6 +127,7 @@ impl DragTracker {
             menu_press: [false; 256],
             menu: false,
             menu_enabled: true,
+            editor_open: false,
             capture: false,
         }
     }
@@ -140,6 +143,10 @@ impl DragTracker {
 
     pub fn set_menu_enabled(&mut self, enabled: bool) {
         self.menu_enabled = enabled;
+    }
+
+    pub fn set_editor_open(&mut self, open: bool) {
+        self.editor_open = open;
     }
 
     /// Hand key presses, whatever they are, to the open menu as
@@ -313,6 +320,7 @@ impl DragTracker {
     fn menu_may_open(&self) -> bool {
         !self.modifier_held()
             && self.menu_enabled
+            && !self.editor_open
             && self.wheel == Wheel::Closed
             && self.button != Button::Dragging
     }
@@ -705,6 +713,21 @@ mod tests {
         let mut t = tracker();
         t.set_menu_enabled(false);
         assert_eq!(t.on_event(DragEvent::DesktopKeyDown(SPACE)), pass());
+    }
+
+    #[test]
+    fn editor_open_blocks_the_menu() {
+        let mut t = tracker();
+        t.set_editor_open(true);
+        assert_eq!(t.on_event(DragEvent::DesktopKeyDown(SPACE)), pass());
+        assert_eq!(t.on_event(shortcut()), pass());
+        assert!(!t.menu_open());
+        t.on_event(DragEvent::KeyUp(SPACE)); // a fresh press, not a repeat
+        t.set_editor_open(false);
+        assert_eq!(
+            t.on_event(DragEvent::DesktopKeyDown(SPACE)).command,
+            Some(DragCommand::OpenMenu)
+        );
     }
 
     #[test]

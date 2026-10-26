@@ -2,6 +2,7 @@
 
 pub mod ffmpeg;
 pub mod image;
+pub mod metadata;
 
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {

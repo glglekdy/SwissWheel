@@ -4,8 +4,10 @@
 mod logging;
 mod app;
 mod autostart;
+mod bundle;
 mod config_file;
 mod dnd;
+mod editor;
 mod engines;
 mod essentials_status;
 mod ffmpeg_install;

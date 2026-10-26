@@ -17,9 +17,11 @@ pub fn restarted_pid<I: IntoIterator<Item = String>>(args: I) -> Option<u32> {
 
 /// The restart tile was pressed. `background` is an update or FFmpeg
 /// download thread, or an update waiting to be swapped in.
-pub fn on_tile(active_jobs: usize, background: bool) -> TileDecision {
+pub fn on_tile(active_jobs: usize, background: bool, editor_open: bool) -> TileDecision {
     if active_jobs > 0 {
         TileDecision::Refuse(BUSY)
+    } else if editor_open {
+        TileDecision::Refuse(crate::editor::text::CLOSE_FIRST)
     } else if background {
         TileDecision::Refuse(text::BACKGROUND)
     } else {
@@ -50,9 +52,34 @@ mod tests {
 
     #[test]
     fn tile_refuses_while_anything_runs() {
-        assert_eq!(on_tile(1, false), TileDecision::Refuse(update::text::BUSY));
-        assert_eq!(on_tile(1, true), TileDecision::Refuse(update::text::BUSY));
-        assert_eq!(on_tile(0, true), TileDecision::Refuse(text::BACKGROUND));
-        assert_eq!(on_tile(0, false), TileDecision::Start);
+        assert_eq!(
+            on_tile(1, false, false),
+            TileDecision::Refuse(update::text::BUSY)
+        );
+        assert_eq!(
+            on_tile(1, true, false),
+            TileDecision::Refuse(update::text::BUSY)
+        );
+        assert_eq!(
+            on_tile(0, true, false),
+            TileDecision::Refuse(text::BACKGROUND)
+        );
+        assert_eq!(on_tile(0, false, false), TileDecision::Start);
+    }
+
+    #[test]
+    fn tile_refuses_while_editor_open() {
+        assert_eq!(
+            on_tile(0, false, true),
+            TileDecision::Refuse(crate::editor::text::CLOSE_FIRST)
+        );
+        assert_eq!(
+            on_tile(0, true, true),
+            TileDecision::Refuse(crate::editor::text::CLOSE_FIRST)
+        );
+        assert_eq!(
+            on_tile(1, false, true),
+            TileDecision::Refuse(update::text::BUSY)
+        );
     }
 }

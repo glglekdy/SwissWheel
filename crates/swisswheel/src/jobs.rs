@@ -7,14 +7,17 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread::JoinHandle;
 
-use swisswheel_core::catalog::Operation;
+use swisswheel_core::catalog::{Operation, Tool};
 use swisswheel_core::config::Quality;
+use swisswheel_core::editor::{EditOp, EditPlan, SaveKind};
 use swisswheel_core::format::Format;
 use swisswheel_core::media;
-use swisswheel_core::naming::{suffix_for, temp_path};
-use swisswheel_core::options::Preset;
+use swisswheel_core::naming::{frame_suffix, suffix_for, temp_path};
+use swisswheel_core::options::{Preset, Transfer};
 use swisswheel_core::summary::progress_title;
+use swisswheel_core::video_edit::VideoPlan;
 
+use crate::bundle::Bundle;
 use crate::engines::ffmpeg::{self, Tools};
 use crate::engines::{self, EngineError};
 use crate::fsutil::{Reservations, finalize};
@@ -25,6 +28,18 @@ pub struct Job {
     /// The option chosen in the side panel; `None` means the defaults.
     pub preset: Option<Preset>,
     pub inputs: Vec<PathBuf>,
+    /// An editor's save, which never goes to the converters.
+    pub edits: Option<Edits>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Edits {
+    /// The image editor's save: output keeps the input's format and is named after the plan.
+    Image(EditPlan),
+    /// The video editor's save: `name (edited).ext`, WMV becoming MP4.
+    Video(VideoPlan),
+    /// One frame of a video at `t` seconds, with the frame edits, as `name (frame …).png`.
+    Frame { t: f64, ops: Vec<EditOp> },
 }
 
 #[derive(Debug, Clone)]
@@ -60,11 +75,14 @@ struct Shared {
 struct JobState {
     op: Operation,
     preset: Option<Preset>,
+    edits: Option<Edits>,
     results: Mutex<Vec<Option<Result<PathBuf, String>>>>,
     /// Per file, for `Runner::progress` and `Runner::rows`.
     files: Mutex<Vec<FileState>>,
     names: Vec<String>,
     remaining: AtomicUsize,
+    /// The new folder of a "폴더로 묶기" job; its files go there, not through an engine.
+    bundle: Option<Bundle>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -185,14 +203,18 @@ impl Runner {
         let state = Arc::new(JobState {
             op: job.op,
             preset: job.preset,
+            edits: job.edits,
             results: Mutex::new(vec![None; n]),
             files: Mutex::new(vec![FileState::Waiting; n]),
             names: job.inputs.iter().map(|p| file_name(p)).collect(),
             remaining: AtomicUsize::new(n),
+            bundle: (job.op == Operation::Tool(Tool::Bundle)).then(|| Bundle::new(&job.inputs[0])),
         });
         self.shared.active.lock().unwrap().push(Arc::clone(&state));
+        let video_edit = matches!(state.edits, Some(Edits::Video(_) | Edits::Frame { .. }));
         for (index, input) in job.inputs.into_iter().enumerate() {
-            let is_media = Format::from_path(&input).is_some_and(|f| media::supports(&job.op, f));
+            let is_media = video_edit
+                || Format::from_path(&input).is_some_and(|f| media::supports(&job.op, f));
             let tx = if is_media {
                 &self.media_tx
             } else {
@@ -288,6 +310,9 @@ fn worker(rx: &Mutex<Receiver<Work>>, shared: &Shared) {
         work.job.results.lock().unwrap()[work.index] = Some(result);
         work.job.files.lock().unwrap()[work.index] = FileState::Done;
         if work.job.remaining.fetch_sub(1, Ordering::AcqRel) == 1 {
+            if let Some(bundle) = &work.job.bundle {
+                bundle.finish();
+            }
             shared
                 .active
                 .lock()
@@ -322,8 +347,10 @@ fn file_name(path: &Path) -> String {
 
 /// Which engine converts a file, decided before its output name is reserved
 /// (for media the output format depends on what ffprobe finds).
-enum Engine {
+enum Engine<'a> {
     Image,
+    /// The editor's save: pixel edits, or a lossless info strip.
+    Edit(&'a EditPlan),
     Media(Tools, media::MediaPlan),
 }
 
@@ -331,6 +358,13 @@ enum Engine {
 /// place without replacing anything. The temp file never survives a failure.
 fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     let (op, preset, input) = (&work.job.op, work.job.preset, work.input.as_path());
+    if let Some(bundle) = &work.job.bundle {
+        let transfer = match preset {
+            Some(Preset::Bundle(transfer)) => transfer,
+            _ => Transfer::Move,
+        };
+        return bundle.place(work.index, input, transfer);
+    }
     let quality = shared
         .quality
         .read()
@@ -343,22 +377,43 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     };
     let format =
         Format::from_path(input).ok_or_else(|| fail(EngineError::Unsupported(name.clone())))?;
-    let (engine, extension) = if engines::image::supports(op, format) {
-        (
+    let tools = || {
+        shared
+            .tools()
+            .ok_or_else(|| fail(EngineError::MissingFfmpeg))
+    };
+    // Checked first: an edit job never goes to the converters.
+    let (engine, extension) = match &work.job.edits {
+        Some(Edits::Image(plan)) => (Engine::Edit(plan), format.extension()),
+        Some(Edits::Video(plan)) => {
+            let tools = tools()?;
+            let plan = ffmpeg::prepare_video_edit(&tools, plan, input, &quality).map_err(fail)?;
+            let extension = plan.output.extension();
+            (Engine::Media(tools, plan), extension)
+        }
+        Some(Edits::Frame { t, ops }) => {
+            let plan = media::video_frame_plan(*t, ops);
+            let extension = plan.output.extension();
+            (Engine::Media(tools()?, plan), extension)
+        }
+        None if engines::image::supports(op, format) => (
             Engine::Image,
             engines::image::output_format(op, format).extension(),
-        )
-    } else if media::supports(op, format) {
-        let tools = shared
-            .tools()
-            .ok_or_else(|| fail(EngineError::MissingFfmpeg))?;
-        let plan = ffmpeg::prepare(&tools, op, preset, input, &quality).map_err(fail)?;
-        let extension = plan.output.extension();
-        (Engine::Media(tools, plan), extension)
-    } else {
-        return Err(fail(EngineError::Unsupported(format!("{op:?} on {name}"))));
+        ),
+        None if media::supports(op, format) => {
+            let tools = tools()?;
+            let plan = ffmpeg::prepare(&tools, op, preset, input, &quality).map_err(fail)?;
+            let extension = plan.output.extension();
+            (Engine::Media(tools, plan), extension)
+        }
+        None => return Err(fail(EngineError::Unsupported(format!("{op:?} on {name}")))),
     };
-    let suffix = suffix_for(op, preset);
+    let suffix = match &work.job.edits {
+        Some(Edits::Image(plan)) => Some(plan.kind.suffix().to_string()),
+        Some(Edits::Video(_)) => Some("edited".to_string()),
+        Some(Edits::Frame { t, .. }) => Some(frame_suffix(*t)),
+        None => suffix_for(op, preset),
+    };
 
     let mut target = shared
         .reservations
@@ -366,6 +421,10 @@ fn process(work: &Work, shared: &Shared) -> Result<PathBuf, String> {
     let temp = temp_path(&target);
     let result = match &engine {
         Engine::Image => engines::image::run(op, preset, input, &temp, &quality),
+        Engine::Edit(plan) => match plan.kind {
+            SaveKind::Edited => engines::image::apply_edits(&plan.ops, input, &temp),
+            SaveKind::StripOnly => engines::metadata::strip(input, &temp),
+        },
         Engine::Media(tools, plan) => {
             let progress =
                 |p: f32| work.job.files.lock().unwrap()[work.index] = FileState::Running(p);
@@ -408,7 +467,7 @@ mod tests {
     use swisswheel_core::catalog::{Operation, Tool};
     use swisswheel_core::config::Quality;
     use swisswheel_core::format::Format;
-    use swisswheel_core::options::Preset;
+    use swisswheel_core::options::{Preset, Transfer};
 
     /// A 2+2-worker runner whose reports arrive on the returned channel.
     fn runner() -> (Runner, mpsc::Receiver<JobReport>) {
@@ -440,6 +499,7 @@ mod tests {
             op,
             preset: None,
             inputs,
+            edits: None,
         }
     }
 
@@ -639,6 +699,88 @@ mod tests {
     }
 
     #[test]
+    fn edit_jobs_name_their_outputs() {
+        use swisswheel_core::editor::{EditOp, Turn};
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("사진.png");
+        rgba_png(&src, 8, 4, 255);
+        let (runner, rx) = runner();
+        let edited = EditPlan {
+            ops: vec![EditOp::Rotate(Turn::Cw)],
+            kind: SaveKind::Edited,
+        };
+        runner.submit(Job {
+            op: Operation::Tool(Tool::Edit),
+            preset: None,
+            inputs: vec![src.clone()],
+            edits: Some(Edits::Image(edited)),
+        });
+        let report = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(report.outputs, vec![dir.path().join("사진 (edited).png")]);
+        assert_eq!(
+            ::image::image_dimensions(&report.outputs[0]).unwrap(),
+            (4, 8)
+        );
+        let strip = EditPlan {
+            ops: vec![EditOp::StripInfo(true)],
+            kind: SaveKind::StripOnly,
+        };
+        runner.submit(Job {
+            op: Operation::Tool(Tool::Edit),
+            preset: None,
+            inputs: vec![src.clone()],
+            edits: Some(Edits::Image(strip)),
+        });
+        let report = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+        assert_eq!(report.outputs, vec![dir.path().join("사진 (no info).png")]);
+        assert!(src.exists());
+    }
+
+    #[test]
+    fn video_edit_and_frame_jobs_name_their_outputs() {
+        use swisswheel_core::video_edit::{AudioMode, Speed, VideoPlan};
+        let dir = tempfile::tempdir().unwrap();
+        let clip = pattern(dir.path(), "클립.mp4", "320x240", 2);
+        let plan = VideoPlan {
+            kept: vec![(0.0, 1.0)],
+            frame: vec![],
+            speed: Speed::Normal,
+            audio: AudioMode::Keep,
+            reverse: false,
+        };
+        let reports = run_jobs(vec![
+            Job {
+                op: Operation::Tool(Tool::Edit),
+                preset: None,
+                inputs: vec![clip.clone()],
+                edits: Some(Edits::Video(plan)),
+            },
+            Job {
+                op: Operation::Tool(Tool::Edit),
+                preset: None,
+                inputs: vec![clip.clone()],
+                edits: Some(Edits::Frame {
+                    t: 1.0,
+                    ops: vec![],
+                }),
+            },
+        ]);
+        for r in &reports {
+            assert!(r.failures.is_empty(), "{:?}", r.failures);
+        }
+        let mut outs: Vec<_> = reports.iter().flat_map(|r| r.outputs.clone()).collect();
+        outs.sort();
+        assert_eq!(
+            outs,
+            vec![
+                dir.path().join("클립 (edited).mp4"),
+                dir.path().join("클립 (frame 0m01.00s).png")
+            ]
+        );
+        assert!(clip.exists());
+    }
+
+    #[test]
     fn option_suffixes_reach_file_names() {
         let dir = tempfile::tempdir().unwrap();
         let png = dir.path().join("a.png");
@@ -649,11 +791,13 @@ mod tests {
                 op: Operation::Tool(Tool::Shrink),
                 preset: Some(Preset::Scale(25)),
                 inputs: vec![png],
+                edits: None,
             },
             Job {
                 op: Operation::Convert(Format::Mkv),
                 preset: Some(Preset::Resolution(Some(480))),
                 inputs: vec![clip],
+                edits: None,
             },
         ]);
         let mut outs: Vec<_> = reports.into_iter().flat_map(|r| r.outputs).collect();
@@ -752,6 +896,128 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(5));
         assert!(!dir.path().join("clip.webm").exists());
         assert!(temp_files(dir.path()).is_empty());
+    }
+
+    fn bundle(transfer: Option<Transfer>, inputs: Vec<PathBuf>) -> Job {
+        Job {
+            op: Operation::Tool(Tool::Bundle),
+            preset: transfer.map(Preset::Bundle),
+            inputs,
+            edits: None,
+        }
+    }
+
+    #[test]
+    fn bundle_moves_files_and_folders_into_a_new_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b, album) = (
+            dir.path().join("a.png"),
+            dir.path().join("메모.txt"),
+            dir.path().join("사진"),
+        );
+        std::fs::write(&a, "a").unwrap();
+        std::fs::write(&b, "b").unwrap();
+        std::fs::create_dir(&album).unwrap();
+        std::fs::write(album.join("1.jpg"), "1").unwrap();
+        // dropping on the tile itself moves
+        let r = &run_jobs(vec![bundle(
+            None,
+            vec![a.clone(), b.clone(), album.clone()],
+        )])[0];
+        let folder = dir.path().join("새 폴더");
+        assert_eq!(
+            r.outputs,
+            vec![
+                folder.join("a.png"),
+                folder.join("메모.txt"),
+                folder.join("사진")
+            ]
+        );
+        assert!(r.failures.is_empty());
+        assert!(!a.exists() && !b.exists() && !album.exists());
+        assert_eq!(
+            std::fs::read_to_string(folder.join("메모.txt")).unwrap(),
+            "b"
+        );
+        assert_eq!(
+            std::fs::read_to_string(folder.join("사진").join("1.jpg")).unwrap(),
+            "1"
+        );
+    }
+
+    #[test]
+    fn bundle_copies_into_the_next_free_folder_name() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir(dir.path().join("새 폴더")).unwrap();
+        let (a, album) = (dir.path().join("a.txt"), dir.path().join("앨범"));
+        std::fs::write(&a, "a").unwrap();
+        std::fs::create_dir_all(album.join("안쪽")).unwrap();
+        std::fs::write(album.join("안쪽").join("2.jpg"), "2").unwrap();
+        let r = &run_jobs(vec![bundle(
+            Some(Transfer::Copy),
+            vec![a.clone(), album.clone()],
+        )])[0];
+        let folder = dir.path().join("새 폴더 (1)");
+        assert_eq!(r.outputs, vec![folder.join("a.txt"), folder.join("앨범")]);
+        assert_eq!(std::fs::read_to_string(&a).unwrap(), "a");
+        assert_eq!(std::fs::read_to_string(folder.join("a.txt")).unwrap(), "a");
+        let copied = folder.join("앨범").join("안쪽").join("2.jpg");
+        assert_eq!(std::fs::read_to_string(copied).unwrap(), "2");
+        assert!(album.join("안쪽").join("2.jpg").exists());
+        assert!(temp_files(&folder).is_empty());
+    }
+
+    #[test]
+    fn bundle_numbers_same_names_from_different_folders() {
+        let dir = tempfile::tempdir().unwrap();
+        let (x, y) = (dir.path().join("x"), dir.path().join("y"));
+        std::fs::create_dir(&x).unwrap();
+        std::fs::create_dir(&y).unwrap();
+        std::fs::write(x.join("a.txt"), "x").unwrap();
+        std::fs::write(y.join("a.txt"), "y").unwrap();
+        for transfer in [Transfer::Copy, Transfer::Move] {
+            let r = &run_jobs(vec![bundle(
+                Some(transfer),
+                vec![x.join("a.txt"), y.join("a.txt")],
+            )])[0];
+            // the folder goes beside the first item
+            let folder = r.outputs[0].parent().unwrap().to_path_buf();
+            assert_eq!(folder.parent(), Some(x.as_path()), "{transfer:?}");
+            let mut names: Vec<_> = r.outputs.iter().map(|p| file_name(p)).collect();
+            names.sort();
+            assert_eq!(names, ["a (1).txt", "a.txt"], "{transfer:?}");
+            let mut contents: Vec<_> = r
+                .outputs
+                .iter()
+                .map(|p| std::fs::read_to_string(p).unwrap())
+                .collect();
+            contents.sort();
+            assert_eq!(contents, ["x", "y"], "{transfer:?}");
+        }
+    }
+
+    #[test]
+    fn bundle_failures_stay_put_and_an_empty_folder_is_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let good = dir.path().join("good.txt");
+        std::fs::write(&good, "g").unwrap();
+        let gone = dir.path().join("없는.txt");
+        let r = &run_jobs(vec![bundle(None, vec![gone.clone(), good])])[0];
+        assert_eq!(r.outputs, vec![dir.path().join("새 폴더").join("good.txt")]);
+        assert_eq!(r.failures, vec!["없는.txt: 옮길 수 없습니다".to_string()]);
+
+        let other = tempfile::tempdir().unwrap();
+        let missing = vec![other.path().join("1.txt"), other.path().join("2.txt")];
+        let r = &run_jobs(vec![bundle(Some(Transfer::Copy), missing)])[0];
+        assert!(r.outputs.is_empty());
+        assert_eq!(
+            r.failures,
+            vec![
+                "1.txt: 복사할 수 없습니다".to_string(),
+                "2.txt: 복사할 수 없습니다".to_string()
+            ]
+        );
+        assert!(!other.path().join("새 폴더").exists());
     }
 
     fn temp_files(dir: &Path) -> Vec<PathBuf> {

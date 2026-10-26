@@ -7,7 +7,7 @@ Offline file converter for Windows. Drag a file in Explorer, press **Space**, an
 1. Run `swisswheel.exe`. The SwissWheel logo appears in the notification area (white on a dark taskbar, black on a light one; it may sit under the ^ overflow).
 2. Start dragging one or more files in Explorer or on the desktop.
 3. While dragging, press **Space**. Drop on an item to run it; drop on the center to cancel.
-4. The result is saved next to the original (`photo.png` → `photo.jpg`). Originals are never modified or overwritten; name clashes get a number (`photo (1).jpg`).
+4. The result is saved next to the original (`photo.png` → `photo.jpg`). Originals are never modified or overwritten (except by **폴더로 묶기** set to 이동, which moves them); name clashes get a number (`photo (1).jpg`).
 5. A card above the tray (bottom-right) reports the result. Click it to open the folder with the result selected; the click closes the card and doesn't take focus from the app you're typing in. Cards pause while the cursor is over them. In a full-screen app, a presentation, or while Windows is busy, cards wait and the newest three show when it ends (a key prompt posted meanwhile is dropped).
 
 Without a drag, click the desktop and press **Space** to open the menu bar at the top of the screen (or, in any window, tap the left **Ctrl** twice quickly; not over a full-screen game or video): **설정** (settings), **다운로드** (a panel to install, update, or remove the apps SwissWheel needs — FFmpeg for now, see below), **플러그인** (plugins), **업데이트** (update), **재시작** (restart SwissWheel; it waits while files are converting or an update or download runs). Move with **←/→**, open with **Enter**, close with **Esc** or **Space**. The settings panel has tabs — **단축키** (keys), **도구** (tools), **변환** (convert), **알림** (notices), **일반** (general): **←/→** on the tab line switches tabs (or click one), **↓** goes into its settings. There **↑/↓** picks a setting and **←/→** changes it (or click ◀ ▶, or scroll); changes apply at once and are saved, no restart needed. **일반** holds **업데이트 자동 확인** (see Updating) and **강조색** (accent color: 블루, 퍼플, 핑크, 레드, 오렌지, 그린, 그래파이트); **알림** holds the progress card, the tray ring, and **방해 금지** (do not disturb), which hides only the job done/failed cards — menu results and key prompts still show, and the tray tooltip keeps showing the last job ("마지막 작업: …").
@@ -23,13 +23,62 @@ Quit from the tray icon's right-click menu. Settings can be changed in the menu'
 - Video conversion between MP4, MKV, WebM, MOV, and AVI, plus video → GIF and video → MP3; animated GIF → MP4/WebM. Compatible streams are copied instead of re-encoded, so MP4 ↔ MKV is near-instant.
 - Audio conversion between MP3, M4A, WAV, FLAC, OGG, and Opus (WMA and AIFF as input)
 - Video tools: compress (H.264), extract audio (copied when possible), mute
+- Folder tool: drag two or more files or folders of any kind and drop on **폴더로 묶기** in the tools wheel to put them into a new folder (`새 폴더`, numbered if taken) beside the first one. Its panel picks **이동** (move; the default) or **복사** (copy; the originals stay). Click the result card to open Explorer with the new folder selected, ready for F2. An item that can't be moved (open in another app, say) stays where it was; the card says how many failed.
 - Options: some items take options (GIF frame rate and size, video resolution, compression strength, shrink ratio, JPG/WebP quality). Rest on such an item for a moment and a panel opens beside the wheel; drop on one of its rows, or on the item itself for the default.
 - Progress: while jobs run, a small card above the tray lists each file with a progress bar, and a ring around the tray icon fills up. When a job finishes, its card turns into the result card. Either can be turned off in the settings panel or `config.toml` (`[progress] window`, `tray_ring`). Quitting cancels running video work and cleans up.
 - Desktop menu and settings panel: wheel keys (press to bind), the shrink ratio and video compression strength used when you drop on the tool itself, start with Windows, JPG/WebP quality, MP3 bitrate, and the progress displays, accent color, and do not disturb, all applied live. The UI uses a liquid-glass look (transparency can be turned off in Windows) with the embedded Pretendard font.
+- Image editor: drop one still image on **✎편집** (last tile of the tools wheel) and a floating panel opens mid-screen with the rest dimmed. Crop (free or fixed ratio), rotate, flip, grayscale, and strip location/camera info, with undo/redo; saves `photo (edited).jpg` next to the original. See "Image editor" below.
+- Video editor: drop one video on the same **✎편집** tile for a panel that plays it with sound. Cut out any number of parts, crop an area, rotate, flip, change speed, mute or even out the sound, reverse a short clip, and save a still as PNG; saves `clip (edited).mp4` next to the original. See "Video editor" below.
 
 Video and audio need FFmpeg: open **다운로드** in the desktop menu. Its panel shows the FFmpeg in use and checks for a newer one; **설치** fetches the latest essentials build from [GyanD/codexffmpeg](https://github.com/GyanD/codexffmpeg/releases) and sets it up (checked against GitHub's SHA-256; it goes in an `ffmpeg` folder next to `swisswheel.exe`, or `%LOCALAPPDATA%\SwissWheel\ffmpeg` when that folder can't be written), **업데이트** replaces it with a newer release, and **제거** deletes the copy SwissWheel put there. An FFmpeg you installed yourself on `PATH` is shown but never changed; **전용 설치** gives SwissWheel its own copy, which it then prefers. You can also put `ffmpeg.exe` and `ffprobe.exe` in either folder yourself, or have them on `PATH`.
 
 Shown but not yet implemented (they say "다음 버전에서 지원 예정입니다"): the actions wheel (share, copy, cut, copy path, terminal), and the menu's plugin tile.
+
+## Image editor
+
+1. Drag one still image (JPG, PNG, WebP, BMP, TIFF, GIF, ICO; not an animated GIF) and press **Space**. **✎편집** is the last tile of the tools wheel; it doesn't show for several files, folders, or audio (one video opens the video editor below).
+2. Drop on it. The panel opens centered on the monitor under the cursor and takes keyboard focus; clicking outside doesn't close it. A big photo shows **불러오는 중** while it loads.
+3. Edit with the buttons or keys, watching the preview:
+
+   | Key | Does |
+   |---|---|
+   | **C** | Crop mode on/off. Drag a handle to resize, drag inside to move, pick **자유 / 원본 / 1:1 / 4:3 / 3:4 / 16:9 / 9:16**. **Enter** or **C** applies, **Esc** cancels. |
+   | **R** / **Shift+R** | Rotate 90° clockwise / counterclockwise |
+   | **H** / **V** | Flip horizontally / vertically |
+   | **G** | Grayscale on/off |
+   | **I** | Strip location and camera info on/off (JPG, PNG, WebP) |
+   | **Ctrl+Z** / **Ctrl+Y** (or **Ctrl+Shift+Z**) | Undo / redo |
+   | **Enter** | Save |
+   | **Esc** (or **Alt+F4**) | Cancel; with edits, press **Esc** again within 3 seconds to discard them |
+
+4. Saving closes the panel and runs like any other job: the result is `photo (edited).jpg` next to the original (same format; JPG quality 95, WebP 92, other formats lossless). With only **I** on, the file is copied without re-compressing and without its info, as `photo (no info).jpg` (a JPG keeps its orientation and color profile); any other edit re-saves the picture and drops the info too. Phone portrait photos stay upright.
+
+Only one panel can be open at a time. While it is open, double-tapping Ctrl does nothing, and **재시작** and **업데이트** refuse with "편집기를 닫은 뒤 다시 시도하세요". An update that finishes downloading in the background while the panel is open waits to install until you close it. Quitting SwissWheel discards unsaved edits.
+
+## Video editor
+
+1. Drag one video (MP4, MKV, WebM, MOV, AVI, WMV) and press **Space**; drop on **✎편집**, the last tile of the tools wheel. It needs FFmpeg: without it, a card says "FFmpeg를 찾을 수 없습니다" and nothing opens.
+2. The panel looks like the image editor's, with a timeline row under the picture. It plays with sound through Windows; a file Windows can't play (an unusual codec) opens anyway, showing single frames from FFmpeg instead ("재생할 수 없는 형식이라 장면만 넘겨봅니다").
+3. Edit with the buttons or keys:
+
+   | Key | Does |
+   |---|---|
+   | **Space** | Play / pause; at the end, starts over from the first kept part |
+   | **←** / **→** | One frame back / forward (hold to repeat) |
+   | **Shift+←** / **Shift+→** | One second back / forward |
+   | **Home** / **End** | Start / end |
+   | **S** | Split at the playhead |
+   | **D** | Remove the part under the playhead, or restore a removed one (the last kept part can't go) |
+   | **C** | Area crop, as in the image editor (sizes come out even) |
+   | **R** / **Shift+R**, **H**, **V** | Rotate, flip |
+   | **[** / **]** | Slower / faster: 0.5×, 1×, 1.5×, 2× |
+   | **M** | Sound: as is → muted → evened out (applied when saving) |
+   | **B** | Reverse on/off; only for short results (about 10 seconds at 1080p) |
+   | **F** | Save the frame on screen, with the crop, rotation and flips, as `clip (frame 0m12.40s).png`; the panel stays open |
+   | **Ctrl+Z** / **Ctrl+Y**, **Enter**, **Esc** | Undo / redo, save, cancel (as in the image editor) |
+
+   Click or drag on the timeline to move; removed parts are hatched and skipped while playing.
+4. Saving closes the panel and re-encodes the kept parts exactly where you cut them: `clip (edited).mp4` next to the original, in the same container with the same codecs as a conversion (H.264/AAC, VP9/Opus for WebM, MPEG-4/MP3 for AVI). A WMV comes out as MP4. Phone portrait videos stay upright.
 
 ## Updates
 

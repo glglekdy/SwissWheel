@@ -19,6 +19,8 @@ pub fn glyph(op: &Operation) -> char {
             Tool::CompressImage | Tool::CompressVideo => '\u{F012}', // ZipFolder
             Tool::ExtractAudio => '\u{E767}', // Volume
             Tool::Mute => '\u{E74F}',   // Mute
+            Tool::Bundle => '\u{E8F4}', // NewFolder
+            Tool::Edit => '\u{E70F}',   // Edit
         },
         Operation::Action(a) => match a {
             Action::Share => '\u{E72D}',
@@ -57,12 +59,14 @@ mod tests {
         Format::Wma,
         Format::Aiff,
     ];
-    const TOOLS: [Tool; 5] = [
+    const TOOLS: [Tool; 7] = [
         Tool::Shrink,
         Tool::CompressImage,
         Tool::CompressVideo,
         Tool::ExtractAudio,
         Tool::Mute,
+        Tool::Bundle,
+        Tool::Edit,
     ];
     const ACTIONS: [Action; 5] = [
         Action::Share,
@@ -117,6 +121,9 @@ mod tests {
         assert_eq!(tool(Tool::CompressImage), tool(Tool::CompressVideo));
         assert_ne!(tool(Tool::ExtractAudio), tool(Tool::Mute));
         assert_ne!(tool(Tool::Shrink), tool(Tool::CompressImage));
+        // a new folder, not the zip folder of compressing
+        assert_ne!(tool(Tool::Bundle), tool(Tool::CompressImage));
+        assert_eq!(tool(Tool::Edit), '\u{E70F}');
         let mut actions: Vec<char> = ACTIONS
             .iter()
             .map(|&a| glyph(&Operation::Action(a)))

@@ -3,8 +3,12 @@
 pub mod appearance;
 pub mod catalog;
 pub mod config;
+pub mod crop;
 pub mod double_tap;
 pub mod drag;
+pub mod editor;
+pub mod editor_control;
+pub mod editor_geometry;
 pub mod essentials;
 pub mod ffmpeg_release;
 pub mod format;
@@ -21,3 +25,5 @@ pub mod settings;
 pub mod summary;
 pub mod update;
 pub mod update_notice;
+pub mod video_control;
+pub mod video_edit;
