@@ -323,8 +323,8 @@ const E_FAIL_HR: windows::core::HRESULT = windows::Win32::Foundation::E_FAIL;
 mod tests {
     use super::*;
     use std::cell::RefCell;
-    use windows::Win32::Foundation::LRESULT;
     use std::time::{Duration, Instant};
+    use windows::Win32::Foundation::LRESULT;
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::*;

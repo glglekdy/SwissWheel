@@ -2126,23 +2126,21 @@ impl AppState {
         hook::set_editor_open(editor::is_open());
     }
 
-    /// The panel closed: a save becomes an ordinary job.
+    /// The panel closed (or, for a frame, asks): a save becomes an ordinary job.
     fn on_editor_events(&mut self) {
         for event in editor::take_events() {
             match event {
                 EditorEvent::Saved(path, plan) => {
                     log_info!("작업 시작: 편집 · {}", path.display());
-                    let Some(runner) = &self.runner else {
-                        continue;
-                    };
-                    runner.submit(Job {
-                        op: Operation::Tool(Tool::Edit),
-                        preset: None,
-                        inputs: vec![path],
-                        edits: Some(Edits::Image(plan)),
-                    });
-                    self.active_jobs += 1;
-                    self.update_busy();
+                    self.submit_edit(path, Edits::Image(plan));
+                }
+                EditorEvent::SavedVideo(path, plan) => {
+                    log_info!("작업 시작: 영상 편집 · {}", path.display());
+                    self.submit_edit(path, Edits::Video(plan));
+                }
+                EditorEvent::SaveFrame(path, t, ops) => {
+                    log_info!("작업 시작: 장면 저장 · {}", path.display());
+                    self.submit_edit(path, Edits::Frame { t, ops });
                 }
                 EditorEvent::Failed(message) => {
                     self.notify(warning_notice(editor_text::TITLE, &message));
@@ -2154,6 +2152,20 @@ impl AppState {
         if !editor::is_open() {
             self.arm_swap(); // an update downloaded meanwhile (spec 2.9)
         }
+    }
+
+    fn submit_edit(&mut self, path: PathBuf, edits: Edits) {
+        let Some(runner) = &self.runner else {
+            return;
+        };
+        runner.submit(Job {
+            op: Operation::Tool(Tool::Edit),
+            preset: None,
+            inputs: vec![path],
+            edits: Some(edits),
+        });
+        self.active_jobs += 1;
+        self.update_busy();
     }
 }
 

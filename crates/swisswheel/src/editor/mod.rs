@@ -1,11 +1,14 @@
-//! The image editor panel (spec 2.2–2.8, 3.2): one panel at a time, owned
-//! by the UI thread. `editor_control` decides what every key and click
-//! does; this module keeps the panel's lifetime, decodes the image off the
-//! UI thread, and hands the app what the panel ended with.
+//! The editor panels (spec 2.2–2.8, 3.2; video editor spec): one panel at a
+//! time, image or video, owned by the UI thread. `editor_control` decides
+//! what every key and click of the image panel does; this module keeps that
+//! panel's lifetime, decodes the image off the UI thread, and hands the app
+//! what either panel ended with. The video panel lives in `video`.
 
 mod player;
 mod render;
 mod scrub;
+mod video;
+mod video_render;
 mod window;
 
 use std::cell::RefCell;
@@ -16,14 +19,16 @@ use std::time::Instant;
 use ::image::imageops::FilterType;
 use ::image::{DynamicImage, RgbaImage};
 use swisswheel_core::appearance::Accent;
-use swisswheel_core::editor::{EditPlan, text};
+use swisswheel_core::editor::{EditOp, EditPlan, text};
 use swisswheel_core::editor_control::{EditorState, Outcome};
 use swisswheel_core::editor_geometry::{EditorHit, EditorLayout, panel_layout};
 use swisswheel_core::format::Format;
+use swisswheel_core::video_edit::VideoPlan;
 use windows::Win32::Foundation::{E_FAIL, HWND, LPARAM, WPARAM};
 use windows::Win32::UI::WindowsAndMessaging::{KillTimer, PostMessageW, SetTimer, WM_APP};
 
 use crate::engines::EngineError;
+use crate::engines::ffmpeg::Tools;
 use crate::engines::image::{decode, dimensions};
 use crate::surface::Surface;
 use crate::theme::Theme;
@@ -39,6 +44,11 @@ const DISCARD_TIMER: usize = 1;
 #[derive(Debug)]
 pub enum EditorEvent {
     Saved(PathBuf, EditPlan),
+    /// The video panel closed with edits to save.
+    SavedVideo(PathBuf, VideoPlan),
+    /// The video panel asks to save the picture at `t` seconds with the
+    /// frame edits; it stays open.
+    SaveFrame(PathBuf, f64, Vec<EditOp>),
     Closed,
     Failed(String),
 }
@@ -102,20 +112,19 @@ pub fn open(path: PathBuf, owner: HWND, notify: u32, accent: Accent) -> windows:
         Ok(size) => size,
         Err(e) => {
             log_error!("편집기: 이미지를 읽을 수 없습니다: {e}");
-            EVENTS.with(|events| {
-                events
-                    .borrow_mut()
-                    .push(EditorEvent::Failed(e.user_message(&name)))
-            });
-            unsafe {
-                let _ = PostMessageW(Some(owner), notify, WPARAM(0), LPARAM(0));
-            }
+            announce(owner, notify, EditorEvent::Failed(e.user_message(&name)));
             return Ok(());
         }
     };
     let place = window::placement();
     let layout = panel_layout(place.work, place.scale, size);
-    let windows = Windows::create(owner, place.monitor, layout.window)?;
+    let windows = Windows::create(
+        owner,
+        place.monitor,
+        layout.window,
+        window::IMAGE_CLASS,
+        Some(window::panel_proc),
+    )?;
     let theme = Theme::current(windows.glass_supported, accent, 1.0);
     let strip_available = matches!(
         Format::from_path(&path),
@@ -163,9 +172,30 @@ pub fn open(path: PathBuf, owner: HWND, notify: u32, accent: Accent) -> windows:
     Ok(())
 }
 
+/// Opens the video panel for `path` (FFmpeg `tools` read and save it); as
+/// `open`, an unreadable file opens nothing and queues `Failed`.
+pub fn open_video(
+    path: PathBuf,
+    owner: HWND,
+    notify: u32,
+    accent: Accent,
+    tools: Tools,
+) -> windows::core::Result<()> {
+    if is_open() {
+        log_error!(
+            "편집기가 이미 열려 있어 {} 열기를 무시합니다",
+            path.display()
+        );
+        focus();
+        return Ok(());
+    }
+    video::open(path, owner, notify, accent, tools)
+}
+
+/// Whether either panel is open.
 pub fn is_open() -> bool {
     // Borrowed means a handler is running, so it is open.
-    EDITOR.with(|cell| cell.try_borrow().map_or(true, |e| e.is_some()))
+    EDITOR.with(|cell| cell.try_borrow().map_or(true, |e| e.is_some())) || video::is_open()
 }
 
 /// Brings the open panel to the front with keyboard focus.
@@ -173,13 +203,23 @@ pub fn focus() {
     if let Some(panel) = with_editor(|ed| ed.windows.panel) {
         window::raise(panel);
     }
+    video::focus();
 }
 
-/// Destroys the panel without an event (a cancelled or quitting app).
+/// Destroys the open panel without an event (a cancelled or quitting app).
 pub fn close() {
     if let Some(editor) = take_editor() {
         log_info!("편집기 닫기 (이벤트 없음)");
         drop(editor);
+    }
+    video::close();
+}
+
+/// Queues `event` for `take_events` and tells `owner` with `notify`.
+fn announce(owner: HWND, notify: u32, event: EditorEvent) {
+    EVENTS.with(|events| events.borrow_mut().push(event));
+    unsafe {
+        let _ = PostMessageW(Some(owner), notify, WPARAM(0), LPARAM(0));
     }
 }
 
@@ -228,10 +268,7 @@ fn finish(make: impl FnOnce(PathBuf) -> EditorEvent) {
     let event = make(editor.path.clone());
     drop(editor);
     log_info!("편집기 닫힘: {event:?}");
-    EVENTS.with(|events| events.borrow_mut().push(event));
-    unsafe {
-        let _ = PostMessageW(Some(owner), notify, WPARAM(0), LPARAM(0));
-    }
+    announce(owner, notify, event);
 }
 
 /// `WM_APP_EDITOR_LOADED`: takes the decode thread's result.

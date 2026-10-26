@@ -1,7 +1,8 @@
 //! The editor's two windows and their input: a dim window over the whole
 //! monitor that swallows clicks, and the panel above it, which takes the
-//! keyboard focus. Input goes to `EditorState`; what it returns is settled
-//! by the parent module.
+//! keyboard focus. The image panel's input goes to `EditorState` here; the
+//! video panel has its own window procedure in `video` and shares the
+//! helpers below. What either returns is settled by its module.
 
 use std::cell::Cell;
 use std::time::Instant;
@@ -28,7 +29,8 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::{BOOL, PCWSTR, Result, w};
 
 use super::{
-    DISCARD_TIMER, Editor, WM_APP_EDITOR_LOADED, focus, on_loaded, render, settle, with_editor,
+    DISCARD_TIMER, Editor, WM_APP_EDITOR_LOADED, focus, on_loaded, render, settle, video,
+    with_editor,
 };
 
 /// The dim window's opacity (of 255).
@@ -36,7 +38,9 @@ const DIM_ALPHA: u8 = 96;
 /// Not exported by the `windows` crate under WindowsAndMessaging.
 const WM_MOUSELEAVE: u32 = 0x02A3;
 /// `WM_KEYDOWN`'s lParam bit for a key that was already down (auto-repeat).
-const KEY_REPEAT: isize = 1 << 30;
+pub(super) const KEY_REPEAT: isize = 1 << 30;
+/// The image panel's window class.
+pub(super) const IMAGE_CLASS: PCWSTR = w!("SwissWheelEditor");
 
 thread_local! {
     /// A WM_MOUSELEAVE is requested for the current hover.
@@ -86,12 +90,18 @@ pub(super) struct Windows {
 
 impl Windows {
     /// Both windows, still hidden: the dim one over `monitor`, owned by
-    /// `owner` (the app's host window), and the panel at `panel`.
-    pub fn create(owner: HWND, monitor: Rect, panel: Rect) -> Result<Windows> {
+    /// `owner` (the app's host window), and the panel at `panel`, of window
+    /// class `panel_class` handled by `panel_proc`.
+    pub fn create(
+        owner: HWND,
+        monitor: Rect,
+        panel: Rect,
+        panel_class: PCWSTR,
+        panel_proc: WNDPROC,
+    ) -> Result<Windows> {
         unsafe {
             let instance = GetModuleHandleW(None)?;
             let dim_class = w!("SwissWheelEditorDim");
-            let panel_class = w!("SwissWheelEditor");
             // Fails harmlessly when already registered by an earlier panel.
             RegisterClassW(&WNDCLASSW {
                 lpfnWndProc: Some(dim_proc),
@@ -102,7 +112,7 @@ impl Windows {
                 ..Default::default()
             });
             RegisterClassW(&WNDCLASSW {
-                lpfnWndProc: Some(panel_proc),
+                lpfnWndProc: panel_proc,
                 hInstance: instance.into(),
                 lpszClassName: panel_class,
                 hCursor: LoadCursorW(None, IDC_ARROW)?,
@@ -296,14 +306,7 @@ impl Editor {
 
     /// The cursor for a panel point: resize arrows on crop handles.
     fn cursor(&self, x: f32, y: f32) -> PCWSTR {
-        match self.dragging().or_else(|| self.handle(x, y)) {
-            Some(CropHandle::TopLeft | CropHandle::BottomRight) => IDC_SIZENWSE,
-            Some(CropHandle::TopRight | CropHandle::BottomLeft) => IDC_SIZENESW,
-            Some(CropHandle::Left | CropHandle::Right) => IDC_SIZEWE,
-            Some(CropHandle::Top | CropHandle::Bottom) => IDC_SIZENS,
-            Some(CropHandle::Move) => IDC_SIZEALL,
-            None => IDC_ARROW,
-        }
+        handle_cursor(self.dragging().or_else(|| self.handle(x, y)))
     }
 
     /// The discard prompt's timer fired: redraw once it has run out.
@@ -318,14 +321,58 @@ impl Editor {
     }
 }
 
+/// The cursor over a crop handle: resize arrows, or the plain arrow.
+pub(super) fn handle_cursor(handle: Option<CropHandle>) -> PCWSTR {
+    match handle {
+        Some(CropHandle::TopLeft | CropHandle::BottomRight) => IDC_SIZENWSE,
+        Some(CropHandle::TopRight | CropHandle::BottomLeft) => IDC_SIZENESW,
+        Some(CropHandle::Left | CropHandle::Right) => IDC_SIZEWE,
+        Some(CropHandle::Top | CropHandle::Bottom) => IDC_SIZENS,
+        Some(CropHandle::Move) => IDC_SIZEALL,
+        None => IDC_ARROW,
+    }
+}
+
+/// Asks for a WM_MOUSELEAVE for `hwnd` unless one is already requested.
+pub(super) fn track_leave(hwnd: HWND) {
+    if !TRACKING.get() {
+        let mut track = TRACKMOUSEEVENT {
+            cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        TRACKING.set(unsafe { TrackMouseEvent(&mut track) }.is_ok());
+    }
+}
+
+/// WM_MOUSELEAVE arrived: the next move asks again.
+pub(super) fn left() {
+    TRACKING.set(false);
+}
+
+/// Sets the cursor from `pick`, given the cursor's panel point; for
+/// WM_SETCURSOR over the client area.
+pub(super) fn set_cursor(hwnd: HWND, pick: impl FnOnce(f32, f32) -> Option<PCWSTR>) {
+    let mut pt = POINT::default();
+    let cursor = unsafe {
+        let _ = GetCursorPos(&mut pt);
+        let _ = ScreenToClient(hwnd, &mut pt);
+        pick(pt.x as f32, pt.y as f32)
+    };
+    if let Ok(cursor) = unsafe { LoadCursorW(None, cursor.unwrap_or(IDC_ARROW)) } {
+        unsafe { SetCursor(Some(cursor)) };
+    }
+}
+
 /// Client coordinates packed in a mouse message's `lParam`.
-fn client_point(lparam: LPARAM) -> (f32, f32) {
+pub(super) fn client_point(lparam: LPARAM) -> (f32, f32) {
     let x = (lparam.0 & 0xFFFF) as u16 as i16;
     let y = ((lparam.0 >> 16) & 0xFFFF) as u16 as i16;
     (x as f32, y as f32)
 }
 
-unsafe extern "system" fn panel_proc(
+pub(super) unsafe extern "system" fn panel_proc(
     hwnd: HWND,
     msg: u32,
     wparam: WPARAM,
@@ -384,32 +431,16 @@ unsafe extern "system" fn panel_proc(
             None
         }
         WM_MOUSEMOVE => {
-            if !TRACKING.get() {
-                let mut track = TRACKMOUSEEVENT {
-                    cbSize: size_of::<TRACKMOUSEEVENT>() as u32,
-                    dwFlags: TME_LEAVE,
-                    hwndTrack: hwnd,
-                    dwHoverTime: 0,
-                };
-                TRACKING.set(unsafe { TrackMouseEvent(&mut track) }.is_ok());
-            }
+            track_leave(hwnd);
             let (x, y) = client_point(lparam);
             with_editor(|ed| ed.mouse_move(x, y))
         }
         WM_MOUSELEAVE => {
-            TRACKING.set(false);
+            left();
             with_editor(|ed| ed.hover_to(EditorHit::Nothing))
         }
         WM_SETCURSOR if (lparam.0 & 0xFFFF) as u32 == HTCLIENT => {
-            let mut pt = POINT::default();
-            let cursor = unsafe {
-                let _ = GetCursorPos(&mut pt);
-                let _ = ScreenToClient(hwnd, &mut pt);
-                with_editor(|ed| ed.cursor(pt.x as f32, pt.y as f32))
-            };
-            if let Ok(cursor) = unsafe { LoadCursorW(None, cursor.unwrap_or(IDC_ARROW)) } {
-                unsafe { SetCursor(Some(cursor)) };
-            }
+            set_cursor(hwnd, |x, y| with_editor(|ed| ed.cursor(x, y)));
             return LRESULT(1);
         }
         WM_TIMER if wparam.0 == DISCARD_TIMER => with_editor(|ed| ed.tick(now)),
@@ -443,6 +474,7 @@ unsafe extern "system" fn dim_proc(
             if let Some(outcome) = with_editor(|ed| ed.state.click(EditorHit::Nothing, now)) {
                 settle(outcome);
             }
+            video::dim_click(now);
             LRESULT(0)
         }
         // Closing is the panel's business (Esc, or the app quitting).
