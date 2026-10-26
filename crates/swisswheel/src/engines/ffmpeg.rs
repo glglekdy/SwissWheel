@@ -89,7 +89,9 @@ pub fn prepare(
 pub fn probe(tools: &Tools, input: &Path) -> Result<MediaInfo, EngineError> {
     let out = Command::new(&tools.ffprobe)
         .args(["-v", "error", "-show_entries"])
-        .arg("format=duration:stream=codec_type,codec_name")
+        .arg(
+            "format=duration:stream=codec_type,codec_name,width,height,             avg_frame_rate,r_frame_rate,sample_rate:stream_side_data=rotation",
+        )
         .args(["-of", "default=noprint_wrappers=1"])
         .arg(input)
         .stdin(Stdio::null())
@@ -122,6 +124,7 @@ pub fn run(
     for attempt in &plan.attempts {
         let result = run_once(
             tools,
+            &plan.input_args,
             attempt,
             plan.duration_secs,
             input,
@@ -143,8 +146,10 @@ pub fn run(
     Err(last)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_once(
     tools: &Tools,
+    input_args: &[String],
     args: &[String],
     duration: Option<f64>,
     input: &Path,
@@ -154,7 +159,9 @@ fn run_once(
 ) -> Result<(), EngineError> {
     let mut child = Command::new(&tools.ffmpeg)
         .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-y"])
-        .args(["-progress", "pipe:1", "-nostats", "-i"])
+        .args(["-progress", "pipe:1", "-nostats"])
+        .args(input_args)
+        .arg("-i")
         .arg(input)
         .args(args)
         .arg(output)
@@ -375,6 +382,18 @@ pub(crate) mod tests {
     pub(crate) fn pattern(dir: &Path, name: &str, size: &str, secs: u32) -> PathBuf {
         let src = format!("testsrc=duration={secs}:size={size}:rate=10");
         make(dir, name, &["-f", "lavfi", "-i", &src, "-c:v", "libx264"])
+    }
+
+    /// 320×240 at 10 fps for one second, stored with a 90° display rotation
+    /// (as phones write portrait clips): shown 240×320.
+    pub(crate) fn rotated_clip(dir: &Path) -> PathBuf {
+        let plain = pattern(dir, "plain-for-rot.mp4", "320x240", 1);
+        let plain = plain.to_str().unwrap();
+        make(
+            dir,
+            "rot.mp4",
+            &["-display_rotation:v:0", "90", "-i", plain, "-c", "copy"],
+        )
     }
 
     pub(crate) fn probe_out(path: &Path) -> MediaInfo {
@@ -694,6 +713,7 @@ pub(crate) mod tests {
         let clip = make(dir.path(), "clip.mp4", CLIP);
         let plan = MediaPlan {
             output: Format::Mp4,
+            input_args: Vec::new(),
             attempts: vec![
                 ["-c", "copy", "-bsf:v", "no_such_filter", "-f", "mp4"]
                     .map(String::from)
@@ -815,6 +835,45 @@ pub(crate) mod tests {
             "생일 파티.mp3.swisswheel-tmp",
         );
         assert_eq!(codecs(&out).1, some("mp3"));
+    }
+
+    #[test]
+    fn probe_reports_display_size_of_rotated_clip() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = rotated_clip(dir.path());
+        let info = probe_out(&clip);
+        assert_eq!((info.width, info.height), (Some(240), Some(320)));
+        assert_eq!(info.rotation % 180, 90);
+        assert_eq!(info.fps, Some(10.0));
+    }
+
+    #[test]
+    fn input_args_go_before_the_input() {
+        // An input seek of 1.5 s into a 2 s clip leaves about half a second.
+        let dir = tempfile::tempdir().unwrap();
+        let clip = make(dir.path(), "clip.mp4", CLIP);
+        let plan = MediaPlan {
+            output: Format::Mp4,
+            input_args: ["-ss", "1.500"].map(String::from).to_vec(),
+            attempts: vec![
+                ["-c:v", "libx264", "-c:a", "aac", "-f", "mp4"]
+                    .map(String::from)
+                    .to_vec(),
+            ],
+            duration_secs: Some(0.5),
+        };
+        let out = dir.path().join("o.mp4");
+        run(
+            &tools(),
+            &plan,
+            &clip,
+            &out,
+            &|_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let secs = probe_out(&out).duration_secs.unwrap();
+        assert!((secs - 0.5).abs() < 0.15, "{secs}");
     }
 
     #[test]
