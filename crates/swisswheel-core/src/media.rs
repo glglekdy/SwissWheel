@@ -411,9 +411,17 @@ pub fn video_edit_plan(
     })
 }
 
-/// The arguments that save the picture at `t` seconds, with the frame ops applied, as PNG.
+/// How far before the asked time the frame save starts decoding.
+const FRAME_LOOKBACK: f64 = 1.0;
+
+/// The arguments that save the picture shown at `t` seconds, with the frame ops applied,
+/// as PNG. A seek alone would give the first frame at or after `t` (the next one, and none
+/// at all past the last frame's start), so this decodes the second before `t` and keeps
+/// the last frame that starts by then (`-update 1` overwrites the one image).
 pub fn video_frame_plan(t: f64, frame: &[EditOp]) -> MediaPlan {
-    let mut a = strings(&["-map", "0:v:0", "-frames:v", "1"]);
+    let start = (t - FRAME_LOOKBACK).max(0.0);
+    let mut a = strings(&["-map", "0:v:0", "-t"]);
+    a.push(secs(t - start + 0.001));
     let filters = frame_filters(frame);
     if !filters.is_empty() {
         a.extend(["-vf".to_string(), filters.join(",")]);
@@ -421,7 +429,7 @@ pub fn video_frame_plan(t: f64, frame: &[EditOp]) -> MediaPlan {
     a.extend(strings(&["-c:v", "png", "-f", "image2", "-update", "1"]));
     MediaPlan {
         output: Format::Png,
-        input_args: vec!["-ss".into(), secs(t)],
+        input_args: vec!["-ss".into(), secs(start)],
         attempts: vec![a],
         duration_secs: None,
     }
@@ -439,10 +447,14 @@ pub fn scrub_size(display: (u32, u32), longest: u32) -> (u32, u32) {
 /// The arguments that decode one BGRA frame of `size` at `t` seconds to stdout: the part
 /// before `-i` and the part after the input path.
 pub fn scrub_args(t: f64, size: (u32, u32)) -> (Vec<String>, Vec<String>) {
-    let mut after = strings(&["-frames:v", "1", "-vf"]);
+    // As for `video_frame_plan`: the frames of the second before `t`; the last one is shown.
+    let start = (t - FRAME_LOOKBACK).max(0.0);
+    let mut after = strings(&["-t"]);
+    after.push(secs(t - start + 0.001));
+    after.push("-vf".into());
     after.push(format!("scale={}:{}", size.0, size.1));
     after.extend(strings(&["-f", "rawvideo", "-pix_fmt", "bgra", "pipe:1"]));
-    (vec!["-ss".into(), secs(t)], after)
+    (vec!["-ss".into(), secs(start)], after)
 }
 
 /// FFmpeg filters for crops, turns and flips, in order. Crop sizes are floored to even
@@ -1069,11 +1081,13 @@ mod tests {
     fn frame_and_scrub_args() {
         let f = video_frame_plan(12.4, &[EditOp::Rotate(Turn::Ccw)]);
         assert_eq!(f.output, Format::Png);
-        assert_eq!(f.input_args, ["-ss", "12.400"]);
+        assert_eq!(f.input_args, ["-ss", "11.400"]);
         assert!(
-            has(&f.attempts[0], &["-frames:v", "1"])
-                && has(&f.attempts[0], &["-vf", "transpose=2"])
+            has(&f.attempts[0], &["-t", "1.001"]) && has(&f.attempts[0], &["-vf", "transpose=2"])
         );
+        let first = video_frame_plan(0.3, &[]);
+        assert_eq!(first.input_args, ["-ss", "0.000"]);
+        assert!(has(&first.attempts[0], &["-t", "0.301"]));
         assert!(has(
             &f.attempts[0],
             &["-c:v", "png", "-f", "image2", "-update", "1"]
@@ -1081,7 +1095,8 @@ mod tests {
         assert_eq!(scrub_size((1920, 1080), 960), (960, 540));
         assert_eq!(scrub_size((101, 51), 960), (100, 50));
         let (before, after) = scrub_args(1.5, (960, 540));
-        assert_eq!(before, ["-ss", "1.500"]);
+        assert_eq!(before, ["-ss", "0.500"]);
+        assert!(has(&after, &["-t", "1.001"]));
         assert!(has(
             &after,
             &[

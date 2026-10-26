@@ -17,6 +17,8 @@ use crate::engines::ffmpeg::{RunJob, Tools};
 pub(super) const WM_APP_SCRUB: u32 = WM_APP + 52;
 
 pub(super) struct ScrubFrame {
+    /// The time asked for; the panel draws whatever came last, tests check it.
+    #[allow(dead_code)]
     pub t: f64,
     pub size: (u32, u32),
     /// Top-down rows of BGRA pixels.
@@ -101,7 +103,7 @@ impl Drop for Scrubber {
     }
 }
 
-/// The frame at `t` seconds of `input`, scaled to `size`, as BGRA.
+/// The frame shown at `t` seconds of `input`, scaled to `size`, as BGRA.
 pub(super) fn grab(
     tools: &Tools,
     input: &Path,
@@ -126,15 +128,17 @@ pub(super) fn grab(
         job.assign(&child);
     }
     let out = child.wait_with_output().map_err(|e| e.to_string())?;
+    // Every frame of the second before `t`; the last one is the frame shown at `t`.
     let want = size.0 as usize * size.1 as usize * 4;
-    if !out.status.success() || out.stdout.len() != want {
+    let mut bytes = out.stdout;
+    if !out.status.success() || bytes.len() < want || bytes.len() % want != 0 {
         return Err(format!(
-            "{} bytes of {want}: {}",
-            out.stdout.len(),
+            "{} bytes, frames of {want}: {}",
+            bytes.len(),
             String::from_utf8_lossy(&out.stderr).trim()
         ));
     }
-    Ok(out.stdout)
+    Ok(bytes.split_off(bytes.len() - want))
 }
 
 #[cfg(test)]
@@ -154,6 +158,23 @@ mod tests {
         let red = grab(&tools, &clip, 0.2, (32, 32)).unwrap();
         assert!(red[2] > 200 && red[0] < 60, "expected red at 0.2 s");
         assert!(grab(&tools, &dir.path().join("missing.mp4"), 0.0, (32, 32)).is_err());
+    }
+
+    #[test]
+    fn grabs_the_frame_shown_at_the_time_even_at_the_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let clip = color_steps(dir.path(), "c.mp4");
+        let tools = tools();
+        let at = |t| grab(&tools, &clip, t, (16, 16)).unwrap();
+        let shown = at(0.95);
+        assert_eq!(shown.len(), 16 * 16 * 4);
+        assert!(shown[2] > 200 && shown[0] < 60, "0.95 s still shows red");
+        let end = at(2.0);
+        assert_eq!(end.len(), 16 * 16 * 4);
+        assert!(
+            end[0] > 200 && end[2] < 60,
+            "the end shows the last (blue) frame"
+        );
     }
 
     #[test]

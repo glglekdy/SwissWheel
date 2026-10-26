@@ -321,11 +321,12 @@ impl VideoState {
             }
             VideoCommand::SaveFrame => {
                 let ops = session.frame_ops();
+                // No frame starts at the very end; take the last one.
+                let info = session.info();
+                let last = info.duration - 1.0 / info.fps.unwrap_or(DEFAULT_FPS);
+                let t = self.position.min(last).max(0.0);
                 self.pause();
-                return VideoOutcome::SaveFrame {
-                    t: self.position,
-                    ops,
-                };
+                return VideoOutcome::SaveFrame { t, ops };
             }
             VideoCommand::Undo | VideoCommand::Redo => {
                 let before = (session.speed(), session.audio());
@@ -729,6 +730,20 @@ mod tests {
         ));
         assert_eq!(s.command(VideoCommand::Escape, now), VideoOutcome::Redraw);
         assert_eq!(s.command(VideoCommand::Escape, now), VideoOutcome::Close);
+    }
+
+    #[test]
+    fn a_frame_at_the_very_end_is_the_last_frame() {
+        // No frame starts at the clip's end (End, or after playing through):
+        // FFmpeg would write nothing, so the last frame (25 fps) is taken.
+        let now = Instant::now();
+        let mut s = ready(10.0);
+        s.command(VideoCommand::End, now);
+        assert_eq!(s.position(), 10.0);
+        match s.command(VideoCommand::SaveFrame, now) {
+            VideoOutcome::SaveFrame { t, .. } => assert!((t - 9.96).abs() < 1e-9, "{t}"),
+            other => panic!("{other:?}"),
+        }
     }
 
     #[test]

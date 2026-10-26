@@ -1098,7 +1098,8 @@ impl AppState {
 
     /// Debug builds only. `SWISSWHEEL_PREVIEW` = `panel`, `panel-left`,
     /// `progress`, `notices`, `menu`, `menu-settings`, `menu-tools`, `menu-capture`,
-    /// `menu-notifications`, `menu-general`, `menu-download`, or `editor` shows that UI at startup
+    /// `menu-notifications`, `menu-general`, `menu-download`, `editor`, `video-editor`,
+    /// `video-editor-portrait` or `video-editor-fallback` shows that UI at startup
     /// without a drag or key press, so the drawing can be checked by eye.
     #[cfg(debug_assertions)]
     fn preview(&mut self, what: &str) {
@@ -1294,6 +1295,66 @@ impl AppState {
                 match image.save(&path) {
                     Ok(()) => self.request_editor(vec![path]),
                     Err(e) => log_error!("편집기 미리보기 이미지를 쓸 수 없습니다: {e}"),
+                }
+            }
+            // Ten seconds of test pattern with a tone; `video-editor-portrait`
+            // stores it sideways with a 90° display rotation, as phones do;
+            // `video-editor-fallback` encodes 4:4:4, which Windows can't play.
+            "video-editor" | "video-editor-portrait" | "video-editor-fallback" => {
+                let Some(tools) = ffmpeg_tools::locate() else {
+                    log_error!("영상 편집기 미리보기: FFmpeg가 없습니다");
+                    return;
+                };
+                let dir = std::env::temp_dir();
+                let (plain, pixels) = if what == "video-editor-fallback" {
+                    (dir.join("swisswheel-video-preview-444.mp4"), "yuv444p")
+                } else {
+                    (dir.join("swisswheel-video-preview.mp4"), "yuv420p")
+                };
+                let mut args: Vec<std::ffi::OsString> = [
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "testsrc2=duration=10:size=1280x720:rate=30",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=10",
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    pixels,
+                    "-c:a",
+                    "aac",
+                    "-shortest",
+                ]
+                .map(Into::into)
+                .to_vec();
+                args.push(plain.clone().into());
+                let mut path = plain.clone();
+                let mut ok = std::process::Command::new(&tools.ffmpeg)
+                    .args(&args)
+                    .status()
+                    .is_ok_and(|s| s.success());
+                if ok && what == "video-editor-portrait" {
+                    path = dir.join("swisswheel-video-preview-portrait.mp4");
+                    ok = std::process::Command::new(&tools.ffmpeg)
+                        .args(["-hide_banner", "-loglevel", "error", "-y"])
+                        .args(["-display_rotation:v:0", "90", "-i"])
+                        .arg(&plain)
+                        .args(["-c", "copy"])
+                        .arg(&path)
+                        .status()
+                        .is_ok_and(|s| s.success());
+                }
+                if ok {
+                    self.request_editor(vec![path]);
+                } else {
+                    log_error!("영상 편집기 미리보기 영상을 만들 수 없습니다");
                 }
             }
             other => log_error!("SWISSWHEEL_PREVIEW: 알 수 없는 값 {other}"),
@@ -2118,8 +2179,25 @@ impl AppState {
             return;
         }
         let accent = self.config.appearance.accent;
-        // An unreadable image comes back as an event with its own card.
-        if let Err(e) = editor::open(path, self.hwnd, WM_APP_EDITOR, accent) {
+        let video = swisswheel_core::format::Format::from_path(&path)
+            .is_some_and(|f| f.kind() == swisswheel_core::format::MediaKind::Video);
+        // An unreadable file comes back as an event with its own card.
+        let opened = if video {
+            let Some(tools) = ffmpeg_tools::locate() else {
+                let name = path.file_name().map_or_else(
+                    || path.display().to_string(),
+                    |n| n.to_string_lossy().into_owned(),
+                );
+                log_info!("영상 편집기: FFmpeg가 없어 열지 않습니다");
+                let message = crate::engines::EngineError::MissingFfmpeg.user_message(&name);
+                self.notify(warning_notice(editor_text::TITLE, &message));
+                return;
+            };
+            editor::open_video(path, self.hwnd, WM_APP_EDITOR, accent, tools)
+        } else {
+            editor::open(path, self.hwnd, WM_APP_EDITOR, accent)
+        };
+        if let Err(e) = opened {
             log_error!("편집기를 열 수 없습니다: {e}");
             self.notify(warning_notice(editor_text::TITLE, editor_text::OPEN_FAILED));
         }

@@ -1131,6 +1131,41 @@ pub(crate) mod tests {
         assert_eq!((info.width, info.height), (Some(240), Some(100)));
     }
 
+    /// Saves the frame shown at `t` of `clip` as a PNG and returns its first pixel.
+    fn frame_pixel(clip: &Path, t: f64) -> [u8; 3] {
+        let plan = media::video_frame_plan(t, &[]);
+        let out = clip.with_file_name(format!("frame-{t}.png"));
+        run(
+            &tools(),
+            &plan,
+            clip,
+            &out,
+            &|_| {},
+            &AtomicBool::new(false),
+        )
+        .unwrap();
+        let png = ::image::open(&out).unwrap().into_rgb8();
+        png.get_pixel(0, 0).0
+    }
+
+    #[test]
+    fn frame_is_the_one_shown_at_the_time() {
+        // color_steps: red frames at 0.0..0.9 s, blue from 1.0 s, 10 fps.
+        let dir = tempfile::tempdir().unwrap();
+        let clip = color_steps(dir.path(), "steps.mp4");
+        let red = |p: [u8; 3]| p[0] > 200 && p[2] < 60;
+        let blue = |p: [u8; 3]| p[2] > 200 && p[0] < 60;
+        assert!(red(frame_pixel(&clip, 0.0)));
+        assert!(
+            red(frame_pixel(&clip, 0.95)),
+            "0.95 s still shows the 0.9 s frame"
+        );
+        assert!(blue(frame_pixel(&clip, 1.0)));
+        // The very end and just before it: the last frame, not nothing.
+        assert!(blue(frame_pixel(&clip, 2.0)));
+        assert!(blue(frame_pixel(&clip, 1.967)));
+    }
+
     #[test]
     fn frame_png_has_the_edited_size() {
         let dir = tempfile::tempdir().unwrap();

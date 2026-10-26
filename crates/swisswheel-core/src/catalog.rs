@@ -157,7 +157,7 @@ pub fn items_for(wheel: WheelKind, inputs: &[InputItem]) -> Vec<Operation> {
     if wheel == WheelKind::Tools && inputs.len() >= 2 {
         items.push(Operation::Tool(Tool::Bundle));
     }
-    // Editing is for exactly one still image, last in the Tools wheel.
+    // Editing is for exactly one still image or one video, last in the Tools wheel.
     if wheel == WheelKind::Tools
         && let [
             InputItem::File {
@@ -165,7 +165,7 @@ pub fn items_for(wheel: WheelKind, inputs: &[InputItem]) -> Vec<Operation> {
                 animated_gif: false,
             },
         ] = inputs
-        && f.kind() == MediaKind::Image
+        && matches!(f.kind(), MediaKind::Image | MediaKind::Video)
     {
         items.push(Operation::Tool(Tool::Edit));
     }
@@ -287,6 +287,22 @@ mod tests {
     }
 
     #[test]
+    fn edit_for_one_video_too() {
+        use Format::*;
+        let tools = |inputs: &[InputItem]| items_for(WheelKind::Tools, inputs);
+        for f in [Mp4, Mkv, Webm, Mov, Avi, Wmv] {
+            assert_eq!(
+                tools(&[file(f)]).last(),
+                Some(&Operation::Tool(Tool::Edit)),
+                "{f:?}"
+            );
+        }
+        assert!(!tools(&[file(Mp4), file(Mov)]).contains(&Operation::Tool(Tool::Edit)));
+        assert!(!tools(&[file(Mp3)]).contains(&Operation::Tool(Tool::Edit)));
+        assert!(!tools(&[file(Mp4), file(Png)]).contains(&Operation::Tool(Tool::Edit)));
+    }
+
+    #[test]
     fn edit_only_for_one_still_image() {
         use Format::*;
         let tools = |inputs: &[InputItem]| items_for(WheelKind::Tools, inputs);
@@ -304,7 +320,6 @@ mod tests {
             animated_gif: true,
         };
         assert!(tools(&[animated]).is_empty());
-        assert!(!tools(&[file(Mp4)]).contains(&Operation::Tool(Tool::Edit)));
         assert!(tools(&[InputItem::Folder]).is_empty());
         assert_eq!(Tool::Edit.label(), "편집");
         assert_eq!(Tool::Edit.suffix(), Some("edited"));
@@ -327,9 +342,14 @@ mod tests {
         );
         assert_eq!(
             items_for(WheelKind::Tools, &[file(Mp4)]),
-            [Tool::CompressVideo, Tool::ExtractAudio, Tool::Mute]
-                .map(Operation::Tool)
-                .to_vec()
+            [
+                Tool::CompressVideo,
+                Tool::ExtractAudio,
+                Tool::Mute,
+                Tool::Edit
+            ]
+            .map(Operation::Tool)
+            .to_vec()
         );
         assert!(items_for(WheelKind::Tools, &[file(Flac)]).is_empty());
     }
