@@ -28,6 +28,7 @@ Quit from the tray icon's right-click menu. Settings can be changed in the menu'
 - Progress: while jobs run, a small card above the tray lists each file with a progress bar, and a ring around the tray icon fills up. When a job finishes, its card turns into the result card. Either can be turned off in the settings panel or `config.toml` (`[progress] window`, `tray_ring`). Quitting cancels running video work and cleans up.
 - Desktop menu and settings panel: wheel keys (press to bind), the shrink ratio and video compression strength used when you drop on the tool itself, start with Windows, JPG/WebP quality, MP3 bitrate, and the progress displays, accent color, and do not disturb, all applied live. The UI uses a liquid-glass look (transparency can be turned off in Windows) with the embedded Pretendard font.
 - Image editor: drop one still image on **✎편집** (last tile of the tools wheel) and a floating panel opens mid-screen with the rest dimmed. Crop (free or fixed ratio), rotate, flip, grayscale, and strip location/camera info, with undo/redo; saves `photo (edited).jpg` next to the original. See "Image editor" below.
+- Video editor: drop one video on the same **✎편집** tile for a panel that plays it with sound. Cut out any number of parts, crop an area, rotate, flip, change speed, mute or even out the sound, reverse a short clip, and save a still as PNG; saves `clip (edited).mp4` next to the original. See "Video editor" below.
 
 Video and audio need FFmpeg: open **다운로드** in the desktop menu. Its panel shows the FFmpeg in use and checks for a newer one; **설치** fetches the latest essentials build from [GyanD/codexffmpeg](https://github.com/GyanD/codexffmpeg/releases) and sets it up (checked against GitHub's SHA-256; it goes in an `ffmpeg` folder next to `swisswheel.exe`, or `%LOCALAPPDATA%\SwissWheel\ffmpeg` when that folder can't be written), **업데이트** replaces it with a newer release, and **제거** deletes the copy SwissWheel put there. An FFmpeg you installed yourself on `PATH` is shown but never changed; **전용 설치** gives SwissWheel its own copy, which it then prefers. You can also put `ffmpeg.exe` and `ffprobe.exe` in either folder yourself, or have them on `PATH`.
 
@@ -35,7 +36,7 @@ Shown but not yet implemented (they say "다음 버전에서 지원 예정입니
 
 ## Image editor
 
-1. Drag one still image (JPG, PNG, WebP, BMP, TIFF, GIF, ICO; not an animated GIF) and press **Space**. **✎편집** is the last tile of the tools wheel; it doesn't show for several files, folders, video, or audio.
+1. Drag one still image (JPG, PNG, WebP, BMP, TIFF, GIF, ICO; not an animated GIF) and press **Space**. **✎편집** is the last tile of the tools wheel; it doesn't show for several files, folders, or audio (one video opens the video editor below).
 2. Drop on it. The panel opens centered on the monitor under the cursor and takes keyboard focus; clicking outside doesn't close it. A big photo shows **불러오는 중** while it loads.
 3. Edit with the buttons or keys, watching the preview:
 
@@ -53,6 +54,31 @@ Shown but not yet implemented (they say "다음 버전에서 지원 예정입니
 4. Saving closes the panel and runs like any other job: the result is `photo (edited).jpg` next to the original (same format; JPG quality 95, WebP 92, other formats lossless). With only **I** on, the file is copied without re-compressing and without its info, as `photo (no info).jpg` (a JPG keeps its orientation and color profile); any other edit re-saves the picture and drops the info too. Phone portrait photos stay upright.
 
 Only one panel can be open at a time. While it is open, double-tapping Ctrl does nothing, and **재시작** and **업데이트** refuse with "편집기를 닫은 뒤 다시 시도하세요". An update that finishes downloading in the background while the panel is open waits to install until you close it. Quitting SwissWheel discards unsaved edits.
+
+## Video editor
+
+1. Drag one video (MP4, MKV, WebM, MOV, AVI, WMV) and press **Space**; drop on **✎편집**, the last tile of the tools wheel. It needs FFmpeg: without it, a card says "FFmpeg를 찾을 수 없습니다" and nothing opens.
+2. The panel looks like the image editor's, with a timeline row under the picture. It plays with sound through Windows; a file Windows can't play (an unusual codec) opens anyway, showing single frames from FFmpeg instead ("재생할 수 없는 형식이라 장면만 넘겨봅니다").
+3. Edit with the buttons or keys:
+
+   | Key | Does |
+   |---|---|
+   | **Space** | Play / pause; at the end, starts over from the first kept part |
+   | **←** / **→** | One frame back / forward (hold to repeat) |
+   | **Shift+←** / **Shift+→** | One second back / forward |
+   | **Home** / **End** | Start / end |
+   | **S** | Split at the playhead |
+   | **D** | Remove the part under the playhead, or restore a removed one (the last kept part can't go) |
+   | **C** | Area crop, as in the image editor (sizes come out even) |
+   | **R** / **Shift+R**, **H**, **V** | Rotate, flip |
+   | **[** / **]** | Slower / faster: 0.5×, 1×, 1.5×, 2× |
+   | **M** | Sound: as is → muted → evened out (applied when saving) |
+   | **B** | Reverse on/off; only for short results (about 10 seconds at 1080p) |
+   | **F** | Save the frame on screen, with the crop, rotation and flips, as `clip (frame 0m12.40s).png`; the panel stays open |
+   | **Ctrl+Z** / **Ctrl+Y**, **Enter**, **Esc** | Undo / redo, save, cancel (as in the image editor) |
+
+   Click or drag on the timeline to move; removed parts are hatched and skipped while playing.
+4. Saving closes the panel and re-encodes the kept parts exactly where you cut them: `clip (edited).mp4` next to the original, in the same container with the same codecs as a conversion (H.264/AAC, VP9/Opus for WebM, MPEG-4/MP3 for AVI). A WMV comes out as MP4. Phone portrait videos stay upright.
 
 ## Updates
 
